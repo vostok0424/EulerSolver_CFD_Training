@@ -41,7 +41,7 @@
 //       using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
 //       std::string name() const override { return "myrk2"; }
 //
-//       void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const override {
+//       void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override {
 //           const size_t N = U.size();
 //           std::vector<State> U1(U), R(N);
 //
@@ -81,14 +81,14 @@ template<typename State>
 std::string TI_EulerT<State>::name() const { return "euler"; }
 
 template<typename State>
+void TI_EulerT<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
+    TimeIntegratorT<State>::ensureSize(R_, U.size());
 
-void TI_EulerT<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) const {
-    std::vector<State> R(U.size());
     // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R);
+    rhs(U, R_);
     for (size_t i = 0; i < U.size(); ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] += dt * R[i][k];
+            U[i][k] += dt * R_[i][k];
         }
     }
 }
@@ -103,24 +103,28 @@ template<typename State>
 std::string TI_RK2T<State>::name() const { return "rk2"; }
 
 template<typename State>
-
-void TI_RK2T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) const {
+void TI_RK2T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
     const size_t N = U.size();
-    std::vector<State> U1(U), R(N);
+    TimeIntegratorT<State>::ensureSize(U1_, N);
+    TimeIntegratorT<State>::ensureSize(R_, N);
+
+    for (size_t i = 0; i < N; ++i) {
+        U1_[i] = U[i];
+    }
 
     // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R);
+    rhs(U, R_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U1[i][k] = U[i][k] + dt * R[i][k];
+            U1_[i][k] = U[i][k] + dt * R_[i][k];
         }
     }
 
-    // Stage RHS may update U1 ghosts in-place.
-    rhs(U1, R);
+    // Stage RHS may update U1_ ghosts in-place.
+    rhs(U1_, R_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] = 0.5 * U[i][k] + 0.5 * (U1[i][k] + dt * R[i][k]);
+            U[i][k] = 0.5 * U[i][k] + 0.5 * (U1_[i][k] + dt * R_[i][k]);
         }
     }
 }
@@ -134,32 +138,38 @@ template<typename State>
 std::string TI_SSPRK3T<State>::name() const { return "ssprk3"; }
 
 template<typename State>
-
-void TI_SSPRK3T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) const {
+void TI_SSPRK3T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
     const size_t N = U.size();
-    std::vector<State> U1(U), U2(U), R(N);
+    TimeIntegratorT<State>::ensureSize(U1_, N);
+    TimeIntegratorT<State>::ensureSize(U2_, N);
+    TimeIntegratorT<State>::ensureSize(R_, N);
+
+    for (size_t i = 0; i < N; ++i) {
+        U1_[i] = U[i];
+        U2_[i] = U[i];
+    }
 
     // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R);
+    rhs(U, R_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U1[i][k] = U[i][k] + dt * R[i][k];
+            U1_[i][k] = U[i][k] + dt * R_[i][k];
         }
     }
 
-    // Stage RHS may update U1 ghosts in-place.
-    rhs(U1, R);
+    // Stage RHS may update U1_ ghosts in-place.
+    rhs(U1_, R_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U2[i][k] = 0.75 * U[i][k] + 0.25 * (U1[i][k] + dt * R[i][k]);
+            U2_[i][k] = 0.75 * U[i][k] + 0.25 * (U1_[i][k] + dt * R_[i][k]);
         }
     }
 
-    // Stage RHS may update U2 ghosts in-place.
-    rhs(U2, R);
+    // Stage RHS may update U2_ ghosts in-place.
+    rhs(U2_, R_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] = (1.0 / 3.0) * U[i][k] + (2.0 / 3.0) * (U2[i][k] + dt * R[i][k]);
+            U[i][k] = (1.0 / 3.0) * U[i][k] + (2.0 / 3.0) * (U2_[i][k] + dt * R_[i][k]);
         }
     }
 }
@@ -175,41 +185,50 @@ template<typename State>
 std::string TI_RK4T<State>::name() const { return "rk4"; }
 
 template<typename State>
-
-void TI_RK4T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) const {
+void TI_RK4T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
     const size_t N = U.size();
-    std::vector<State> U1(U), U2(U), U3(U);
-    std::vector<State> k1(N), k2(N), k3(N), k4(N);
+    TimeIntegratorT<State>::ensureSize(U0_, N);
+    TimeIntegratorT<State>::ensureSize(U1_, N);
+    TimeIntegratorT<State>::ensureSize(U2_, N);
+    TimeIntegratorT<State>::ensureSize(U3_, N);
+    TimeIntegratorT<State>::ensureSize(k1_, N);
+    TimeIntegratorT<State>::ensureSize(k2_, N);
+    TimeIntegratorT<State>::ensureSize(k3_, N);
+    TimeIntegratorT<State>::ensureSize(k4_, N);
+
+    for (size_t i = 0; i < N; ++i) {
+        U0_[i] = U[i];
+    }
 
     // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, k1);
+    rhs(U, k1_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U1[i][k] = U[i][k] + 0.5 * dt * k1[i][k];
+            U1_[i][k] = U0_[i][k] + 0.5 * dt * k1_[i][k];
         }
     }
 
-    // Stage RHS may update U1 ghosts in-place.
-    rhs(U1, k2);
+    // Stage RHS may update U1_ ghosts in-place.
+    rhs(U1_, k2_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U2[i][k] = U[i][k] + 0.5 * dt * k2[i][k];
+            U2_[i][k] = U0_[i][k] + 0.5 * dt * k2_[i][k];
         }
     }
 
-    // Stage RHS may update U2 ghosts in-place.
-    rhs(U2, k3);
+    // Stage RHS may update U2_ ghosts in-place.
+    rhs(U2_, k3_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U3[i][k] = U[i][k] + dt * k3[i][k];
+            U3_[i][k] = U0_[i][k] + dt * k3_[i][k];
         }
     }
 
-    // Stage RHS may update U3 ghosts in-place.
-    rhs(U3, k4);
+    // Stage RHS may update U3_ ghosts in-place.
+    rhs(U3_, k4_);
     for (size_t i = 0; i < N; ++i) {
         for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] += dt * (k1[i][k] + 2.0 * k2[i][k] + 2.0 * k3[i][k] + k4[i][k]) / 6.0;
+            U[i][k] = U0_[i][k] + dt * (k1_[i][k] + 2.0 * k2_[i][k] + 2.0 * k3_[i][k] + k4_[i][k]) / 6.0;
         }
     }
 }

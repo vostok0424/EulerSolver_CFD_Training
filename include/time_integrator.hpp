@@ -47,7 +47,13 @@ public:
 
     virtual ~TimeIntegratorT() = default;
     virtual std::string name() const = 0;
-    virtual void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const = 0;
+    virtual void step(std::vector<State>& U, double dt, const RHSFunc& rhs) = 0;
+
+protected:
+    // Ensure a workspace vector has the same size as U.
+    static void ensureSize(std::vector<State>& buf, size_t n) {
+        if (buf.size() != n) buf.resize(n);
+    }
 };
 
 // ------------------------------------------------------------
@@ -61,7 +67,10 @@ public:
     using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const override;
+    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
+
+private:
+    std::vector<State> R_;
 };
 
 // ------------------------------------------------------------
@@ -74,7 +83,11 @@ public:
     using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const override;
+    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
+
+private:
+    std::vector<State> U1_;
+    std::vector<State> R_;
 };
 
 
@@ -88,7 +101,12 @@ public:
     using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const override;
+    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
+
+private:
+    std::vector<State> U1_;
+    std::vector<State> U2_;
+    std::vector<State> R_;
 };
 
 // ------------------------------------------------------------
@@ -101,7 +119,17 @@ public:
     using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) const override;
+    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
+
+private:
+    std::vector<State> U0_;
+    std::vector<State> U1_;
+    std::vector<State> U2_;
+    std::vector<State> U3_;
+    std::vector<State> k1_;
+    std::vector<State> k2_;
+    std::vector<State> k3_;
+    std::vector<State> k4_;
 };
 
 // ------------------------------------------------------------
