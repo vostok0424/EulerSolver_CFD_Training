@@ -51,6 +51,28 @@ struct PrimD {
 template<int Dim>
 using ConsD = std::array<double, Dim+2>;
 
+// FlowVars1 / FlowVars2
+// --------------------
+// Cached primitive and thermodynamic quantities derived from conservative states.
+// These are intended to reduce repeated conservative -> primitive conversion and
+// repeated recomputation of pressure / sound speed / total enthalpy in hot paths.
+struct FlowVars1 {
+    double rho{};
+    double u{};
+    double p{};
+    double a{};
+    double H{};
+};
+
+struct FlowVars2 {
+    double rho{};
+    double u{};
+    double v{};
+    double p{};
+    double a{};
+    double H{};
+};
+
 // StateStatus
 // -----------
 // Classification of state validity checks.
@@ -119,6 +141,11 @@ struct EosIdealGas {
     // Ideal-gas speed of sound: a = sqrt(gamma * p / rho).
     static double soundSpeed(const Prim& W, double gamma);
 
+    // Build cached primitive / thermodynamic quantities from a conservative state.
+    // These helpers are intended for hot paths such as numerical fluxes and CFL scans.
+    static FlowVars1 evalFlowVars(const ConsD<1>& U, double gamma);
+    static FlowVars2 evalFlowVars(const ConsD<2>& U, double gamma);
+
     // Physical Euler flux in the requested direction.
     // dir = 0..Dim-1 selects x/y/... direction.
     // Returns F(U) with the same layout as U.
@@ -129,6 +156,13 @@ using Prim1 = PrimD<1>;
 using Prim2 = PrimD<2>;
 using Vec3  = ConsD<1>;
 using Vec4  = ConsD<2>;
+
+// Cached primitive / thermodynamic evaluation helpers.
+FlowVars1 evalFlowVars(const Vec3& U, double gamma);
+FlowVars2 evalFlowVars(const Vec4& U, double gamma);
+
+Vec3 physFluxFromFlowVars(const Vec3& U, const FlowVars1& W, int dir);
+Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir);
 
 // Fast finite checks on conservative states.
 bool isFiniteState(const Vec3& U);

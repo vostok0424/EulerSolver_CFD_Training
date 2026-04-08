@@ -103,9 +103,39 @@ EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
     return U;
 }
 
+
 template<int Dim>
 double EosIdealGas<Dim>::soundSpeed(const Prim& W, double gamma) {
     return std::sqrt(std::max(0.0, gamma * W.p / W.rho));
+}
+
+template<>
+FlowVars1 EosIdealGas<1>::evalFlowVars(const ConsD<1>& U, double gamma) {
+    FlowVars1 W{};
+    W.rho = U[0];
+    W.u = U[1] / W.rho;
+
+    const double kinetic = 0.5 * W.rho * W.u * W.u;
+    const double eInt = U[2] - kinetic;
+    W.p = (gamma - 1.0) * eInt;
+    W.a = std::sqrt(std::max(0.0, gamma * W.p / W.rho));
+    W.H = (U[2] + W.p) / W.rho;
+    return W;
+}
+
+template<>
+FlowVars2 EosIdealGas<2>::evalFlowVars(const ConsD<2>& U, double gamma) {
+    FlowVars2 W{};
+    W.rho = U[0];
+    W.u = U[1] / W.rho;
+    W.v = U[2] / W.rho;
+
+    const double kinetic = 0.5 * W.rho * (W.u * W.u + W.v * W.v);
+    const double eInt = U[3] - kinetic;
+    W.p = (gamma - 1.0) * eInt;
+    W.a = std::sqrt(std::max(0.0, gamma * W.p / W.rho));
+    W.H = (U[3] + W.p) / W.rho;
+    return W;
 }
 
 template<int Dim>
@@ -289,6 +319,41 @@ bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
     clampPrimitive(W, limits);
     U = EosIdealGas<2>::primToCons(W, gamma);
     return checkConservative(U, gamma, limits).ok;
+}
+
+FlowVars1 evalFlowVars(const Vec3& U, double gamma) {
+    return EosIdealGas<1>::evalFlowVars(U, gamma);
+}
+
+FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
+    return EosIdealGas<2>::evalFlowVars(U, gamma);
+}
+
+Vec3 physFluxFromFlowVars(const Vec3& U, const FlowVars1& W, int dir) {
+    (void)dir;
+    Vec3 F{};
+    F[0] = U[1];
+    F[1] = U[1] * W.u + W.p;
+    F[2] = (U[2] + W.p) * W.u;
+    return F;
+}
+
+Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir) {
+    Vec4 F{};
+    const double un = (dir == 0) ? W.u : W.v;
+
+    F[0] = U[1 + dir];
+
+    if (dir == 0) {
+        F[1] = U[1] * un + W.p;
+        F[2] = U[2] * un;
+    } else {
+        F[1] = U[1] * un;
+        F[2] = U[2] * un + W.p;
+    }
+
+    F[3] = (U[3] + W.p) * un;
+    return F;
 }
 
 // Explicit template instantiations for the dimensions used in this solver.

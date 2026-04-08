@@ -160,13 +160,19 @@ std::string FluxRusanov<Dim>::name() const { return "rusanov"; }
 template<int Dim>
 typename FluxRusanov<Dim>::Cons
 FluxRusanov<Dim>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const Prim WL = EosIdealGas<Dim>::consToPrim(UL, gamma);
-    const Prim WR = EosIdealGas<Dim>::consToPrim(UR, gamma);
-    const double aL = EosIdealGas<Dim>::soundSpeed(WL, gamma);
-    const double aR = EosIdealGas<Dim>::soundSpeed(WR, gamma);
-    const double smax = std::max(std::abs(WL.u[dir]) + aL, std::abs(WR.u[dir]) + aR);
-    const Cons FL = EosIdealGas<Dim>::physFlux(UL, dir, gamma);
-    const Cons FR = EosIdealGas<Dim>::physFlux(UR, dir, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
+    double unL, unR;
+    if constexpr (Dim == 1) {
+        unL = WL.u;
+        unR = WR.u;
+    } else {
+        unL = (dir == 0) ? WL.u : WL.v;
+        unR = (dir == 0) ? WR.u : WR.v;
+    }
+    const double smax = std::max(std::abs(unL) + WL.a, std::abs(unR) + WR.a);
+    const Cons FL = physFluxFromFlowVars(UL, WL, dir);
+    const Cons FR = physFluxFromFlowVars(UR, WR, dir);
 
     Cons F{};
     for (int k = 0; k < Dim + 2; ++k)
@@ -204,16 +210,16 @@ template class FluxRusanov<2>;
 // --------------------
 ConsD<1> FluxHLLC<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     (void)dir;
-    const auto WL = EosIdealGas<1>::consToPrim(UL, gamma);
-    const auto WR = EosIdealGas<1>::consToPrim(UR, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
 
-    const double aL = EosIdealGas<1>::soundSpeed(WL, gamma);
-    const double aR = EosIdealGas<1>::soundSpeed(WR, gamma);
-    const double SL = std::min(WL.u[0] - aL, WR.u[0] - aR);
-    const double SR = std::max(WL.u[0] + aL, WR.u[0] + aR);
+    const double aL = WL.a;
+    const double aR = WR.a;
+    const double SL = std::min(WL.u - aL, WR.u - aR);
+    const double SR = std::max(WL.u + aL, WR.u + aR);
 
-    const Cons FL = EosIdealGas<1>::physFlux(UL, 0, gamma);
-    const Cons FR = EosIdealGas<1>::physFlux(UR, 0, gamma);
+    const Cons FL = physFluxFromFlowVars(UL, WL, 0);
+    const Cons FR = physFluxFromFlowVars(UR, WR, 0);
 
     // Wave-speed selection (three regions):
     //   SL>0 -> left flux, SR<0 -> right flux, otherwise compute star-region flux.
@@ -221,16 +227,16 @@ ConsD<1> FluxHLLC<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     if (SR <= 0.0) return FR;
 
     const double rhoL = WL.rho, rhoR = WR.rho;
-    const double uL = WL.u[0], uR = WR.u[0];
+    const double uL = WL.u, uR = WR.u;
     const double pL = WL.p,    pR = WR.p;
 
     const double num = pR - pL + rhoL * uL * (SL - uL) - rhoR * uR * (SR - uR);
     const double den = rhoL * (SL - uL) - rhoR * (SR - uR);
     const double SM  = (std::abs(den) < 1e-14) ? 0.0 : num / den;
 
-    auto star = [&](const Cons& U, const auto& W, double S, double Sstar) -> Cons {
+    auto star = [&](const Cons& U, const FlowVars1& W, double S, double Sstar) -> Cons {
         const double rho = W.rho;
-        const double un  = W.u[0];
+        const double un  = W.u;
         const double p   = W.p;
         const double E   = U[2];
 
@@ -269,20 +275,20 @@ ConsD<1> FluxHLLC<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 // FluxHLLC<2>
 // --------------------
 ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const Prim WL = EosIdealGas<2>::consToPrim(UL, gamma);
-    const Prim WR = EosIdealGas<2>::consToPrim(UR, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
 
-    const double aL = EosIdealGas<2>::soundSpeed(WL, gamma);
-    const double aR = EosIdealGas<2>::soundSpeed(WR, gamma);
+    const double aL = WL.a;
+    const double aR = WR.a;
 
-    const double unL = WL.u[dir];
-    const double unR = WR.u[dir];
+    const double unL = (dir == 0) ? WL.u : WL.v;
+    const double unR = (dir == 0) ? WR.u : WR.v;
 
     const double SL = std::min(unL - aL, unR - aR);
     const double SR = std::max(unL + aL, unR + aR);
 
-    const Cons FL = EosIdealGas<2>::physFlux(UL, dir, gamma);
-    const Cons FR = EosIdealGas<2>::physFlux(UR, dir, gamma);
+    const Cons FL = physFluxFromFlowVars(UL, WL, dir);
+    const Cons FR = physFluxFromFlowVars(UR, WR, dir);
 
     if (SL >= 0.0) return FL;
     if (SR <= 0.0) return FR;
@@ -294,9 +300,10 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     const double den = rhoL * (SL - unL) - rhoR * (SR - unR);
     const double SM  = (std::abs(den) < 1e-14) ? 0.0 : num / den;
 
-    auto star = [&](const Cons& U, const Prim& W, double S, double Sstar) -> Cons {
+    auto star = [&](const Cons& U, const FlowVars2& W, double S, double Sstar) -> Cons {
         const double rho = W.rho;
-        const double un  = W.u[dir];
+        const double un  = (dir == 0) ? W.u : W.v;
+        const double ut  = (dir == 0) ? W.v : W.u;
         const double p   = W.p;
         const double E   = U[3];
 
@@ -306,9 +313,12 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 
         Cons Us{};
         Us[0] = rho_star;
-        for (int d = 0; d < 2; ++d) {
-            if (d == dir) Us[1 + d] = rho_star * Sstar;
-            else          Us[1 + d] = rho_star * W.u[d];
+        if (dir == 0) {
+            Us[1] = rho_star * Sstar;
+            Us[2] = rho_star * ut;
+        } else {
+            Us[1] = rho_star * ut;
+            Us[2] = rho_star * Sstar;
         }
         Us[3] = E_star;
         return Us;
@@ -375,22 +385,22 @@ namespace ausm_detail {
 // --------------------
 ConsD<1> FluxAUSM<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     (void)dir;
-    const Prim WL = EosIdealGas<1>::consToPrim(UL, gamma);
-    const Prim WR = EosIdealGas<1>::consToPrim(UR, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
 
-    const double aL = EosIdealGas<1>::soundSpeed(WL, gamma);
-    const double aR = EosIdealGas<1>::soundSpeed(WR, gamma);
+    const double aL = WL.a;
+    const double aR = WR.a;
     const double a  = std::max(1e-14, 0.5 * (aL + aR));
 
-    const double ML = WL.u[0] / a;
-    const double MR = WR.u[0] / a;
+    const double ML = WL.u / a;
+    const double MR = WR.u / a;
 
     const double mDot = a * (ausm_detail::Mplus(ML) * WL.rho + ausm_detail::Mminus(MR) * WR.rho);
     const double pInt = ausm_detail::Pplus(ML) * WL.p + ausm_detail::Pminus(MR) * WR.p;
 
     const bool upL = (mDot >= 0.0);
-    const double uUp = upL ? WL.u[0] : WR.u[0];
-    const double HUp = upL ? ((UL[2] + WL.p) / WL.rho) : ((UR[2] + WR.p) / WR.rho);
+    const double uUp = upL ? WL.u : WR.u;
+    const double HUp = upL ? WL.H : WR.H;
 
     Cons F{};
     F[0] = mDot;
@@ -409,15 +419,15 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     // Directional form: use normal velocity un = u[dir] for Mach splitting.
     // Momentum flux adds the interface pressure only in the normal direction.
 
-    const Prim WL = EosIdealGas<2>::consToPrim(UL, gamma);
-    const Prim WR = EosIdealGas<2>::consToPrim(UR, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
 
-    const double aL = EosIdealGas<2>::soundSpeed(WL, gamma);
-    const double aR = EosIdealGas<2>::soundSpeed(WR, gamma);
+    const double aL = WL.a;
+    const double aR = WR.a;
     const double a  = std::max(1e-14, 0.5 * (aL + aR));
 
-    const double unL = WL.u[dir];
-    const double unR = WR.u[dir];
+    const double unL = (dir == 0) ? WL.u : WL.v;
+    const double unR = (dir == 0) ? WR.u : WR.v;
     const double ML  = unL / a;
     const double MR  = unR / a;
 
@@ -425,9 +435,9 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     const double pInt = ausm_detail::Pplus(ML) * WL.p + ausm_detail::Pminus(MR) * WR.p;
 
     const bool upL = (mDot >= 0.0);
-    const double uUp0 = upL ? WL.u[0] : WR.u[0];
-    const double uUp1 = upL ? WL.u[1] : WR.u[1];
-    const double HUp  = upL ? ((UL[3] + WL.p) / WL.rho) : ((UR[3] + WR.p) / WR.rho);
+    const double uUp0 = upL ? WL.u : WR.u;
+    const double uUp1 = upL ? WL.v : WR.v;
+    const double HUp  = upL ? WL.H : WR.H;
 
     Cons F{};
     F[0] = mDot;
@@ -469,16 +479,16 @@ Vec3 FluxGodunovExact<1>::numericalFlux(const Vec3& UL, const Vec3& UR, int dir,
 // FluxGodunovExact<2>
 // --------------------
 ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const Prim WL = EosIdealGas<2>::consToPrim(UL, gamma);
-    const Prim WR = EosIdealGas<2>::consToPrim(UR, gamma);
+    const auto WL = evalFlowVars(UL, gamma);
+    const auto WR = evalFlowVars(UR, gamma);
 
     Prim1 WL1{}, WR1{};
     WL1.rho = WL.rho;
-    WL1.u[0] = WL.u[dir];
+    WL1.u[0] = (dir == 0) ? WL.u : WL.v;
     WL1.p = WL.p;
 
     WR1.rho = WR.rho;
-    WR1.u[0] = WR.u[dir];
+    WR1.u[0] = (dir == 0) ? WR.u : WR.v;
     WR1.p = WR.p;
 
     double pStar, uStar;
@@ -490,7 +500,9 @@ ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int 
     W0.p = S0.p;
     W0.u[dir] = S0.u;
     const int tan = 1 - dir;
-    W0.u[tan] = (S0.sideTag < 0) ? WL.u[tan] : WR.u[tan];
+    W0.u[tan] = (S0.sideTag < 0)
+        ? ((tan == 0) ? WL.u : WL.v)
+        : ((tan == 0) ? WR.u : WR.v);
 
     const Cons U0 = EosIdealGas<2>::primToCons(W0, gamma);
     return EosIdealGas<2>::physFlux(U0, dir, gamma);

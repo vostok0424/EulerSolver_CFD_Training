@@ -155,9 +155,8 @@ double Solver1D::computeDt(const std::vector<Vec3>& U) const {
     const double dx = (x1_ - x0_) / nxGlobal_;
     double maxChar = 1e-14;
     for (int i = 0; i < nx_; ++i) {
-        const auto Wi = EosIdealGas<1>::consToPrim(U[ng_ + i], gamma_);
-        const double a = EosIdealGas<1>::soundSpeed(Wi, gamma_);
-        maxChar = std::max(maxChar, std::abs(Wi.u[0]) + a);
+        const auto Wi = evalFlowVars(U[ng_ + i], gamma_);
+        maxChar = std::max(maxChar, std::abs(Wi.u) + Wi.a);
     }
     // Global maximum across ranks so all ranks advance with the same dt.
     const double maxCharG = mp_.allreduceMax(maxChar);

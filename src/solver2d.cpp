@@ -189,9 +189,8 @@ double Solver2D::computeDt(const std::vector<Vec4>& U) const {
 
     for (int j = 0; j < ny_; ++j) {
         for (int i = 0; i < nx_; ++i) {
-            const auto W = EosIdealGas<2>::consToPrim(U[idx(ng_+i, ng_+j)], gamma_);
-            const double a = EosIdealGas<2>::soundSpeed(W, gamma_);
-            const double S = (std::abs(W.u[0]) + a) / dx + (std::abs(W.u[1]) + a) / dy;
+            const auto W = evalFlowVars(U[idx(ng_ + i, ng_ + j)], gamma_);
+            const double S = (std::abs(W.u) + W.a) / dx + (std::abs(W.v) + W.a) / dy;
             maxS = std::max(maxS, S);
         }
     }
