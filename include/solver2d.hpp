@@ -101,6 +101,14 @@ private:
     std::vector<Vec4> U_;
     std::vector<Vec4> RHS_;
 
+    // Reusable RHS work buffers to avoid repeated allocation inside buildRHS().
+    std::vector<Vec4> ULxBuf_;
+    std::vector<Vec4> URxBuf_;
+    std::vector<Vec4> ULyBuf_;
+    std::vector<Vec4> URyBuf_;
+    std::vector<Vec4> FxBuf_;
+    std::vector<Vec4> GyBuf_;
+
     // Pluggable numerical modules selected by cfg.
     std::unique_ptr<FluxD<2>> flux_;
     std::unique_ptr<TimeIntegratorT<Vec4>> ti_;
@@ -118,7 +126,7 @@ private:
     // Build spatial RHS for the given state vector.
     // Expects ghost cells already valid (call applyBC first).
     // Uses: reconstruction -> numerical flux -> finite-volume divergence.
-    void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) const;
+    void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS);
 
     // Scan interior cell states over the local physical block using the centralized state layer.
     StateScanReport scanInteriorStates(const std::vector<Vec4>& U) const;

@@ -572,8 +572,9 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
         throw std::runtime_error("Reconstruction2D::reconstructFacesX: ng too small for selected reconstruction.scheme");
     }
 
-    ULx.assign((nx + 1) * ny, Vec4{});
-    URx.assign((nx + 1) * ny, Vec4{});
+    const size_t nFaceX = static_cast<size_t>(nx + 1) * static_cast<size_t>(ny);
+    if (ULx.size() != nFaceX) ULx.resize(nFaceX);
+    if (URx.size() != nFaceX) URx.resize(nFaceX);
 
     const StateLimits limits = opt_.stateLimits();
 
@@ -705,8 +706,9 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
         throw std::runtime_error("Reconstruction2D::reconstructFacesY: ng too small for selected reconstruction.scheme");
     }
 
-    ULy.assign(nx * (ny + 1), Vec4{});
-    URy.assign(nx * (ny + 1), Vec4{});
+    const size_t nFaceY = static_cast<size_t>(nx) * static_cast<size_t>(ny + 1);
+    if (ULy.size() != nFaceY) ULy.resize(nFaceY);
+    if (URy.size() != nFaceY) URy.resize(nFaceY);
 
     const StateLimits limits = opt_.stateLimits();
 

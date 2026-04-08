@@ -117,6 +117,12 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     nyTot_ = ny_ + 2 * ng_;
     U_.assign(static_cast<size_t>(nxTot_) * static_cast<size_t>(nyTot_), Vec4{});
     RHS_.assign(static_cast<size_t>(nxTot_) * static_cast<size_t>(nyTot_), Vec4{});
+    ULxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
+    URxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
+    ULyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
+    URyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
+    FxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
+    GyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
 
     // -----------------------------
     // 6) Choose numerical methods
@@ -200,24 +206,19 @@ double Solver2D::computeDt(const std::vector<Vec4>& U) const {
 //   - Characteristic reconstruction produces conservative UL/UR on x-faces and y-faces
 //   - Flux module computes numerical fluxes Fx and Gy by a Riemann solver
 //   - Finite-volume divergence produces cell-centered RHS
-void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) const {
-    RHS.assign(U.size(), Vec4{});
+void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
+    std::fill(RHS.begin(), RHS.end(), Vec4{});
 
     // Characteristic reconstruction returns conservative face states on x- and y-faces.
     // U must already have valid ghost cells when calling buildRHS.
-    std::vector<Vec4> ULx, URx, ULy, URy;
-    recon_.reconstructFacesX(U, nx_, ny_, ng_, gamma_, ULx, URx);
-    recon_.reconstructFacesY(U, nx_, ny_, ng_, gamma_, ULy, URy);
-
-    // Face flux arrays: Fx on x-faces, Gy on y-faces.
-    std::vector<Vec4> Fx((nx_ + 1) * ny_);
-    std::vector<Vec4> Gy(nx_ * (ny_ + 1));
+    recon_.reconstructFacesX(U, nx_, ny_, ng_, gamma_, ULxBuf_, URxBuf_);
+    recon_.reconstructFacesY(U, nx_, ny_, ng_, gamma_, ULyBuf_, URyBuf_);
 
     // X-faces: compute numerical flux using dir=0 (x-normal).
     for (int j = 0; j < ny_; ++j) {
         for (int i = 0; i < nx_ + 1; ++i) {
             const int f = i + (nx_ + 1) * j;
-            Fx[f] = flux_->numericalFlux(ULx[f], URx[f], 0, gamma_);
+            FxBuf_[f] = flux_->numericalFlux(ULxBuf_[f], URxBuf_[f], 0, gamma_);
         }
     }
 
@@ -225,7 +226,7 @@ void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) cons
     for (int j = 0; j < ny_ + 1; ++j) {
         for (int i = 0; i < nx_; ++i) {
             const int f = i + nx_ * j;
-            Gy[f] = flux_->numericalFlux(ULy[f], URy[f], 1, gamma_);
+            GyBuf_[f] = flux_->numericalFlux(ULyBuf_[f], URyBuf_[f], 1, gamma_);
         }
     }
 
@@ -236,10 +237,10 @@ void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) cons
     //   RHS = -(FxR-FxL)/dx - (GyT-GyB)/dy
     for (int j = 0; j < ny_; ++j) {
         for (int i = 0; i < nx_; ++i) {
-            const Vec4& FxL = Fx[i     + (nx_ + 1) * j];
-            const Vec4& FxR = Fx[i + 1 + (nx_ + 1) * j];
-            const Vec4& GyB = Gy[i + nx_ * j];
-            const Vec4& GyT = Gy[i + nx_ * (j + 1)];
+            const Vec4& FxL = FxBuf_[i     + (nx_ + 1) * j];
+            const Vec4& FxR = FxBuf_[i + 1 + (nx_ + 1) * j];
+            const Vec4& GyB = GyBuf_[i + nx_ * j];
+            const Vec4& GyT = GyBuf_[i + nx_ * (j + 1)];
 
             Vec4 R{};
             for (int k = 0; k < 4; ++k) {
