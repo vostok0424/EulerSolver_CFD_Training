@@ -164,6 +164,9 @@ FlowVars2 evalFlowVars(const Vec4& U, double gamma);
 Vec3 physFluxFromFlowVars(const Vec3& U, const FlowVars1& W, int dir);
 Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir);
 
+Vec3 physFluxFromPrim(const Prim1& W, int dir, double gamma);
+Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma);
+
 // Fast finite checks on conservative states.
 bool isFiniteState(const Vec3& U);
 bool isFiniteState(const Vec4& U);

@@ -356,6 +356,45 @@ Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir) {
     return F;
 }
 
+Vec3 physFluxFromPrim(const Prim1& W, int dir, double gamma) {
+    (void)dir;
+    Vec3 F{};
+
+    const double rho = W.rho;
+    const double u   = W.u[0];
+    const double p   = W.p;
+    const double E   = p / (gamma - 1.0) + 0.5 * rho * u * u;
+
+    F[0] = rho * u;
+    F[1] = rho * u * u + p;
+    F[2] = (E + p) * u;
+    return F;
+}
+
+Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma) {
+    Vec4 F{};
+
+    const double rho = W.rho;
+    const double u   = W.u[0];
+    const double v   = W.u[1];
+    const double p   = W.p;
+    const double E   = p / (gamma - 1.0) + 0.5 * rho * (u * u + v * v);
+
+    if (dir == 0) {
+        F[0] = rho * u;
+        F[1] = rho * u * u + p;
+        F[2] = rho * v * u;
+        F[3] = (E + p) * u;
+    } else {
+        F[0] = rho * v;
+        F[1] = rho * u * v;
+        F[2] = rho * v * v + p;
+        F[3] = (E + p) * v;
+    }
+
+    return F;
+}
+
 // Explicit template instantiations for the dimensions used in this solver.
 template struct EosIdealGas<1>;
 template struct EosIdealGas<2>;

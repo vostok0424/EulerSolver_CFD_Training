@@ -17,6 +17,10 @@
 //   - gamma is the ideal-gas ratio of specific heats
 //   - F is the conservative flux vector in direction `dir`
 //
+// Implementation style in this codebase:
+//   - Use cached flow variable helpers (evalFlowVars, FlowVars1/2) for hot-path state conversion.
+//   - Prefer direct flux builders (physFluxFromFlowVars, physFluxFromPrim) to avoid unnecessary state reconversion.
+//
 // ------------------------------------------------------------
 // How to add ("plant") a new numerical flux in this codebase
 // ------------------------------------------------------------
@@ -32,17 +36,25 @@
 //           // 0) Validate direction
 //           //    if (Dim==2) dir must be 0 or 1
 //
-//           // 1) Convert to primitive if needed
-//           //    WL = consToPrim(UL), WR = consToPrim(UR)
+//           // 1) Build the state representation you actually need
+//           //    - conservative only: keep UL/UR as-is
+//           //    - cached hot-path quantities: WL = evalFlowVars(UL), WR = evalFlowVars(UR)
+//           //    - exact/auxiliary solver returns primitive: keep W directly as Prim
 //
-//           // 2) Compute physical fluxes
-//           //    FL = physFlux(UL, dir), FR = physFlux(UR, dir)
+//           // 2) Compute physical fluxes without unnecessary state reconversion
+//           //    - if only conservative state is available:
+//           //        FL = physFlux(UL, dir, gamma), FR = physFlux(UR, dir, gamma)
+//           //    - if cached FlowVars are already available:
+//           //        FL = physFluxFromFlowVars(UL, WL, dir), FR = physFluxFromFlowVars(UR, WR, dir)
+//           //    - if a primitive star/sample state is already available:
+//           //        F = physFluxFromPrim(W, dir, gamma)
 //
 //           // 3) Compute wave-speed estimates / split quantities / star states
 //           //    (this is where the scheme differs: LLF, HLLC, AUSM, Roe, etc.)
 //
 //           // 4) Assemble and return F (size Dim+2)
-//           //    (For 2D: treat u[dir] as normal velocity, carry tangential momentum consistently.)
+//           //    (For 2D: treat the requested direction as the face-normal direction
+//           //     and carry tangential momentum consistently.)
 //       }
 //   };
 //
@@ -71,19 +83,27 @@
 //                   throw std::runtime_error("myNewScheme flux: dir must be 0 or 1");
 //           }
 //
-//           // (1) Convert to primitive (for wave speeds / splitting)
-//           const auto WL = EosIdealGas<Dim>::consToPrim(UL, gamma);
-//           const auto WR = EosIdealGas<Dim>::consToPrim(UR, gamma);
+//           // (1) Build the state form you actually need on this path.
+//           // Cached flow variables are preferred in hot paths because they avoid
+//           // repeated conservative -> primitive conversion.
+//           const auto WL = evalFlowVars(UL, gamma);
+//           const auto WR = evalFlowVars(UR, gamma);
 //
 //           // Normal velocities for this face
-//           const double uLn = WL.u[dir];
-//           const double uRn = WR.u[dir];
-//           const double aL  = EosIdealGas<Dim>::soundSpeed(WL, gamma);
-//           const double aR  = EosIdealGas<Dim>::soundSpeed(WR, gamma);
+//           double uLn, uRn;
+//           if constexpr (Dim == 1) {
+//               uLn = WL.u;
+//               uRn = WR.u;
+//           } else {
+//               uLn = (dir == 0) ? WL.u : WL.v;
+//               uRn = (dir == 0) ? WR.u : WR.v;
+//           }
+//           const double aL = WL.a;
+//           const double aR = WR.a;
 //
-//           // (2) Physical fluxes
-//           const Cons FL = EosIdealGas<Dim>::physFlux(UL, dir, gamma);
-//           const Cons FR = EosIdealGas<Dim>::physFlux(UR, dir, gamma);
+//           // (2) Physical fluxes built directly from the cached state data
+//           const Cons FL = physFluxFromFlowVars(UL, WL, dir);
+//           const Cons FR = physFluxFromFlowVars(UR, WR, dir);
 //
 //           // (3) YOUR LOGIC: estimate wave speeds / build star states / split parts
 //           // Example (LLF/Rusanov template):
@@ -101,6 +121,9 @@
 // Notes:
 // - If your scheme is HLL/HLLC/Roe-like, step (3) typically produces SL/SR/SM and/or
 //   star states U*_L/U*_R, then selects the correct flux by wave-speed sign.
+// - If an exact or auxiliary solver returns a primitive sample/star state directly,
+//   prefer physFluxFromPrim(...) instead of converting back to conservative and then
+//   re-entering physFlux(...).
 // - For AUSM-like schemes, step (3) computes (mDot, pInt) and then assembles momentum
 //   and energy fluxes using an upwinded side.
 //
@@ -110,8 +133,9 @@
 //
 // Most Godunov-type fluxes follow the same high-level pattern:
 //
-//   1) Convert UL/UR -> primitive states WL/WR (rho, u[,v], p)
-//      (needed for wave speeds and/or split forms).
+//   1) Build the state representation needed by the scheme.
+//      In hot paths this is often cached flow data via evalFlowVars(...);
+//      in exact/sample-based paths it may be a primitive state returned directly.
 //
 //   2) Estimate characteristic signal speeds along the face normal.
 //      Typical choices:
@@ -151,8 +175,8 @@
 //   F    = 0.5*(F_L + F_R) - 0.5*smax*(U_R - U_L)
 //
 // Implementation pattern:
-//   - convert UL/UR -> WL/WR to compute u_n and sound speed a
-//   - compute physical fluxes F(UL), F(UR)
+//   - build cached flow data WL/WR to compute u_n and sound speed a
+//   - build physical fluxes directly from the cached state data
 //   - apply the LLF formula component-wise
 template<int Dim>
 std::string FluxRusanov<Dim>::name() const { return "rusanov"; }
@@ -191,9 +215,9 @@ template class FluxRusanov<2>;
 // and two star states U*_L and U*_R separated by the contact wave SM.
 //
 // The common implementation form used here:
-//   - Compute primitive states WL/WR and sound speeds aL/aR
+//   - Build cached flow data WL/WR and read sound speeds aL/aR from it
 //   - Estimate SL and SR (here: min/max of u_n ± a)
-//   - Compute physical fluxes FL=F(UL), FR=F(UR)
+//   - Compute physical fluxes FL and FR directly from the cached state data
 //   - Upwind selection:
 //       if SL >= 0: return FL
 //       if SR <= 0: return FR
@@ -457,10 +481,11 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 // Exact Godunov flux in this module
 // --------------------------------
 // Programming pattern:
-//   - Convert UL/UR to primitive.
+//   - Build the directional left/right states needed by the exact Riemann solver.
 //   - Solve the exact Riemann problem for star state (p*, u*).
 //   - Sample the self-similar solution at S=x/t=0 to obtain W0.
-//   - Convert W0 back to conservative and return the physical flux F(W0).
+//   - If W0 is already available as a primitive state, return the physical flux
+//     directly with physFluxFromPrim(W0, dir, gamma).
 //
 // In 1D we call a dedicated helper: exact_riemann::godunovExactFlux1D.
 // --------------------
@@ -474,7 +499,8 @@ Vec3 FluxGodunovExact<1>::numericalFlux(const Vec3& UL, const Vec3& UR, int dir,
 // 2D exact flux here uses a 1D directional reduction:
 // - Solve a 1D exact Riemann problem in the normal direction `dir` using (rho, un, p).
 // - For the tangential velocity component, upwind from the side that determines the sample.
-// - Build a 2D primitive state W0 and evaluate the physical flux in direction `dir`.
+// - Build a 2D primitive state W0 and evaluate the physical flux in direction `dir`
+//   directly from that primitive state.
 // --------------------
 // FluxGodunovExact<2>
 // --------------------
@@ -504,8 +530,7 @@ ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int 
         ? ((tan == 0) ? WL.u : WL.v)
         : ((tan == 0) ? WR.u : WR.v);
 
-    const Cons U0 = EosIdealGas<2>::primToCons(W0, gamma);
-    return EosIdealGas<2>::physFlux(U0, dir, gamma);
+    return physFluxFromPrim(W0, dir, gamma);
 }
 
 // --------------------
