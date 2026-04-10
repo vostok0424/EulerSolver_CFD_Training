@@ -85,7 +85,8 @@ private:
     // Shared state-layer thresholds/diagnostic options used for interior-state checks.
     StateLimits stateLimits_{};
     bool enableStateDiagnostics_{true};
-    int stateDiagnosticsEvery_{1};
+    std::string stateDiagCsvPath_;
+    mutable bool stateDiagWriteHeader_{true};
 
     // Parsed 1D boundary-condition object (types + per-side parameters).
     boundary::Bc1D bc_;
@@ -121,8 +122,12 @@ private:
     // Scan interior cell states [ng_, ng_ + nx_) using the centralized state layer.
     StateScanReport scanInteriorStates(const std::vector<Vec3>& U) const;
 
-    // Optionally print/report a compact state-diagnostic summary for the current step.
-    void reportStateDiagnostics(int step, double t, const StateScanReport& report) const;
+    // Return true when this step should write regular field output.
+    bool shouldWriteStepOutput(int step) const;
+    // Return true when state diagnostics should be recorded (bound to output steps).
+    bool shouldRecordStateDiagnostics(int step) const;
+    // Append one compact state-diagnostic record to the CSV file on the root rank.
+    void appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report, const std::string& tag) const;
 
     // Write legacy VTK (.vtk) output for the current step/time.
     // In MPI runs, this may gather to rank 0 and write a single merged file.

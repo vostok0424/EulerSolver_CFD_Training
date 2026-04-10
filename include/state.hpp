@@ -20,8 +20,9 @@
 //
 // Notes:
 // - This EOS assumes an ideal gas with constant gamma.
-// - No explicit positivity enforcement is performed here; callers should ensure
-//   rho>0 and p>0 (reconstruction can optionally apply a positivity fix).
+// - State validation is split into a lightweight conservative quick check and a
+//   fuller conservative admissibility check used when more detailed diagnosis is
+//   needed.
 
 #include <array>
 #include <cstddef>
@@ -98,6 +99,9 @@ struct StateLimits {
 // StateCheckResult
 // ----------------
 // Detailed result returned by primitive/conservative state checks.
+// The same result type is reused by both the conservative quick check and the
+// fuller conservative admissibility check so callers can escalate from the fast
+// path to the detailed path without changing data structures.
 struct StateCheckResult {
     bool ok = true;
     StateStatus status = StateStatus::Ok;
@@ -176,6 +180,13 @@ StateCheckResult checkPrimitive(const Prim1& W, const StateLimits& limits);
 StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits);
 
 // Conservative-state checks.
+// quickCheckConservative performs a minimal, hot-path-friendly screen for
+// non-finite values, density floors, and pressure/internal-energy positivity.
+// checkConservative performs the fuller admissibility check and returns the same
+// detailed diagnostic structure when the fast screen fails or deeper reporting
+// is needed.
+StateCheckResult quickCheckConservative(const Vec3& U, double gamma, const StateLimits& limits);
+StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const StateLimits& limits);
 StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimits& limits);
 StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits);
 
@@ -183,6 +194,7 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
 void clampPrimitive(Prim1& W, const StateLimits& limits);
 void clampPrimitive(Prim2& W, const StateLimits& limits);
 
-// Conservative-state repair via primitive conversion, clamping, and back conversion.
+// Conservative-state repair via primitive conversion, clamping, and back
+// conversion. This remains a final fallback after quick/full validation fails.
 bool repairConservative(Vec3& U, double gamma, const StateLimits& limits);
 bool repairConservative(Vec4& U, double gamma, const StateLimits& limits);

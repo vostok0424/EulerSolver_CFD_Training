@@ -176,6 +176,49 @@ bool isFiniteState(const Vec4& U) {
     return true;
 }
 
+static inline double internalEnergy1D(const Vec3& U) {
+    const double rho = U[0];
+    const double invRho = 1.0 / rho;
+    const double u = U[1] * invRho;
+    const double kinetic = 0.5 * rho * u * u;
+    return U[2] - kinetic;
+}
+
+static inline double internalEnergy2D(const Vec4& U) {
+    const double rho = U[0];
+    const double invRho = 1.0 / rho;
+    const double u = U[1] * invRho;
+    const double v = U[2] * invRho;
+    const double kinetic = 0.5 * rho * (u * u + v * v);
+    return U[3] - kinetic;
+}
+
+static inline double pressureFromInternalEnergy(double eInt, double gamma) {
+    return (gamma - 1.0) * eInt;
+}
+
+static inline StateCheckResult quickRejectDensity(double rho, const StateLimits& limits) {
+    StateCheckResult result{};
+    result.rho = rho;
+
+    if (!std::isfinite(rho)) {
+        result.ok = false;
+        result.status = StateStatus::NonFinite;
+        return result;
+    }
+    if (rho < 0.0) {
+        result.ok = false;
+        result.status = StateStatus::NegativeDensity;
+        return result;
+    }
+    if (rho <= limits.rhoMin) {
+        result.ok = false;
+        result.status = StateStatus::DensityTooSmall;
+        return result;
+    }
+    return result;
+}
+
 StateCheckResult checkPrimitive(const Prim1& W, const StateLimits& limits) {
     return checkPrimitiveImpl(W, limits);
 }
@@ -184,32 +227,20 @@ StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits) {
     return checkPrimitiveImpl(W, limits);
 }
 
-StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimits& limits) {
-    StateCheckResult result{};
-
+StateCheckResult quickCheckConservative(const Vec3& U, double gamma, const StateLimits& limits) {
     if (!isFiniteState(U)) {
+        StateCheckResult result{};
         result.ok = false;
         result.status = StateStatus::NonFinite;
         return result;
     }
 
-    result.rho = U[0];
-    if (result.rho < 0.0) {
-        result.ok = false;
-        result.status = StateStatus::NegativeDensity;
-        return result;
-    }
-    if (result.rho <= limits.rhoMin) {
-        result.ok = false;
-        result.status = StateStatus::DensityTooSmall;
+    StateCheckResult result = quickRejectDensity(U[0], limits);
+    if (!result.ok) {
         return result;
     }
 
-    const double invRho = 1.0 / result.rho;
-    const double u = U[1] * invRho;
-    const double kinetic = 0.5 * result.rho * u * u;
-    result.eInt = U[2] - kinetic;
-
+    result.eInt = internalEnergy1D(U);
     if (!std::isfinite(result.eInt)) {
         result.ok = false;
         result.status = StateStatus::NonFinite;
@@ -221,7 +252,7 @@ StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimit
         return result;
     }
 
-    result.p = (gamma - 1.0) * result.eInt;
+    result.p = pressureFromInternalEnergy(result.eInt, gamma);
     if (!std::isfinite(result.p)) {
         result.ok = false;
         result.status = StateStatus::NonFinite;
@@ -241,33 +272,20 @@ StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimit
     return result;
 }
 
-StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits) {
-    StateCheckResult result{};
-
+StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const StateLimits& limits) {
     if (!isFiniteState(U)) {
+        StateCheckResult result{};
         result.ok = false;
         result.status = StateStatus::NonFinite;
         return result;
     }
 
-    result.rho = U[0];
-    if (result.rho < 0.0) {
-        result.ok = false;
-        result.status = StateStatus::NegativeDensity;
-        return result;
-    }
-    if (result.rho <= limits.rhoMin) {
-        result.ok = false;
-        result.status = StateStatus::DensityTooSmall;
+    StateCheckResult result = quickRejectDensity(U[0], limits);
+    if (!result.ok) {
         return result;
     }
 
-    const double invRho = 1.0 / result.rho;
-    const double u = U[1] * invRho;
-    const double v = U[2] * invRho;
-    const double kinetic = 0.5 * result.rho * (u * u + v * v);
-    result.eInt = U[3] - kinetic;
-
+    result.eInt = internalEnergy2D(U);
     if (!std::isfinite(result.eInt)) {
         result.ok = false;
         result.status = StateStatus::NonFinite;
@@ -279,7 +297,7 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
         return result;
     }
 
-    result.p = (gamma - 1.0) * result.eInt;
+    result.p = pressureFromInternalEnergy(result.eInt, gamma);
     if (!std::isfinite(result.p)) {
         result.ok = false;
         result.status = StateStatus::NonFinite;
@@ -294,6 +312,36 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
         result.ok = false;
         result.status = StateStatus::PressureTooSmall;
         return result;
+    }
+
+    return result;
+}
+
+StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimits& limits) {
+    StateCheckResult result = quickCheckConservative(U, gamma, limits);
+    if (!result.ok) {
+        return result;
+    }
+
+    const Prim1 W = EosIdealGas<1>::consToPrim(U, gamma);
+    const StateCheckResult primResult = checkPrimitive(W, limits);
+    if (!primResult.ok) {
+        return primResult;
+    }
+
+    return result;
+}
+
+StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits) {
+    StateCheckResult result = quickCheckConservative(U, gamma, limits);
+    if (!result.ok) {
+        return result;
+    }
+
+    const Prim2 W = EosIdealGas<2>::consToPrim(U, gamma);
+    const StateCheckResult primResult = checkPrimitive(W, limits);
+    if (!primResult.ok) {
+        return primResult;
     }
 
     return result;
@@ -311,14 +359,14 @@ bool repairConservative(Vec3& U, double gamma, const StateLimits& limits) {
     Prim1 W = EosIdealGas<1>::consToPrim(U, gamma);
     clampPrimitive(W, limits);
     U = EosIdealGas<1>::primToCons(W, gamma);
-    return checkConservative(U, gamma, limits).ok;
+    return quickCheckConservative(U, gamma, limits).ok;
 }
 
 bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
     Prim2 W = EosIdealGas<2>::consToPrim(U, gamma);
     clampPrimitive(W, limits);
     U = EosIdealGas<2>::primToCons(W, gamma);
-    return checkConservative(U, gamma, limits).ok;
+    return quickCheckConservative(U, gamma, limits).ok;
 }
 
 FlowVars1 evalFlowVars(const Vec3& U, double gamma) {

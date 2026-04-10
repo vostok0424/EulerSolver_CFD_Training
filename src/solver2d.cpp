@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -57,10 +58,8 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // Shared state-layer thresholds and optional diagnostic controls.
     stateLimits_ = recon_.options().stateLimits();
     enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
-    stateDiagnosticsEvery_  = cfg.getInt ("stateDiagnostics.every", 1);
-    if (stateDiagnosticsEvery_ < 1) {
-        stateDiagnosticsEvery_ = 1;
-    }
+    stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
+                                      "solution/" + outPrefix_ + "_state_diagnostics.csv");
 
     // Global physical extents
     x0_ = cfg.getDouble("x0", 0.0);
@@ -297,10 +296,18 @@ StateScanReport Solver2D::scanInteriorStates(const std::vector<Vec4>& U) const {
     return report;
 }
 
-void Solver2D::reportStateDiagnostics(int step, double t, const StateScanReport& report) const {
+bool Solver2D::shouldWriteStepOutput(int step) const {
+    return (outputEvery_ > 0) && (step % outputEvery_ == 0);
+}
+
+bool Solver2D::shouldRecordStateDiagnostics(int step) const {
+    if (!enableStateDiagnostics_) return false;
+    return shouldWriteStepOutput(step);
+}
+
+void Solver2D::appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report,
+                                         const std::string& tag) const {
     if (!enableStateDiagnostics_) return;
-    if (stateDiagnosticsEvery_ <= 0) return;
-    if (step % stateDiagnosticsEvery_ != 0) return;
 
     const unsigned long long localCounts[5] = {
         static_cast<unsigned long long>(report.total),
@@ -317,21 +324,37 @@ void Solver2D::reportStateDiagnostics(int step, double t, const StateScanReport&
     double globalMin[2] = {0.0, 0.0};
     MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, mp_.cartComm());
 
-    if (mp_.isRoot()) {
-        std::cout << "[2D][state] step=" << step
-                  << ", t=" << t
-                  << ", cells=" << globalCounts[0]
-                  << ", minRho=" << globalMin[0]
-                  << ", minP=" << globalMin[1]
-                  << ", nonFinite=" << globalCounts[1]
-                  << ", badDensity=" << globalCounts[2]
-                  << ", badPressure=" << globalCounts[3]
-                  << ", badEint=" << globalCounts[4]
-                  << "\n";
-        if (globalCounts[1] + globalCounts[2] + globalCounts[3] + globalCounts[4] > 0) {
-            std::cout << "[2D][state] warning: invalid interior states detected by centralized diagnostics.\n";
-        }
+    if (!mp_.isRoot()) return;
+
+    namespace fs = std::filesystem;
+    const fs::path csvPath(stateDiagCsvPath_);
+    if (csvPath.has_parent_path()) {
+        fs::create_directories(csvPath.parent_path());
     }
+
+    const bool needHeader = stateDiagWriteHeader_ || !fs::exists(csvPath);
+
+    std::ofstream ofs(csvPath, std::ios::app);
+    if (!ofs) {
+        std::cerr << "[2D][state] failed to open CSV: " << csvPath.string() << "\n";
+        return;
+    }
+
+    if (needHeader) {
+        ofs << "tag,step,time,cells,minRho,minP,nonFinite,badDensity,badPressure,badEint\n";
+        stateDiagWriteHeader_ = false;
+    }
+
+    ofs << tag << ","
+        << step << ","
+        << std::setprecision(16) << t << ","
+        << globalCounts[0] << ","
+        << globalMin[0] << ","
+        << globalMin[1] << ","
+        << globalCounts[1] << ","
+        << globalCounts[2] << ","
+        << globalCounts[3] << ","
+        << globalCounts[4] << "\n";
 }
 
 // Periodic output.
@@ -390,8 +413,8 @@ void Solver2D::run() {
     applyBC(U_);
     buildRHS(U_, RHS_);
     applyBC(U_); // keep ghosts consistent for output/diagnostics
-    if (enableStateDiagnostics_) {
-        reportStateDiagnostics(step, t, scanInteriorStates(U_));
+    if (shouldRecordStateDiagnostics(step)) {
+        appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "initial");
     }
     writeOutput(step, t);
 
@@ -411,8 +434,8 @@ void Solver2D::run() {
         t += dt;
         ++step;
         applyBC(U_);
-        if (enableStateDiagnostics_) {
-            reportStateDiagnostics(step, t, scanInteriorStates(U_));
+        if (shouldRecordStateDiagnostics(step)) {
+            appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "output");
         }
         writeOutput(step, t);
     }
@@ -428,8 +451,9 @@ void Solver2D::run() {
         mp_.barrier();
 
         applyBC(U_);
-        if (enableStateDiagnostics_) {
-            reportStateDiagnostics(step, t, scanInteriorStates(U_));
+        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
+        if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
+            appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "final");
         }
 
         std::ostringstream tSS;

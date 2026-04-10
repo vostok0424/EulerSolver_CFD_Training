@@ -96,8 +96,6 @@ struct Options {
     // Small epsilon used in WENO weights and positivity clamping.
     double eps = 1e-12;
 
-    // WENO controls (used by WENO5 only).
-    int wenoP = 2;             // Jiang–Shu power p (typical: 2)
 
     // Small admissibility floors used by the centralized state-layer checks.
     double rhoMin = 1e-12;
@@ -130,9 +128,7 @@ struct Options {
 //   reconstruction.rhoMin: small positive density floor passed into state-layer checks
 //   reconstruction.pMin: small positive pressure floor passed into state-layer checks
 //
-// WENO5:
-//   reconstruction.weno.p: integer power p (typical 2)
-//
+//   WENO5 uses the standard Jiang–Shu nonlinear weights with exponent fixed at p = 2
 // Characteristic reconstruction is fixed to conservative variables
 // with Roe linearization; no characteristic-mode cfg keys are exposed.
 Options readOptions(const Cfg& cfg);
