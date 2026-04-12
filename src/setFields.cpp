@@ -12,7 +12,135 @@
 // - Region indices in cfg start from 1: setFields.region1.*, region2.*, ...
 // - If multiple regions overlap, later regions overwrite earlier ones (r increasing).
 
+
 #include "setFields.hpp"
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+enum class ShockDir {
+    PlusX,
+    MinusX,
+    PlusY,
+    MinusY
+};
+
+ShockDir parseShockDir(const std::string& s)
+{
+    if (s == "+x" || s == "x" || s == "+X" || s == "X") return ShockDir::PlusX;
+    if (s == "-x" || s == "-X") return ShockDir::MinusX;
+    if (s == "+y" || s == "y" || s == "+Y" || s == "Y") return ShockDir::PlusY;
+    if (s == "-y" || s == "-Y") return ShockDir::MinusY;
+    throw std::runtime_error("setFields: invalid shockDir='" + s + "' (expected +x, -x, +y, or -y)");
+}
+
+Prim1 buildRegionPrim1D(const Prim1& bg, double gamma, const Cfg& cfg, const std::string& base)
+{
+    Prim1 W = bg;
+    const double shockMach = cfg.getDouble(base + "shockMach", -1.0);
+    if (shockMach > 0.0) {
+        if (shockMach <= 1.0) {
+            throw std::runtime_error("setFields: shockMach must be > 1 for " + base);
+        }
+
+        W.rho = cfg.getDouble(base + "rho", bg.rho);
+        W.u[0] = cfg.getDouble(base + "u", 0.0);
+        W.p = cfg.getDouble(base + "p", bg.p);
+        const std::string dirStr = cfg.getString(base + "shockDir", "+x");
+        const ShockDir dir = parseShockDir(dirStr);
+        if (dir == ShockDir::PlusY || dir == ShockDir::MinusY) {
+            throw std::runtime_error("setFields: y-directed shockDir is invalid in 1D for " + base);
+        }
+
+        const double rho1 = W.rho;
+        const double u1 = W.u[0];
+        const double p1 = W.p;
+        const double a1 = std::sqrt(gamma * p1 / rho1);
+        const double sign = (dir == ShockDir::PlusX) ? 1.0 : -1.0;
+        const double Vs = u1 + sign * shockMach * a1;
+        const double w1 = std::abs(Vs - u1);
+        const double rhoRatio = ((gamma + 1.0) * shockMach * shockMach)
+                              / ((gamma - 1.0) * shockMach * shockMach + 2.0);
+        const double pRatio = 1.0 + (2.0 * gamma / (gamma + 1.0))
+                                    * (shockMach * shockMach - 1.0);
+        const double rho2 = rho1 * rhoRatio;
+        const double p2 = p1 * pRatio;
+        const double w2 = w1 * (rho1 / rho2);
+        const double u2 = Vs - sign * w2;
+
+        W.rho = rho2;
+        W.u[0] = u2;
+        W.p = p2;
+        return W;
+    }
+
+    W.rho = cfg.getDouble(base + "rho", bg.rho);
+    W.u[0] = cfg.getDouble(base + "u", bg.u[0]);
+    W.p = cfg.getDouble(base + "p", bg.p);
+    return W;
+}
+
+Prim2 buildRegionPrim2D(const Prim2& bg, double gamma, const Cfg& cfg, const std::string& base)
+{
+    Prim2 W = bg;
+    const double shockMach = cfg.getDouble(base + "shockMach", -1.0);
+    if (shockMach > 0.0) {
+        if (shockMach <= 1.0) {
+            throw std::runtime_error("setFields: shockMach must be > 1 for " + base);
+        }
+
+        W.rho = cfg.getDouble(base + "rho", bg.rho);
+        W.u[0] = cfg.getDouble(base + "u", 0.0);
+        W.u[1] = cfg.getDouble(base + "v", 0.0);
+        W.p = cfg.getDouble(base + "p", bg.p);
+        const ShockDir dir = parseShockDir(cfg.getString(base + "shockDir", "+x"));
+
+        double nx = 0.0;
+        double ny = 0.0;
+        switch (dir) {
+            case ShockDir::PlusX:  nx =  1.0; ny =  0.0; break;
+            case ShockDir::MinusX: nx = -1.0; ny =  0.0; break;
+            case ShockDir::PlusY:  nx =  0.0; ny =  1.0; break;
+            case ShockDir::MinusY: nx =  0.0; ny = -1.0; break;
+        }
+
+        const double rho1 = W.rho;
+        const double u1 = W.u[0];
+        const double v1 = W.u[1];
+        const double p1 = W.p;
+        const double a1 = std::sqrt(gamma * p1 / rho1);
+        const double un1 = u1 * nx + v1 * ny;
+        const double utx = u1 - un1 * nx;
+        const double uty = v1 - un1 * ny;
+        const double Vs = un1 + shockMach * a1;
+        const double w1 = shockMach * a1;
+        const double rhoRatio = ((gamma + 1.0) * shockMach * shockMach)
+                              / ((gamma - 1.0) * shockMach * shockMach + 2.0);
+        const double pRatio = 1.0 + (2.0 * gamma / (gamma + 1.0))
+                                    * (shockMach * shockMach - 1.0);
+        const double rho2 = rho1 * rhoRatio;
+        const double p2 = p1 * pRatio;
+        const double w2 = w1 * (rho1 / rho2);
+        const double un2 = Vs - w2;
+
+        W.rho = rho2;
+        W.u[0] = utx + un2 * nx;
+        W.u[1] = uty + un2 * ny;
+        W.p = p2;
+        return W;
+    }
+
+    W.rho = cfg.getDouble(base + "rho", bg.rho);
+    W.u[0] = cfg.getDouble(base + "u", bg.u[0]);
+    W.u[1] = cfg.getDouble(base + "v", bg.u[1]);
+    W.p = cfg.getDouble(base + "p", bg.p);
+    return W;
+}
+
+} // namespace
 
 void setFields1D(std::vector<Vec3>& U,
                  int nx, int ng,
@@ -44,11 +172,8 @@ void setFields1D(std::vector<Vec3>& U,
         const double xMin = cfg.getDouble(base+"xMin", x0);
         const double xMax = cfg.getDouble(base+"xMax", x1);
 
-        // Region state: start from background and override provided keys.
-        Prim1 W = bg;
-        W.rho = cfg.getDouble(base+"rho", bg.rho);
-        W.u[0]= cfg.getDouble(base+"u",   bg.u[0]);
-        W.p   = cfg.getDouble(base+"p",   bg.p);
+        // Region state: either direct primitive override or shock-defined post-shock state.
+        const Prim1 W = buildRegionPrim1D(bg, gamma, cfg, base);
         const Vec3 Ureg = EosIdealGas<1>::primToCons(W, gamma);
 
         // Overwrite cells whose centers fall inside [xMin, xMax].
@@ -101,12 +226,8 @@ void setFields2D(std::vector<Vec4>& U,
         const double yMin = cfg.getDouble(base+"yMin", y0);
         const double yMax = cfg.getDouble(base+"yMax", y1);
 
-        // Region state: start from background and override provided keys.
-        Prim2 W = bg;
-        W.rho = cfg.getDouble(base+"rho", bg.rho);
-        W.u[0]= cfg.getDouble(base+"u",   bg.u[0]);
-        W.u[1]= cfg.getDouble(base+"v",   bg.u[1]);
-        W.p   = cfg.getDouble(base+"p",   bg.p);
+        // Region state: either direct primitive override or shock-defined post-shock state.
+        const Prim2 W = buildRegionPrim2D(bg, gamma, cfg, base);
         const Vec4 Ureg = EosIdealGas<2>::primToCons(W, gamma);
 
         // Overwrite cells whose centers fall inside the box [xMin,xMax] x [yMin,yMax].
