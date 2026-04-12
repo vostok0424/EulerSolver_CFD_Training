@@ -26,7 +26,125 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+
 #include <type_traits>
+
+namespace {
+
+constexpr const char* kOutputDir1D = "solution";
+
+struct ReducedStateScanReport {
+    unsigned long long total{0};
+    unsigned long long nonFiniteCount{0};
+    unsigned long long badDensityCount{0};
+    unsigned long long badPressureCount{0};
+    unsigned long long badInternalEnergyCount{0};
+    double minRho{0.0};
+    double minP{0.0};
+};
+
+void accumulateStateFailure(StateScanReport& report, StateStatus status) {
+    switch (status) {
+        case StateStatus::NonFinite:
+            ++report.nonFiniteCount;
+            break;
+        case StateStatus::NegativeDensity:
+        case StateStatus::DensityTooSmall:
+            ++report.badDensityCount;
+            break;
+        case StateStatus::NegativePressure:
+        case StateStatus::PressureTooSmall:
+            ++report.badPressureCount;
+            break;
+        case StateStatus::NegativeInternalEnergy:
+            ++report.badInternalEnergyCount;
+            break;
+        case StateStatus::Ok:
+        default:
+            break;
+    }
+}
+
+ReducedStateScanReport reduceStateScanReportMPI(const StateScanReport& report, MPI_Comm comm) {
+    const unsigned long long localCounts[5] = {
+        static_cast<unsigned long long>(report.total),
+        static_cast<unsigned long long>(report.nonFiniteCount),
+        static_cast<unsigned long long>(report.badDensityCount),
+        static_cast<unsigned long long>(report.badPressureCount),
+        static_cast<unsigned long long>(report.badInternalEnergyCount)
+    };
+    unsigned long long globalCounts[5] = {0, 0, 0, 0, 0};
+
+    MPI_Allreduce(localCounts, globalCounts, 5, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+
+    const double localMin[2] = {report.minRho, report.minP};
+    double globalMin[2] = {0.0, 0.0};
+    MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, comm);
+
+    ReducedStateScanReport reduced{};
+    reduced.total = globalCounts[0];
+    reduced.nonFiniteCount = globalCounts[1];
+    reduced.badDensityCount = globalCounts[2];
+    reduced.badPressureCount = globalCounts[3];
+    reduced.badInternalEnergyCount = globalCounts[4];
+    reduced.minRho = globalMin[0];
+    reduced.minP = globalMin[1];
+    return reduced;
+}
+
+void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
+    namespace fs = std::filesystem;
+    if (mp.isRoot()) {
+        fs::create_directories(kOutputDir1D);
+    }
+    mp.barrier();
+}
+
+std::string makeStepOutputPath(const std::string& outPrefix, int step, double t) {
+    std::ostringstream stepSS;
+    stepSS << std::setw(4) << std::setfill('0') << step;
+
+    std::ostringstream tSS;
+    tSS << std::fixed << std::setprecision(6) << t;
+
+    const std::filesystem::path outDir = kOutputDir1D;
+    return (outDir / (outPrefix + "_step" + stepSS.str() + "_t=" + tSS.str() + ".vtk")).string();
+}
+
+std::string makeFinalOutputPath(const std::string& outPrefix, double t) {
+    std::ostringstream tSS;
+    tSS << std::fixed << std::setprecision(6) << t;
+
+    const std::filesystem::path outDir = kOutputDir1D;
+    return (outDir / (outPrefix + "_final_t=" + tSS.str() + ".vtk")).string();
+}
+
+void writeMergedVtkFile1D(const mpi_parallel::MpiParallel& mp,
+                          const std::string& path,
+                          const std::string& label,
+                          double t,
+                          const std::vector<Vec3>& U,
+                          int nx,
+                          int ng,
+                          int iBeg,
+                          int nxGlobal,
+                          double x0,
+                          double x1,
+                          double gamma) {
+    if (mp.isRoot()) {
+        std::cout << "[1D] Writing merged " << label << " " << path << " at t=" << t << "\n";
+    }
+
+    writeVTK1D_GatherMPI(path,
+                         U, nx, ng,
+                         iBeg,
+                         nxGlobal,
+                         x0, x1,
+                         gamma,
+                         mp.cartComm());
+}
+
+} // namespace
 
 // MPI halo exchange and MPI gather output pack Vec3 into raw doubles.
 // Ensure Vec3 is trivially copyable and tightly packed (no padding).
@@ -42,15 +160,15 @@ Solver1D::Solver1D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // 1) Read case settings
     // --------------------
     // Global mesh size (cfg)
-    nxGlobal_ = cfg.getInt("nx", 200);
+    grid_.nxGlobal = cfg.getInt("nx", 200);
 
     // Number of ghost layers. High-order reconstruction requires wider stencils.
-    ng_ = cfg.getInt("ng", 2);
-    if (ng_ < 1) throw std::runtime_error("ng must be >=1 for 1D solver");
+    grid_.ng = cfg.getInt("ng", 2);
+    if (grid_.ng < 1) throw std::runtime_error("ng must be >=1 for 1D solver");
 
     // Global physical extents
-    x0_ = cfg.getDouble("x0", 0.0);
-    x1_ = cfg.getDouble("x1", 1.0);
+    grid_.x0 = cfg.getDouble("x0", 0.0);
+    grid_.x1 = cfg.getDouble("x1", 1.0);
 
     // Numerics / control
     gamma_       = cfg.getDouble("gamma", 1.4);
@@ -66,7 +184,7 @@ Solver1D::Solver1D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
 
     // Enforce a minimum number of ghost layers for the selected reconstruction scheme.
     const int ngReq = recon::requiredGhostCells(recon_.options().scheme);
-    if (ng_ < ngReq) {
+    if (grid_.ng < ngReq) {
         throw std::runtime_error("ng is too small for the selected reconstruction.scheme");
     }
 
@@ -80,24 +198,25 @@ Solver1D::Solver1D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // 2) Domain decomposition (MPI)
     // -----------------------------
     // Decompose the global interior grid into contiguous x-blocks across px ranks.
-    sub_  = mp_.decompose1D(nxGlobal_);
-    iBeg_ = sub_.iBeg();
-    nx_   = sub_.nx();
+    sub_  = mp_.decompose1D(grid_.nxGlobal);
+    grid_.iBeg = sub_.iBeg();
+    grid_.nx   = sub_.nx();
 
     // Global grid spacing is defined by the global mesh and used consistently on all ranks.
-    const double dxG = (x1_ - x0_) / static_cast<double>(nxGlobal_);
+    const double dxG = grid_.dx();
 
     // Local physical extents for this block
-    const double x0Loc = x0_ + static_cast<double>(iBeg_) * dxG;
-    const double x1Loc = x0_ + static_cast<double>(iBeg_ + nx_) * dxG;
+    const double x0Loc = grid_.x0 + static_cast<double>(grid_.iBeg) * dxG;
+    const double x1Loc = grid_.x0 + static_cast<double>(grid_.iBeg + grid_.nx) * dxG;
 
     // --------------------
     // 3) Allocate solution
     // --------------------
     // Allocate local arrays including ghost cells.
-    nxTot_ = nx_ + 2 * ng_;
-    U_.assign(nxTot_, Vec3{});
-    RHS_.assign(nxTot_, Vec3{});
+    grid_.nxTot = grid_.nx + 2 * grid_.ng;
+    U_.assign(grid_.nxTot, Vec3{});
+    RHS_.assign(grid_.nxTot, Vec3{});
+    faces_.resize(grid_.nx);
 
     // -----------------------------
     // 4) Choose numerical methods
@@ -111,15 +230,15 @@ Solver1D::Solver1D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // -----------------------------
     const bool useSetFields = cfg.getBool("setFields.use", false);
     if (!useSetFields) {
-        ic_.reset(makeIC1D(cfg.getString("ic", "sod")));
+        ic_.reset(makeIC1D(cfg.getString("ic", "riemann")));
     }
 
     // Initialise only this-rank interior block using local physical extents.
     // Ghost cells are filled later by applyBC().
     if (useSetFields) {
-        setFields1D(U_, nx_, ng_, x0Loc, x1Loc, gamma_, cfg);
+        setFields1D(U_, grid_.nx, grid_.ng, x0Loc, x1Loc, gamma_, cfg);
     } else {
-        ic_->apply(U_, nx_, ng_, x0Loc, x1Loc, gamma_, cfg);
+        ic_->apply(U_, grid_.nx, grid_.ng, x0Loc, x1Loc, gamma_, cfg);
     }
 }
 
@@ -131,7 +250,7 @@ Solver1D::Solver1D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
 //         boundary::BcType::Internal so boundary::apply1D(...) leaves those ghosts untouched.
 void Solver1D::applyBC(std::vector<Vec3>& U) const {
     // 1) Exchange halos across MPI subdomain interfaces
-    mp_.exchangeHalos1D(reinterpret_cast<double*>(U.data()), nx_, ng_, 3);
+    mp_.exchangeHalos1D(reinterpret_cast<double*>(U.data()), grid_.nx, grid_.ng, 3);
 
     // Determine whether this rank touches the global domain boundary.
     // MPI_PROC_NULL indicates there is no neighbor in that direction.
@@ -144,17 +263,17 @@ void Solver1D::applyBC(std::vector<Vec3>& U) const {
         bcApply.right.type = boundary::BcType::Internal;
     }
 
-    boundary::apply1D(U, nx_, ng_, bcApply);
+    boundary::apply1D(U, grid_.nx, grid_.ng, bcApply);
 }
 
 // Compute a stable time step from the CFL condition:
 //   dt = CFL * dx / max(|u| + a)
 // where a is the sound speed. We reduce the maximum wave speed across all ranks.
 double Solver1D::computeDt(const std::vector<Vec3>& U) const {
-    const double dx = (x1_ - x0_) / nxGlobal_;
+    const double dx = grid_.dx();
     double maxChar = 1e-14;
-    for (int i = 0; i < nx_; ++i) {
-        const auto Wi = evalFlowVars(U[ng_ + i], gamma_);
+    for (int i = 0; i < grid_.nx; ++i) {
+        const auto Wi = evalFlowVars(U[grid_.ng + i], gamma_);
         maxChar = std::max(maxChar, std::abs(Wi.u) + Wi.a);
     }
     // Global maximum across ranks so all ranks advance with the same dt.
@@ -168,9 +287,9 @@ double Solver1D::computeDt(const std::vector<Vec3>& U) const {
 //   - Reconstruction module produces UL/UR at faces
 //   - Flux module computes F at faces via a Riemann solver
 //   - Finite-volume divergence produces the cell RHS
-void Solver1D::buildRHS(const std::vector<Vec3>& U, std::vector<Vec3>& RHS) const {
-    if (static_cast<int>(RHS.size()) != nx_ + 2 * ng_) {
-        RHS.assign(nx_ + 2 * ng_, Vec3{});
+void Solver1D::buildRHS(const std::vector<Vec3>& U, std::vector<Vec3>& RHS) {
+    if (static_cast<int>(RHS.size()) != grid_.nxTot) {
+        RHS.assign(grid_.nxTot, Vec3{});
     } else {
         std::fill(RHS.begin(), RHS.end(), Vec3{});
     }
@@ -178,57 +297,37 @@ void Solver1D::buildRHS(const std::vector<Vec3>& U, std::vector<Vec3>& RHS) cons
     // Reconstruction is characteristic-only. The reconstruction module returns
     // conservative face states UL/UR, with characteristic projection details
     // handled internally.
-    // Reconstruct left/right conservative states at faces i=0..nx.
-    std::vector<Vec3> UL, UR;
-    recon_.reconstructFaces(U, nx_, ng_, gamma_, UL, UR);
+    recon_.reconstructFaces(U, grid_.nx, grid_.ng, gamma_, faces_.UL, faces_.UR);
 
     // Compute numerical flux at each face.
-    std::vector<Vec3> F(nx_ + 1);
-    for (int i = 0; i < nx_ + 1; ++i) {
-        F[i] = flux_->numericalFlux(UL[i], UR[i], 0, gamma_);
+    for (int i = 0; i < grid_.nx + 1; ++i) {
+        const int f = idxFace(i);
+        faces_.F[f] = flux_->numericalFlux(faces_.UL[f], faces_.UR[f], 0, gamma_);
     }
 
     // Divergence of flux: RHS_i = -(F_{i+1/2} - F_{i-1/2}) / dx
-    const double dx = (x1_ - x0_) / nxGlobal_;
-    for (int i = 0; i < nx_; ++i) {
+    const double dx = grid_.dx();
+    for (int i = 0; i < grid_.nx; ++i) {
         for (int k = 0; k < 3; ++k) {
-            RHS[ng_ + i][k] = -(F[i + 1][k] - F[i][k]) / dx;
+            RHS[grid_.ng + i][k] = -(faces_.F[idxFace(i + 1)][k] - faces_.F[idxFace(i)][k]) / dx;
         }
     }
 }
 
 StateScanReport Solver1D::scanInteriorStates(const std::vector<Vec3>& U) const {
     StateScanReport report{};
-    report.total = static_cast<std::size_t>(nx_);
+    report.total = static_cast<std::size_t>(grid_.nx);
     report.minRho = std::numeric_limits<double>::infinity();
     report.minP   = std::numeric_limits<double>::infinity();
 
-    for (int i = 0; i < nx_; ++i) {
-        const auto result = checkConservative(U[ng_ + i], gamma_, stateLimits_);
+    for (int i = 0; i < grid_.nx; ++i) {
+        const auto result = checkConservative(U[grid_.ng + i], gamma_, stateLimits_);
 
         report.minRho = std::min(report.minRho, result.rho);
         report.minP   = std::min(report.minP,   result.p);
 
         if (!result.ok) {
-            switch (result.status) {
-                case StateStatus::NonFinite:
-                    ++report.nonFiniteCount;
-                    break;
-                case StateStatus::NegativeDensity:
-                case StateStatus::DensityTooSmall:
-                    ++report.badDensityCount;
-                    break;
-                case StateStatus::NegativePressure:
-                case StateStatus::PressureTooSmall:
-                    ++report.badPressureCount;
-                    break;
-                case StateStatus::NegativeInternalEnergy:
-                    ++report.badInternalEnergyCount;
-                    break;
-                case StateStatus::Ok:
-                default:
-                    break;
-            }
+            accumulateStateFailure(report, result.status);
         }
     }
 
@@ -255,20 +354,7 @@ void Solver1D::appendStateDiagnosticsCsv(int step, double t, const StateScanRepo
                                          const std::string& tag) const {
     if (!enableStateDiagnostics_) return;
 
-    const unsigned long long localCounts[5] = {
-        static_cast<unsigned long long>(report.total),
-        static_cast<unsigned long long>(report.nonFiniteCount),
-        static_cast<unsigned long long>(report.badDensityCount),
-        static_cast<unsigned long long>(report.badPressureCount),
-        static_cast<unsigned long long>(report.badInternalEnergyCount)
-    };
-    unsigned long long globalCounts[5] = {0, 0, 0, 0, 0};
-
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_UNSIGNED_LONG_LONG, MPI_SUM, mp_.cartComm());
-
-    const double localMin[2] = {report.minRho, report.minP};
-    double globalMin[2] = {0.0, 0.0};
-    MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, mp_.cartComm());
+    const ReducedStateScanReport global = reduceStateScanReportMPI(report, mp_.cartComm());
 
     if (!mp_.isRoot()) return;
 
@@ -294,13 +380,13 @@ void Solver1D::appendStateDiagnosticsCsv(int step, double t, const StateScanRepo
     ofs << tag << ","
         << step << ","
         << std::setprecision(16) << t << ","
-        << globalCounts[0] << ","
-        << globalMin[0] << ","
-        << globalMin[1] << ","
-        << globalCounts[1] << ","
-        << globalCounts[2] << ","
-        << globalCounts[3] << ","
-        << globalCounts[4] << "\n";
+        << global.total << ","
+        << global.minRho << ","
+        << global.minP << ","
+        << global.nonFiniteCount << ","
+        << global.badDensityCount << ","
+        << global.badPressureCount << ","
+        << global.badInternalEnergyCount << "\n";
 }
 
 // Periodic output.
@@ -310,35 +396,14 @@ void Solver1D::writeOutput(int step, double t) const {
     if (outputEvery_ <= 0) return;
     if (step % outputEvery_ != 0) return;
 
-    // Create output directory once on root.
-    namespace fs = std::filesystem;
-    const fs::path outDir = "solution";
-    if (mp_.isRoot()) {
-        fs::create_directories(outDir);
-    }
-    mp_.barrier();
-
-    // File naming convention: <prefix>_stepXXXX_t=TTTTTT.vtk
-    // Step is zero-padded for easy sorting.
-    std::ostringstream stepSS;
-    stepSS << std::setw(4) << std::setfill('0') << step;
-
-    std::ostringstream tSS;
-    tSS << std::fixed << std::setprecision(6) << t;
-
-    const fs::path fname = outDir / (outPrefix_ + "_step" + stepSS.str() + "_t=" + tSS.str() + ".vtk");
-    if (mp_.isRoot()) {
-        std::cout << "[1D] Writing merged " << fname.string() << " at t=" << t << "\n";
-    }
-
-    // MPI gather + merged VTK write.
-    writeVTK1D_GatherMPI(fname.string(),
-                         U_, nx_, ng_,
-                         iBeg_,
-                         nxGlobal_,
-                         x0_, x1_,
-                         gamma_,
-                         mp_.cartComm());
+    ensureOutputDirectoryExists(mp_);
+    const std::string fname = makeStepOutputPath(outPrefix_, step, t);
+    writeMergedVtkFile1D(mp_, fname, "step", t,
+                         U_, grid_.nx, grid_.ng,
+                         grid_.iBeg,
+                         grid_.nxGlobal,
+                         grid_.x0, grid_.x1,
+                         gamma_);
 }
 
 // Main time-marching loop.
@@ -349,9 +414,9 @@ void Solver1D::run() {
     double t = 0.0;
     int step = 0;
     std::cout << "[1D][r" << mp_.rank() << "] Starting run, finalTime=" << finalTime_
-              << ", global=" << nxGlobal_
-              << ", local=" << nx_
-              << ", iBeg=" << iBeg_ << "\n";
+              << ", global=" << grid_.nxGlobal
+              << ", local=" << grid_.nx
+              << ", iBeg=" << grid_.iBeg << "\n";
 
     // Initial RHS build and output.
     applyBC(U_);
@@ -386,32 +451,20 @@ void Solver1D::run() {
 
     // Optional final snapshot.
     if (writeFinal_) {
-        namespace fs = std::filesystem;
-        const fs::path outDir = "solution";
-        if (mp_.isRoot()) {
-            fs::create_directories(outDir);
-        }
-        mp_.barrier();
+        ensureOutputDirectoryExists(mp_);
 
         applyBC(U_);
         const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
         if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
             appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "final");
         }
-        std::ostringstream tSS;
-        tSS << std::fixed << std::setprecision(6) << t;
 
-        const fs::path fname = outDir / (outPrefix_ + "_final_t=" + tSS.str() + ".vtk");
-        if (mp_.isRoot()) {
-            std::cout << "[1D] Writing merged final " << fname.string() << " at t=" << t << "\n";
-        }
-
-        writeVTK1D_GatherMPI(fname.string(),
-                             U_, nx_, ng_,
-                             iBeg_,
-                             nxGlobal_,
-                             x0_, x1_,
-                             gamma_,
-                             mp_.cartComm());
+        const std::string fname = makeFinalOutputPath(outPrefix_, t);
+        writeMergedVtkFile1D(mp_, fname, "final", t,
+                             U_, grid_.nx, grid_.ng,
+                             grid_.iBeg,
+                             grid_.nxGlobal,
+                             grid_.x0, grid_.x1,
+                             gamma_);
     }
 }

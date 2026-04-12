@@ -57,7 +57,7 @@ StateCheckResult checkPrimitiveImpl(const Prim& W, const StateLimits& limits) {
 }
 
 template<typename Prim>
-void clampPrimitiveImpl(Prim& W, const StateLimits& limits) {
+void repairPrimitiveImpl(Prim& W, const StateLimits& limits) {
     const double rhoFloor = std::max(limits.eps, limits.rhoMin);
     const double pFloor = std::max(limits.eps, limits.pMin);
     W.rho = std::max(W.rho, rhoFloor);
@@ -347,24 +347,24 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
     return result;
 }
 
-void clampPrimitive(Prim1& W, const StateLimits& limits) {
-    clampPrimitiveImpl(W, limits);
+void repairPrimitive(Prim1& W, const StateLimits& limits) {
+    repairPrimitiveImpl(W, limits);
 }
 
-void clampPrimitive(Prim2& W, const StateLimits& limits) {
-    clampPrimitiveImpl(W, limits);
+void repairPrimitive(Prim2& W, const StateLimits& limits) {
+    repairPrimitiveImpl(W, limits);
 }
 
 bool repairConservative(Vec3& U, double gamma, const StateLimits& limits) {
     Prim1 W = EosIdealGas<1>::consToPrim(U, gamma);
-    clampPrimitive(W, limits);
+    repairPrimitive(W, limits);
     U = EosIdealGas<1>::primToCons(W, gamma);
     return quickCheckConservative(U, gamma, limits).ok;
 }
 
 bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
     Prim2 W = EosIdealGas<2>::consToPrim(U, gamma);
-    clampPrimitive(W, limits);
+    repairPrimitive(W, limits);
     U = EosIdealGas<2>::primToCons(W, gamma);
     return quickCheckConservative(U, gamma, limits).ok;
 }

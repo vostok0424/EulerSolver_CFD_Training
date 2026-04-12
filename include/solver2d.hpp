@@ -41,6 +41,62 @@
 #include <string>
 #include <vector>
 
+// GridBlock2DInfo
+// ---------------
+// Compact description of the global 2D Cartesian mesh and this rank's local
+// owned block, including ghost-layer thickness and physical extents.
+struct GridBlock2DInfo {
+    int nxGlobal{};
+    int nyGlobal{};
+
+    int iBeg{};
+    int jBeg{};
+    int nx{};
+    int ny{};
+
+    int ng{};
+    int nxTot{};
+    int nyTot{};
+
+    double x0{};
+    double x1{};
+    double y0{};
+    double y1{};
+
+    double dx() const { return (x1 - x0) / static_cast<double>(nxGlobal); }
+    double dy() const { return (y1 - y0) / static_cast<double>(nyGlobal); }
+};
+
+// DirectionalFaceBuffers2D
+// ------------------------
+// Reusable face-centered storage for one coordinate direction:
+// - UL / UR: reconstructed left/right face states
+// - F      : numerical flux at each face
+struct DirectionalFaceBuffers2D {
+    std::vector<Vec4> UL;
+    std::vector<Vec4> UR;
+    std::vector<Vec4> F;
+
+    void resize(std::size_t nFaces) {
+        UL.resize(nFaces);
+        UR.resize(nFaces);
+        F.resize(nFaces);
+    }
+};
+
+// FaceBuffers2D
+// -------------
+// Direction-grouped face buffers for x-normal and y-normal faces.
+struct FaceBuffers2D {
+    DirectionalFaceBuffers2D x;
+    DirectionalFaceBuffers2D y;
+
+    void resize(int nx, int ny) {
+        x.resize(static_cast<std::size_t>(nx + 1) * static_cast<std::size_t>(ny));
+        y.resize(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny + 1));
+    }
+};
+
 // Solver2D
 // --------
 // Owns the 2D solution arrays and orchestrates the simulation.
@@ -67,25 +123,33 @@ private:
     const mpi_parallel::MpiParallel& mp_;
     mpi_parallel::Subdomain2D sub_{};
 
-    // Global mesh sizes (from cfg). In MPI runs, these are the full-domain sizes.
-    int nxGlobal_{}, nyGlobal_{};
+    // Global mesh and this-rank local block metadata.
+    GridBlock2DInfo grid_{};
 
-    // Local mesh sizes for this rank (interior only) and totals including ghosts.
-    int nx_{}, ny_{}, ng_{};
-    int nxTot_{}, nyTot_{};
+    // Primary conservative solution (cell-centered) and RHS storage.
+    std::vector<Vec4> U_;
+    std::vector<Vec4> RHS_;
 
-    // Global start indices of this rank's interior block (0-based).
-    int iBeg_{}, jBeg_{};
+    // Reusable face-centered reconstruction/flux buffers.
+    FaceBuffers2D faces_{};
 
-    // Local physical coordinates for this rank's interior domain.
-    double x0_{}, x1_{}, y0_{}, y1_{};
+    // Parsed 2D boundary-condition object (types + per-side parameters).
+    boundary::Bc2D bc_;
+    // Reconstruction module: builds face left/right states from cell values.
+    recon::Reconstruction2D recon_;
+
+    // Pluggable numerical modules selected by cfg.
+    std::unique_ptr<FluxD<2>> flux_;
+    std::unique_ptr<TimeIntegratorT<Vec4>> ti_;
+    std::unique_ptr<IC2D> ic_;
+
+    // Run-control parameters.
     double gamma_{};
     double cfl_{};
     double finalTime_{};
-
     int outputEvery_{};
     bool writeFinal_{};
-    std::string outPrefix_;
+    std::string outPrefix_{};
 
     // Shared state-layer thresholds/diagnostic options used for interior-state checks.
     StateLimits stateLimits_{};
@@ -93,30 +157,12 @@ private:
     std::string stateDiagCsvPath_;
     mutable bool stateDiagWriteHeader_{true};
 
-    // Parsed 2D boundary-condition object (types + per-side parameters).
-    boundary::Bc2D bc_;
-    // Reconstruction module: builds face left/right states from cell values.
-    recon::Reconstruction2D recon_;
+    // Flatten (i,j) into a 1D index for ghosted cell-centered arrays.
+    int idx(int i, int j) const { return i + grid_.nxTot * j; }
 
-    // Primary conservative solution (cell-centered) and RHS storage.
-    std::vector<Vec4> U_;
-    std::vector<Vec4> RHS_;
-
-    // Reusable RHS work buffers to avoid repeated allocation inside buildRHS().
-    std::vector<Vec4> ULxBuf_;
-    std::vector<Vec4> URxBuf_;
-    std::vector<Vec4> ULyBuf_;
-    std::vector<Vec4> URyBuf_;
-    std::vector<Vec4> FxBuf_;
-    std::vector<Vec4> GyBuf_;
-
-    // Pluggable numerical modules selected by cfg.
-    std::unique_ptr<FluxD<2>> flux_;
-    std::unique_ptr<TimeIntegratorT<Vec4>> ti_;
-    std::unique_ptr<IC2D> ic_;
-
-    // Flatten (i,j) into a 1D index for ghosted arrays (0..nxTot_-1, 0..nyTot_-1).
-    int idx(int i, int j) const { return i + nxTot_ * j; }
+    // Flatten local x-face and y-face indices into 1D storage.
+    int idxFaceX(int i, int j) const { return i + (grid_.nx + 1) * j; }
+    int idxFaceY(int i, int j) const { return i + grid_.nx * j; }
 
     // Fill ghost cells using MPI halo exchange on internal interfaces and
     // physical boundary conditions on domain edges.

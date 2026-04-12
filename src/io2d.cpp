@@ -15,9 +15,11 @@
 // This file writes a single ASCII legacy VTK rectilinear-grid file (.vtk)
 // for post-processing in ParaView or other VTK-capable tools.
 //
-// The solution is cell-centered and stored as CELL_DATA on a 2D
-// RECTILINEAR_GRID. The x- and y-coordinates written to the VTK file are the
-// cell-edge coordinates spanning the physical domain [x0, x1] x [y0, y1].
+// The solution is written as POINT_DATA on a 2D RECTILINEAR_GRID.
+// The x- and y-coordinates written to the VTK file are the cell-edge
+// coordinates spanning the physical domain [x0, x1] x [y0, y1]. Node values
+// are obtained from the cell-centered finite-volume solution by averaging the
+// surrounding cells.
 //
 // Output fields:
 //   rho      : density
@@ -30,6 +32,7 @@
 // MPI:
 // - writeVTK2D_GatherMPI gathers each rank's *interior* cell data to rank 0,
 //   assembles a global field, then calls writeVTK2D to write a single merged VTK file.
+//   The merged output is converted to POINT_DATA inside writeVTK2D.
 
 // MPI gather/assembly packs Vec4 into raw doubles. Ensure it is tightly-packed.
 static_assert(std::is_trivially_copyable_v<Vec4>, "Vec4 must be trivially copyable for MPI I/O packing");
@@ -50,6 +53,7 @@ void writeVTK2D(const std::string& filename,
 
     const int nxPts = nx + 1;
     const int nyPts = ny + 1;
+    auto idxP = [&](int i, int j) { return i + nxPts * j; };
     const double dx = (x1 - x0) / static_cast<double>(nx);
     const double dy = (y1 - y0) / static_cast<double>(ny);
 
@@ -84,61 +88,128 @@ void writeVTK2D(const std::string& filename,
     out << "Z_COORDINATES 1 double\n";
     out << 0.0 << "\n";
 
-    out << "CELL_DATA " << (nx * ny) << "\n";
+    const int nCells = nx * ny;
+    const int nPts = nxPts * nyPts;
+    auto idxC = [&](int i, int j) { return i + nx * j; };
 
-    out << "SCALARS rho double 1\n";
-    out << "LOOKUP_TABLE default\n";
+    std::vector<double> rhoC(static_cast<std::size_t>(nCells));
+    std::vector<double> uC(static_cast<std::size_t>(nCells));
+    std::vector<double> vC(static_cast<std::size_t>(nCells));
+    std::vector<double> pC(static_cast<std::size_t>(nCells));
+    std::vector<double> rhoUC(static_cast<std::size_t>(nCells));
+    std::vector<double> rhoVC(static_cast<std::size_t>(nCells));
+    std::vector<double> EC(static_cast<std::size_t>(nCells));
+
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
             const Vec4& Q = U[idx(ng + i, ng + j)];
             const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.rho << "\n";
+            const std::size_t kc = static_cast<std::size_t>(idxC(i, j));
+            rhoC[kc] = W.rho;
+            uC[kc] = W.u[0];
+            vC[kc] = W.u[1];
+            pC[kc] = W.p;
+            rhoUC[kc] = Q[1];
+            rhoVC[kc] = Q[2];
+            EC[kc] = Q[3];
+        }
+    }
+
+    std::vector<double> rhoP(static_cast<std::size_t>(nPts));
+    std::vector<double> uP(static_cast<std::size_t>(nPts));
+    std::vector<double> vP(static_cast<std::size_t>(nPts));
+    std::vector<double> pP(static_cast<std::size_t>(nPts));
+    std::vector<double> rhoUP(static_cast<std::size_t>(nPts));
+    std::vector<double> rhoVP(static_cast<std::size_t>(nPts));
+    std::vector<double> EP(static_cast<std::size_t>(nPts));
+
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            double rhoSum = 0.0;
+            double uSum = 0.0;
+            double vSum = 0.0;
+            double pSum = 0.0;
+            double rhoUSum = 0.0;
+            double rhoVSum = 0.0;
+            double ESum = 0.0;
+            int cnt = 0;
+
+            for (int dj = -1; dj <= 0; ++dj) {
+                for (int di = -1; di <= 0; ++di) {
+                    const int ic = i + di;
+                    const int jc = j + dj;
+                    if (ic >= 0 && ic < nx && jc >= 0 && jc < ny) {
+                        const std::size_t kc = static_cast<std::size_t>(idxC(ic, jc));
+                        rhoSum += rhoC[kc];
+                        uSum += uC[kc];
+                        vSum += vC[kc];
+                        pSum += pC[kc];
+                        rhoUSum += rhoUC[kc];
+                        rhoVSum += rhoVC[kc];
+                        ESum += EC[kc];
+                        ++cnt;
+                    }
+                }
+            }
+
+            const std::size_t kp = static_cast<std::size_t>(idxP(i, j));
+            rhoP[kp] = rhoSum / static_cast<double>(cnt);
+            uP[kp] = uSum / static_cast<double>(cnt);
+            vP[kp] = vSum / static_cast<double>(cnt);
+            pP[kp] = pSum / static_cast<double>(cnt);
+            rhoUP[kp] = rhoUSum / static_cast<double>(cnt);
+            rhoVP[kp] = rhoVSum / static_cast<double>(cnt);
+            EP[kp] = ESum / static_cast<double>(cnt);
+        }
+    }
+
+    out << "POINT_DATA " << nPts << "\n";
+
+    out << "SCALARS rho double 1\n";
+    out << "LOOKUP_TABLE default\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            out << rhoP[static_cast<std::size_t>(idxP(i, j))] << "\n";
         }
     }
 
     out << "VECTORS velocity double\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.u[0] << ' ' << W.u[1] << ' ' << 0.0 << "\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            const std::size_t kp = static_cast<std::size_t>(idxP(i, j));
+            out << uP[kp] << ' ' << vP[kp] << ' ' << 0.0 << "\n";
         }
     }
 
     out << "SCALARS p double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.p << "\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            out << pP[static_cast<std::size_t>(idxP(i, j))] << "\n";
         }
     }
 
     out << "SCALARS rho_u double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[1] << "\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            out << rhoUP[static_cast<std::size_t>(idxP(i, j))] << "\n";
         }
     }
 
     out << "SCALARS rho_v double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[2] << "\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            out << rhoVP[static_cast<std::size_t>(idxP(i, j))] << "\n";
         }
     }
 
     out << "SCALARS E double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[3] << "\n";
+    for (int j = 0; j < nyPts; ++j) {
+        for (int i = 0; i < nxPts; ++i) {
+            out << EP[static_cast<std::size_t>(idxP(i, j))] << "\n";
         }
     }
 
@@ -152,6 +223,7 @@ void writeVTK2D(const std::string& filename,
 
 // Gather local interior cell data to rank 0 and write a single merged VTK file.
 // Each rank provides ONLY its interior cells (ghost cells are excluded).
+// The merged output is converted to POINT_DATA inside writeVTK2D.
 void writeVTK2D_GatherMPI(const std::string& filename,
                           const std::vector<Vec4>& Ulocal,
                           int nxLocal, int nyLocal, int ng,
@@ -279,6 +351,6 @@ void writeVTK2D_GatherMPI(const std::string& filename,
         }
     }
 
-    // Write a single merged VTK containing cell-centered data.
+    // Write a single merged VTK as point data derived from the cell-centered solution.
     writeVTK2D(filename, Uglobal, nxGlobal, nyGlobal, ngOut, x0, x1, y0, y1, gamma);
 }

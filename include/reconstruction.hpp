@@ -12,7 +12,7 @@
 //   - A small set of reconstruction schemes (FirstOrder, MUSCL, WENO5)
 //   - Characteristic-space reconstruction only
 //   - Conservative-characteristic projection with Roe linearization
-//   - Limiter selection (for MUSCL)
+//   - A reduced MUSCL limiter set (None, Minmod, VanLeer)
 //   - Option parsing from cfg
 //
 // Ghost cells:
@@ -69,13 +69,13 @@ inline bool isHighOrder(Scheme s) {
 // Limiter: slope limiter used by MUSCL.
 //
 // None disables limiting (can overshoot near discontinuities).
-// Common safe choices: Minmod (most diffusive), MC/VanLeer (balanced), Superbee (sharp).
+// Supported choices are intentionally kept small:
+//   Minmod  : most diffusive but robust
+//   VanLeer : less diffusive and smooth in regular regions
 enum class Limiter {
     None,
     Minmod,
-    VanLeer,
-    MC,
-    Superbee
+    VanLeer
 };
 
 // Options
@@ -85,17 +85,18 @@ enum class Limiter {
 struct Options {
     Scheme scheme = Scheme::FirstOrder;
     // Limiter for MUSCL (ignored for FirstOrder/WENO5).
-    Limiter limiter = Limiter::MC;
+    Limiter limiter = Limiter::VanLeer;
 
-    // Positivity safeguard: if enabled, reconstruction will call the centralized
-    // state-layer repair routine on reconstructed face states.
+    // Admissibility / repair controls.
+    // If enabled, reconstruction will call the centralized state-layer repair
+    // routine on reconstructed face states.
     bool positivityFix = true;
     // If a reconstructed face state is not admissible, retry with a lower-order scheme.
     bool enableFallback = true;
 
-    // Small epsilon used in WENO weights and positivity clamping.
+    // Numerical tolerances.
+    // Small epsilon used in WENO weights and positivity-related clamping.
     double eps = 1e-12;
-
 
     // Small admissibility floors used by the centralized state-layer checks.
     double rhoMin = 1e-12;
@@ -121,7 +122,7 @@ struct Options {
 //
 // Expected keys (strict strings; invalid values should trigger clear errors):
 //   reconstruction.scheme: firstOrder | muscl | weno5
-//   reconstruction.limiter: none | minmod | vanleer | mc | superbee
+//   reconstruction.limiter: none | minmod | vanleer
 //   reconstruction.positivityFix: true|false
 //   reconstruction.enableFallback: true|false
 //   reconstruction.eps: small positive number (e.g. 1e-12)
@@ -131,6 +132,7 @@ struct Options {
 //   WENO5 uses the standard Jiang–Shu nonlinear weights with exponent fixed at p = 2
 // Characteristic reconstruction is fixed to conservative variables
 // with Roe linearization; no characteristic-mode cfg keys are exposed.
+// Limiter support is intentionally restricted to the small set above.
 Options readOptions(const Cfg& cfg);
 
 // Reconstruction1D

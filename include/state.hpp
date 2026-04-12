@@ -191,8 +191,8 @@ StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimit
 StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits);
 
 // Primitive-state positivity clamps.
-void clampPrimitive(Prim1& W, const StateLimits& limits);
-void clampPrimitive(Prim2& W, const StateLimits& limits);
+void repairPrimitive(Prim1& W, const StateLimits& limits);
+void repairPrimitive(Prim2& W, const StateLimits& limits);
 
 // Conservative-state repair via primitive conversion, clamping, and back
 // conversion. This remains a final fallback after quick/full validation fails.

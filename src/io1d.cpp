@@ -12,9 +12,12 @@
 // This file writes a single ASCII legacy VTK rectilinear-grid file (.vtk)
 // for post-processing in ParaView or other VTK-capable tools.
 //
-// The solution is cell-centered and stored as CELL_DATA on a 1D
-// RECTILINEAR_GRID. The x-coordinates written to the VTK file are the
-// cell-edge coordinates spanning the physical domain [x0, x1].
+// The solution is stored as POINT_DATA on a 1D RECTILINEAR_GRID.
+// The x-coordinates written to the VTK file are the cell-edge
+// coordinates spanning the physical domain [x0, x1]. Node values are
+// obtained from the cell-centered finite-volume solution by averaging
+// adjacent cells, while the two domain endpoints reuse the nearest
+// interior cell value.
 //
 // Output fields:
 //   rho   : density
@@ -70,50 +73,87 @@ void writeVTK1D(const std::string& filename,
     ofs << "Z_COORDINATES 1 double\n";
     ofs << 0.0 << "\n";
 
-    // Cell-centered solution fields.
-    ofs << "CELL_DATA " << nx << "\n";
+    // Convert cell-centered solution fields to nodal values for POINT_DATA output.
+    std::vector<double> rhoC(static_cast<std::size_t>(nx));
+    std::vector<double> uC(static_cast<std::size_t>(nx));
+    std::vector<double> pC(static_cast<std::size_t>(nx));
+    std::vector<double> rhoUC(static_cast<std::size_t>(nx));
+    std::vector<double> EC(static_cast<std::size_t>(nx));
 
-    ofs << "SCALARS rho double 1\n";
-    ofs << "LOOKUP_TABLE default\n";
     for (int i = 0; i < nx; ++i) {
         const Vec3& Ui = U[ng + i];
         const auto Wi = EosIdealGas<1>::consToPrim(Ui, gamma);
-        ofs << Wi.rho << "\n";
+        rhoC[static_cast<std::size_t>(i)] = Wi.rho;
+        uC[static_cast<std::size_t>(i)] = Wi.u[0];
+        pC[static_cast<std::size_t>(i)] = Wi.p;
+        rhoUC[static_cast<std::size_t>(i)] = Ui[1];
+        EC[static_cast<std::size_t>(i)] = Ui[2];
+    }
+
+    std::vector<double> rhoP(static_cast<std::size_t>(nxPts));
+    std::vector<double> uP(static_cast<std::size_t>(nxPts));
+    std::vector<double> pP(static_cast<std::size_t>(nxPts));
+    std::vector<double> rhoUP(static_cast<std::size_t>(nxPts));
+    std::vector<double> EP(static_cast<std::size_t>(nxPts));
+
+    rhoP.front() = rhoC.front();
+    uP.front() = uC.front();
+    pP.front() = pC.front();
+    rhoUP.front() = rhoUC.front();
+    EP.front() = EC.front();
+
+    rhoP.back() = rhoC.back();
+    uP.back() = uC.back();
+    pP.back() = pC.back();
+    rhoUP.back() = rhoUC.back();
+    EP.back() = EC.back();
+
+    for (int i = 1; i < nx; ++i) {
+        const std::size_t im = static_cast<std::size_t>(i - 1);
+        const std::size_t ip = static_cast<std::size_t>(i);
+        rhoP[ip] = 0.5 * (rhoC[im] + rhoC[ip]);
+        uP[ip] = 0.5 * (uC[im] + uC[ip]);
+        pP[ip] = 0.5 * (pC[im] + pC[ip]);
+        rhoUP[ip] = 0.5 * (rhoUC[im] + rhoUC[ip]);
+        EP[ip] = 0.5 * (EC[im] + EC[ip]);
+    }
+
+    ofs << "POINT_DATA " << nxPts << "\n";
+
+    ofs << "SCALARS rho double 1\n";
+    ofs << "LOOKUP_TABLE default\n";
+    for (int i = 0; i < nxPts; ++i) {
+        ofs << rhoP[static_cast<std::size_t>(i)] << "\n";
     }
 
     ofs << "SCALARS u double 1\n";
     ofs << "LOOKUP_TABLE default\n";
-    for (int i = 0; i < nx; ++i) {
-        const Vec3& Ui = U[ng + i];
-        const auto Wi = EosIdealGas<1>::consToPrim(Ui, gamma);
-        ofs << Wi.u[0] << "\n";
+    for (int i = 0; i < nxPts; ++i) {
+        ofs << uP[static_cast<std::size_t>(i)] << "\n";
     }
 
     ofs << "SCALARS p double 1\n";
     ofs << "LOOKUP_TABLE default\n";
-    for (int i = 0; i < nx; ++i) {
-        const Vec3& Ui = U[ng + i];
-        const auto Wi = EosIdealGas<1>::consToPrim(Ui, gamma);
-        ofs << Wi.p << "\n";
+    for (int i = 0; i < nxPts; ++i) {
+        ofs << pP[static_cast<std::size_t>(i)] << "\n";
     }
 
     ofs << "SCALARS rho_u double 1\n";
     ofs << "LOOKUP_TABLE default\n";
-    for (int i = 0; i < nx; ++i) {
-        const Vec3& Ui = U[ng + i];
-        ofs << Ui[1] << "\n";
+    for (int i = 0; i < nxPts; ++i) {
+        ofs << rhoUP[static_cast<std::size_t>(i)] << "\n";
     }
 
     ofs << "SCALARS E double 1\n";
     ofs << "LOOKUP_TABLE default\n";
-    for (int i = 0; i < nx; ++i) {
-        const Vec3& Ui = U[ng + i];
-        ofs << Ui[2] << "\n";
+    for (int i = 0; i < nxPts; ++i) {
+        ofs << EP[static_cast<std::size_t>(i)] << "\n";
     }
 }
 
 // Gather local interior cell data to rank 0 and write a single merged VTK file.
 // Each rank provides ONLY its interior cells (ghost cells are excluded).
+// The merged output is converted to POINT_DATA inside writeVTK1D.
 void writeVTK1D_GatherMPI(const std::string& filename,
                           const std::vector<Vec3>& Ulocal,
                           int nxLocal, int ng,
@@ -228,6 +268,6 @@ void writeVTK1D_GatherMPI(const std::string& filename,
         }
     }
 
-    // Write merged VTK containing cell-centered data.
+    // Write merged VTK as point data derived from the cell-centered solution.
     writeVTK1D(filename, Uglobal, nxGlobal, ngOut, x0, x1, gamma);
 }

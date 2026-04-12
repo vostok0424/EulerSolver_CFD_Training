@@ -61,9 +61,6 @@ static inline double applyLimiter(Limiter lim, double dl, double dr) {
         case Limiter::None:    return 0.5 * (dl + dr);
         case Limiter::Minmod:  return minmod(dl, dr);
         case Limiter::VanLeer: return vanleer(dl, dr);
-        case Limiter::MC:
-        case Limiter::Superbee:
-            throw std::runtime_error("Characteristic reconstruction: unsupported limiter");
     }
     return minmod(dl, dr);
 }
@@ -142,7 +139,7 @@ static Limiter parseLimiter(const std::string& s) {
     if (v.empty() || v == "vanleer") return Limiter::VanLeer;
     if (v == "none") return Limiter::None;
     if (v == "minmod") return Limiter::Minmod;
-    throw std::runtime_error("reconstruction.limiter unsupported: " + v);
+    throw std::runtime_error("reconstruction.limiter unsupported: " + v + " (supported: none|minmod|vanleer)");
 }
 
 // Read the active reconstruction options.
@@ -427,10 +424,33 @@ static inline bool isAdmissibleState(const VecT& Uc, double gamma, const StateLi
     return admissibleStateCached(Uc, gamma, limits, cache);
 }
 
+
 template <typename VecT>
 static inline bool isQuickAdmissibleState(const VecT& Uc, double gamma, const StateLimits& limits) {
     CachedStateCheck<VecT> cache;
     return quickAdmissibleStateCached(Uc, gamma, limits, cache);
+}
+
+// First-order face loading shared by 1D and 2D drivers. The caller provides a
+// small loader that fills ULf/URf from neighboring cell-centered states.
+// Optional centralized repair is then applied to each face state.
+template <typename VecT, typename LoadFaceFn>
+static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
+                                            bool positivityFix,
+                                            double gamma,
+                                            const StateLimits& limits,
+                                            VecT& ULf,
+                                            VecT& URf) {
+    loadFace(ULf, URf);
+    if (!positivityFix) {
+        return;
+    }
+    if (!isAdmissibleState(ULf, gamma, limits)) {
+        repairConservative(ULf, gamma, limits);
+    }
+    if (!isAdmissibleState(URf, gamma, limits)) {
+        repairConservative(URf, gamma, limits);
+    }
 }
 
 
@@ -462,6 +482,7 @@ static inline void reconstructFaceMUSCLFromCharCache(const EigenT& eig,
     mulR(eig, wRf, URf);
 }
 
+
 template <typename VecT, typename EigenT, int NVAR>
 static inline void reconstructFaceWENO5FromCharCache(const EigenT& eig,
                                                      double eps,
@@ -481,7 +502,51 @@ static inline void reconstructFaceWENO5FromCharCache(const EigenT& eig,
     mulR(eig, wRf, URf);
 }
 
-// Shared face finalization: admissibility, fallback, and repair.
+// Shared high-order characteristic reconstruction dispatcher. The caller only
+// provides cache-filling lambdas for the MUSCL and WENO5 stencil layouts.
+template <typename VecT, typename EigenT, int NVAR,
+          typename FillMusclCacheFn, typename FillWenoCacheFn>
+static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
+                                                    const EigenT& eig,
+                                                    Limiter limiter,
+                                                    double eps,
+                                                    FillMusclCacheFn&& fillMusclCache,
+                                                    FillWenoCacheFn&& fillWenoCache,
+                                                    void (*mulR)(const EigenT&, const double*, VecT&),
+                                                    VecT& ULf,
+                                                    VecT& URf) {
+    if (scheme == Scheme::MUSCL) {
+        double wc[4][NVAR];
+        fillMusclCache(wc);
+        reconstructFaceMUSCLFromCharCache<VecT, EigenT, NVAR>(eig,
+                                                               limiter,
+                                                               wc,
+                                                               mulR,
+                                                               ULf,
+                                                               URf);
+        return;
+    }
+
+    if (scheme == Scheme::WENO5) {
+        double wc[6][NVAR];
+        fillWenoCache(wc);
+        reconstructFaceWENO5FromCharCache<VecT, EigenT, NVAR>(eig,
+                                                               eps,
+                                                               wc,
+                                                               mulR,
+                                                               ULf,
+                                                               URf);
+        return;
+    }
+
+    throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
+}
+
+// Final face-state selection pipeline shared by 1D and 2D reconstruction:
+//   1) reconstruct with the requested high-order scheme;
+//   2) check admissibility;
+//   3) if enabled, fall back to first order when the high-order state fails;
+//   4) if enabled, attempt centralized positivity repair as a last step.
 template <typename VecT, typename ReconstructFaceFn, typename LoadFirstOrderFn>
 static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             bool enableFallback,
@@ -516,10 +581,13 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
             && admissibleStateCached(URf, gamma, limits, rightCheck);
     };
 
+    // First try the requested reconstruction scheme.
     reconstructAndReset(requestedScheme);
 
     bool ok = faceAdmissible();
 
+    // If the requested high-order state is not admissible, retry with a
+    // first-order face state when fallback is enabled.
     if (!ok && enableFallback && requestedScheme != Scheme::FirstOrder) {
         loadFirstOrderAndReset();
         ok = quickAdmissibleStateCached(ULf, gamma, limits, leftCheck)
@@ -529,6 +597,8 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
         }
     }
 
+    // As a final safeguard, attempt centralized conservative-state repair on
+    // each face state independently.
     if (!ok && positivityFix) {
         bool okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
         bool okR = admissibleStateCached(URf, gamma, limits, rightCheck);
@@ -575,23 +645,19 @@ void Reconstruction1D::reconstructFaces(const std::vector<Vec3>& U,
 
     const StateLimits limits = opt_.stateLimits();
 
-
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int i = 0; i < nx + 1; ++i) {
-            UL[i] = U[ng + i - 1];
-            UR[i] = U[ng + i];
-            if (opt_.positivityFix) {
-                if (!isAdmissibleState(UL[i], gamma, limits)) {
-                    repairConservative(UL[i], gamma, limits);
-                }
-                if (!isAdmissibleState(UR[i], gamma, limits)) {
-                    repairConservative(UR[i], gamma, limits);
-                }
-            }
+            auto loadFace = [&](Vec3& ULf, Vec3& URf) {
+                ULf = U[ng + i - 1];
+                URf = U[ng + i];
+            };
+            loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, UL[i], UR[i]);
         }
         return;
     }
-
+    // High-order path: build a face-local Roe eigensystem, project the stencil
+    // to characteristic space, reconstruct each characteristic scalar, then
+    // map the face states back to conservative variables.
     // Reconstruct one 1D face with the requested scheme.
     auto reconstructFace = [&](int iFace, Scheme scheme, Vec3& ULf, Vec3& URf) {
         const int kR = ng + iFace;
@@ -603,41 +669,33 @@ void Reconstruction1D::reconstructFaces(const std::vector<Vec3>& U,
         Eigen3 eig{};
         buildEigen1DConservative(u0, H0, std::max(c0, opt_.eps), gamma, eig);
 
-        if (scheme == Scheme::MUSCL) {
+        auto fillMusclCache = [&](double (&wc)[4][3]) {
             const Vec3* qBase = &U[kL - 1];
-
-            double wc[4][3];
             projectChar3(eig, qBase[0], wc[0]);
             projectChar3(eig, qBase[1], wc[1]);
             projectChar3(eig, qBase[2], wc[2]);
             projectChar3(eig, qBase[3], wc[3]);
+        };
 
-            reconstructFaceMUSCLFromCharCache<Vec3, Eigen3, 3>(eig,
-                                                               opt_.limiter,
-                                                               wc,
-                                                               reconstructConservativeFromChar1D,
-                                                               ULf,
-                                                               URf);
-        } else if (scheme == Scheme::WENO5) {
+        auto fillWenoCache = [&](double (&wc)[6][3]) {
             const Vec3* qBase = &U[kL - 2];
-
-            double wc[6][3];
             projectChar3(eig, qBase[0], wc[0]);
             projectChar3(eig, qBase[1], wc[1]);
             projectChar3(eig, qBase[2], wc[2]);
             projectChar3(eig, qBase[3], wc[3]);
             projectChar3(eig, qBase[4], wc[4]);
             projectChar3(eig, qBase[5], wc[5]);
+        };
 
-            reconstructFaceWENO5FromCharCache<Vec3, Eigen3, 3>(eig,
-                                                               opt_.eps,
-                                                               wc,
-                                                               reconstructConservativeFromChar1D,
-                                                               ULf,
-                                                               URf);
-        } else {
-            throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
-        }
+        reconstructHighOrderFaceFromChar<Vec3, Eigen3, 3>(scheme,
+                                                           eig,
+                                                           opt_.limiter,
+                                                           opt_.eps,
+                                                           fillMusclCache,
+                                                           fillWenoCache,
+                                                           reconstructConservativeFromChar1D,
+                                                           ULf,
+                                                           URf);
     };
 
     // Finalize each face with admissibility checks, fallback, and repair.
@@ -692,7 +750,6 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
 
     const StateLimits limits = opt_.stateLimits();
 
-
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx + 1; ++i) {
@@ -700,21 +757,18 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                 const int J   = ng + j;
                 const int I_L = I_R - 1;
                 const int f   = i + (nx + 1) * j;
-                ULx[f] = U[idx2(I_L, J, nxTot)];
-                URx[f] = U[idx2(I_R, J, nxTot)];
-                if (opt_.positivityFix) {
-                    if (!isAdmissibleState(ULx[f], gamma, limits)) {
-                        repairConservative(ULx[f], gamma, limits);
-                    }
-                    if (!isAdmissibleState(URx[f], gamma, limits)) {
-                        repairConservative(URx[f], gamma, limits);
-                    }
-                }
+                auto loadFace = [&](Vec4& ULf, Vec4& URf) {
+                    ULf = U[idx2(I_L, J, nxTot)];
+                    URf = U[idx2(I_R, J, nxTot)];
+                };
+                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULx[f], URx[f]);
             }
         }
         return;
     }
-
+    // High-order x-face path: the driver logic matches the 1D version, but the
+    // face-local Roe eigensystem and characteristic projection are built for
+    // the x-normal 2D Euler system.
     // Reconstruct one x-face with the requested scheme.
     auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
         const int I_R = ng + iFace;
@@ -730,41 +784,33 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
         Eigen4 eig{};
         buildEigen2DConservativeX(u0, v0, H0, std::max(c0, opt_.eps), gamma, eig);
 
-        if (scheme == Scheme::MUSCL) {
+        auto fillMusclCache = [&](double (&wc)[4][4]) {
             const Vec4* qBase = &U[idx2(I_L - 1, J, nxTot)];
-
-            double wc[4][4];
             projectChar4(eig, qBase[0], wc[0]);
             projectChar4(eig, qBase[1], wc[1]);
             projectChar4(eig, qBase[2], wc[2]);
             projectChar4(eig, qBase[3], wc[3]);
+        };
 
-            reconstructFaceMUSCLFromCharCache<Vec4, Eigen4, 4>(eig,
-                                                               opt_.limiter,
-                                                               wc,
-                                                               reconstructConservativeFromChar2D,
-                                                               ULf,
-                                                               URf);
-        } else if (scheme == Scheme::WENO5) {
+        auto fillWenoCache = [&](double (&wc)[6][4]) {
             const Vec4* qBase = &U[idx2(I_L - 2, J, nxTot)];
-
-            double wc[6][4];
             projectChar4(eig, qBase[0], wc[0]);
             projectChar4(eig, qBase[1], wc[1]);
             projectChar4(eig, qBase[2], wc[2]);
             projectChar4(eig, qBase[3], wc[3]);
             projectChar4(eig, qBase[4], wc[4]);
             projectChar4(eig, qBase[5], wc[5]);
+        };
 
-            reconstructFaceWENO5FromCharCache<Vec4, Eigen4, 4>(eig,
-                                                               opt_.eps,
-                                                               wc,
-                                                               reconstructConservativeFromChar2D,
-                                                               ULf,
-                                                               URf);
-        } else {
-            throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
-        }
+        reconstructHighOrderFaceFromChar<Vec4, Eigen4, 4>(scheme,
+                                                           eig,
+                                                           opt_.limiter,
+                                                           opt_.eps,
+                                                           fillMusclCache,
+                                                           fillWenoCache,
+                                                           reconstructConservativeFromChar2D,
+                                                           ULf,
+                                                           URf);
     };
 
     // Finalize each x-face with admissibility checks, fallback, and repair.
@@ -818,7 +864,6 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
 
     const StateLimits limits = opt_.stateLimits();
 
-
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny + 1; ++j) {
             for (int i = 0; i < nx; ++i) {
@@ -826,21 +871,17 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                 const int J_T = ng + j;
                 const int J_B = J_T - 1;
                 const int f = i + nx * j;
-                ULy[f] = U[idx2(I, J_B, nxTot)];
-                URy[f] = U[idx2(I, J_T, nxTot)];
-                if (opt_.positivityFix) {
-                    if (!isAdmissibleState(ULy[f], gamma, limits)) {
-                        repairConservative(ULy[f], gamma, limits);
-                    }
-                    if (!isAdmissibleState(URy[f], gamma, limits)) {
-                        repairConservative(URy[f], gamma, limits);
-                    }
-                }
+                auto loadFace = [&](Vec4& ULf, Vec4& URf) {
+                    ULf = U[idx2(I, J_B, nxTot)];
+                    URf = U[idx2(I, J_T, nxTot)];
+                };
+                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULy[f], URy[f]);
             }
         }
         return;
     }
-
+    // High-order y-face path: same reconstruction pattern as the x-face case,
+    // but using the y-normal Roe eigensystem and a y-directed stencil.
     // Reconstruct one y-face with the requested scheme.
     auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
         const int I   = ng + iFace;
@@ -856,27 +897,20 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
         Eigen4 eig{};
         buildEigen2DConservativeY(u0, v0, H0, std::max(c0, opt_.eps), gamma, eig);
 
-        if (scheme == Scheme::MUSCL) {
+        auto fillMusclCache = [&](double (&wc)[4][4]) {
             const Vec4* qCache[4] = {
                 &U[idx2(I, J_B - 1, nxTot)],
                 &U[idx2(I, J_B,     nxTot)],
                 &U[idx2(I, J_T,     nxTot)],
                 &U[idx2(I, J_T + 1, nxTot)]
             };
-
-            double wc[4][4];
             projectChar4(eig, *qCache[0], wc[0]);
             projectChar4(eig, *qCache[1], wc[1]);
             projectChar4(eig, *qCache[2], wc[2]);
             projectChar4(eig, *qCache[3], wc[3]);
+        };
 
-            reconstructFaceMUSCLFromCharCache<Vec4, Eigen4, 4>(eig,
-                                                               opt_.limiter,
-                                                               wc,
-                                                               reconstructConservativeFromChar2D,
-                                                               ULf,
-                                                               URf);
-        } else if (scheme == Scheme::WENO5) {
+        auto fillWenoCache = [&](double (&wc)[6][4]) {
             const Vec4* qCache[6] = {
                 &U[idx2(I, J_B - 2, nxTot)],
                 &U[idx2(I, J_B - 1, nxTot)],
@@ -885,24 +919,23 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                 &U[idx2(I, J_T + 1, nxTot)],
                 &U[idx2(I, J_T + 2, nxTot)]
             };
-
-            double wc[6][4];
             projectChar4(eig, *qCache[0], wc[0]);
             projectChar4(eig, *qCache[1], wc[1]);
             projectChar4(eig, *qCache[2], wc[2]);
             projectChar4(eig, *qCache[3], wc[3]);
             projectChar4(eig, *qCache[4], wc[4]);
             projectChar4(eig, *qCache[5], wc[5]);
+        };
 
-            reconstructFaceWENO5FromCharCache<Vec4, Eigen4, 4>(eig,
-                                                               opt_.eps,
-                                                               wc,
-                                                               reconstructConservativeFromChar2D,
-                                                               ULf,
-                                                               URf);
-        } else {
-            throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
-        }
+        reconstructHighOrderFaceFromChar<Vec4, Eigen4, 4>(scheme,
+                                                           eig,
+                                                           opt_.limiter,
+                                                           opt_.eps,
+                                                           fillMusclCache,
+                                                           fillWenoCache,
+                                                           reconstructConservativeFromChar2D,
+                                                           ULf,
+                                                           URf);
     };
 
     // Finalize each y-face with admissibility checks, fallback, and repair.

@@ -25,7 +25,131 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+
 #include <type_traits>
+
+namespace {
+
+constexpr const char* kOutputDir2D = "solution";
+
+struct ReducedStateScanReport {
+    unsigned long long total{0};
+    unsigned long long nonFiniteCount{0};
+    unsigned long long badDensityCount{0};
+    unsigned long long badPressureCount{0};
+    unsigned long long badInternalEnergyCount{0};
+    double minRho{0.0};
+    double minP{0.0};
+};
+
+void accumulateStateFailure(StateScanReport& report, StateStatus status) {
+    switch (status) {
+        case StateStatus::NonFinite:
+            ++report.nonFiniteCount;
+            break;
+        case StateStatus::NegativeDensity:
+        case StateStatus::DensityTooSmall:
+            ++report.badDensityCount;
+            break;
+        case StateStatus::NegativePressure:
+        case StateStatus::PressureTooSmall:
+            ++report.badPressureCount;
+            break;
+        case StateStatus::NegativeInternalEnergy:
+            ++report.badInternalEnergyCount;
+            break;
+        case StateStatus::Ok:
+        default:
+            break;
+    }
+}
+
+ReducedStateScanReport reduceStateScanReportMPI(const StateScanReport& report, MPI_Comm comm) {
+    const unsigned long long localCounts[5] = {
+        static_cast<unsigned long long>(report.total),
+        static_cast<unsigned long long>(report.nonFiniteCount),
+        static_cast<unsigned long long>(report.badDensityCount),
+        static_cast<unsigned long long>(report.badPressureCount),
+        static_cast<unsigned long long>(report.badInternalEnergyCount)
+    };
+    unsigned long long globalCounts[5] = {0, 0, 0, 0, 0};
+
+    MPI_Allreduce(localCounts, globalCounts, 5, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+
+    const double localMin[2] = {report.minRho, report.minP};
+    double globalMin[2] = {0.0, 0.0};
+    MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, comm);
+
+    ReducedStateScanReport reduced{};
+    reduced.total = globalCounts[0];
+    reduced.nonFiniteCount = globalCounts[1];
+    reduced.badDensityCount = globalCounts[2];
+    reduced.badPressureCount = globalCounts[3];
+    reduced.badInternalEnergyCount = globalCounts[4];
+    reduced.minRho = globalMin[0];
+    reduced.minP = globalMin[1];
+    return reduced;
+}
+
+void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
+    namespace fs = std::filesystem;
+    if (mp.isRoot()) {
+        fs::create_directories(kOutputDir2D);
+    }
+    mp.barrier();
+}
+
+std::string makeStepOutputPath(const std::string& outPrefix, int step, double t) {
+    std::ostringstream stepSS;
+    stepSS << std::setw(4) << std::setfill('0') << step;
+
+    std::ostringstream tSS;
+    tSS << std::fixed << std::setprecision(6) << t;
+
+    const std::filesystem::path outDir = kOutputDir2D;
+    return (outDir / (outPrefix + "_step" + stepSS.str() + "_t=" + tSS.str() + ".vtk")).string();
+}
+
+std::string makeFinalOutputPath(const std::string& outPrefix, double t) {
+    std::ostringstream tSS;
+    tSS << std::fixed << std::setprecision(6) << t;
+
+    const std::filesystem::path outDir = kOutputDir2D;
+    return (outDir / (outPrefix + "_final_t=" + tSS.str() + ".vtk")).string();
+}
+
+void writeMergedVtkFile2D(const mpi_parallel::MpiParallel& mp,
+                          const std::string& path,
+                          const std::string& label,
+                          double t,
+                          const std::vector<Vec4>& U,
+                          int nx,
+                          int ny,
+                          int ng,
+                          int iBeg,
+                          int jBeg,
+                          int nxGlobal,
+                          int nyGlobal,
+                          double x0,
+                          double x1,
+                          double y0,
+                          double y1,
+                          double gamma) {
+    if (mp.isRoot()) {
+        std::cout << "[2D] Writing merged " << label << " " << path << " at t=" << t << "\n";
+    }
+
+    writeVTK2D_GatherMPI(path,
+                         U, nx, ny, ng,
+                         iBeg, jBeg,
+                         nxGlobal, nyGlobal,
+                         x0, x1,
+                         y0, y1,
+                         gamma,
+                         mp.cartComm());
+}
+
+} // namespace
 
 // MPI halo exchange and MPI gather output pack Vec4 into raw doubles. Ensure it is tightly-packed.
 static_assert(std::is_trivially_copyable_v<Vec4>, "Vec4 must be trivially copyable for MPI halo exchange");
@@ -41,53 +165,47 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // 1) Read case settings
     // --------------------
     // Global mesh sizes (cfg)
-    nxGlobal_ = cfg.getInt("nx", 200);
-    nyGlobal_ = cfg.getInt("ny", 50);
+    grid_.nxGlobal = cfg.getInt("nx", 200);
+    grid_.nyGlobal = cfg.getInt("ny", 50);
 
     // Number of ghost layers. High-order reconstruction requires wider stencils.
     // Ghost layers
-    ng_ = cfg.getInt("ng", 2);
-    if (ng_ < 1) throw std::runtime_error("ng must be >=1 for 2D solver");
+    grid_.ng = cfg.getInt("ng", 2);
+    if (grid_.ng < 1) throw std::runtime_error("ng must be >=1 for 2D solver");
 
     // Enforce the minimum ghost width required by the selected reconstruction scheme.
     const int ngReq = recon::requiredGhostCells(recon_.options().scheme);
-    if (ng_ < ngReq) {
+    if (grid_.ng < ngReq) {
         throw std::runtime_error("ng is too small for the selected reconstruction.scheme");
     }
 
-    // Shared state-layer thresholds and optional diagnostic controls.
-    stateLimits_ = recon_.options().stateLimits();
-    enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
-    stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
-                                      "solution/" + outPrefix_ + "_state_diagnostics.csv");
-
     // Global physical extents
-    x0_ = cfg.getDouble("x0", 0.0);
-    x1_ = cfg.getDouble("x1", 1.0);
-    y0_ = cfg.getDouble("y0", 0.0);
-    y1_ = cfg.getDouble("y1", 0.2);
+    grid_.x0 = cfg.getDouble("x0", 0.0);
+    grid_.x1 = cfg.getDouble("x1", 1.0);
+    grid_.y0 = cfg.getDouble("y0", 0.0);
+    grid_.y1 = cfg.getDouble("y1", 0.2);
 
     // -----------------------------
     // 2) Domain decomposition (MPI)
     // -----------------------------
     // Decompose the global interior grid into a px-by-py Cartesian process grid.
     // This-rank subdomain (interior indices are global 0-based)
-    sub_  = mp_.decompose(nxGlobal_, nyGlobal_);
-    iBeg_ = sub_.iBeg();
-    jBeg_ = sub_.jBeg();
-    nx_   = sub_.nx();
-    ny_   = sub_.ny();
+    sub_  = mp_.decompose(grid_.nxGlobal, grid_.nyGlobal);
+    grid_.iBeg = sub_.iBeg();
+    grid_.jBeg = sub_.jBeg();
+    grid_.nx   = sub_.nx();
+    grid_.ny   = sub_.ny();
 
     // Global spacing is defined by the global mesh and used consistently on all ranks.
     // Global uniform spacing
-    const double dxG = (x1_ - x0_) / static_cast<double>(nxGlobal_);
-    const double dyG = (y1_ - y0_) / static_cast<double>(nyGlobal_);
+    const double dxG = grid_.dx();
+    const double dyG = grid_.dy();
 
     // Local physical extents for this block (so IC/VTK coordinates are correct)
-    const double x0Loc = x0_ + static_cast<double>(iBeg_) * dxG;
-    const double x1Loc = x0_ + static_cast<double>(iBeg_ + nx_) * dxG;
-    const double y0Loc = y0_ + static_cast<double>(jBeg_) * dyG;
-    const double y1Loc = y0_ + static_cast<double>(jBeg_ + ny_) * dyG;
+    const double x0Loc = grid_.x0 + static_cast<double>(grid_.iBeg) * dxG;
+    const double x1Loc = grid_.x0 + static_cast<double>(grid_.iBeg + grid_.nx) * dxG;
+    const double y0Loc = grid_.y0 + static_cast<double>(grid_.jBeg) * dyG;
+    const double y1Loc = grid_.y0 + static_cast<double>(grid_.jBeg + grid_.ny) * dyG;
 
     // -----------------------------
     // 3) Numerics and run control
@@ -99,6 +217,12 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     outputEvery_ = cfg.getInt   ("outputEvery", 50);
     writeFinal_  = cfg.getBool  ("writeFinal", true);
     outPrefix_   = cfg.getString("outPrefix", "run2d");
+
+    // Shared state-layer thresholds and optional diagnostic controls.
+    stateLimits_ = recon_.options().stateLimits();
+    enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
+    stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
+                                      "solution/" + outPrefix_ + "_state_diagnostics.csv");
 
     // -----------------------------
     // 4) Boundary conditions
@@ -112,16 +236,11 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // --------------------
     // Allocate local arrays including ghost cells.
     // Allocate local fields (including ghosts)
-    nxTot_ = nx_ + 2 * ng_;
-    nyTot_ = ny_ + 2 * ng_;
-    U_.assign(static_cast<size_t>(nxTot_) * static_cast<size_t>(nyTot_), Vec4{});
-    RHS_.assign(static_cast<size_t>(nxTot_) * static_cast<size_t>(nyTot_), Vec4{});
-    ULxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
-    URxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
-    ULyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
-    URyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
-    FxBuf_.resize(static_cast<size_t>(nx_ + 1) * static_cast<size_t>(ny_));
-    GyBuf_.resize(static_cast<size_t>(nx_) * static_cast<size_t>(ny_ + 1));
+    grid_.nxTot = grid_.nx + 2 * grid_.ng;
+    grid_.nyTot = grid_.ny + 2 * grid_.ng;
+    U_.assign(static_cast<size_t>(grid_.nxTot) * static_cast<size_t>(grid_.nyTot), Vec4{});
+    RHS_.assign(static_cast<size_t>(grid_.nxTot) * static_cast<size_t>(grid_.nyTot), Vec4{});
+    faces_.resize(grid_.nx, grid_.ny);
 
     // -----------------------------
     // 6) Choose numerical methods
@@ -135,14 +254,14 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // Only this-rank interior block is initialised here; ghosts are filled later.
     const bool useSetFields = cfg.getBool("setFields.use", false);
     if (!useSetFields) {
-        ic_.reset(makeIC2D(cfg.getString("ic", "sodx")));
+        ic_.reset(makeIC2D(cfg.getString("ic", "riemannx")));
     }
 
     // Initialize only this-rank block using local physical extents.
     if (useSetFields) {
-        setFields2D(U_, nx_, ny_, ng_, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
+        setFields2D(U_, grid_.nx, grid_.ny, grid_.ng, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
     } else {
-        ic_->apply(U_, nx_, ny_, ng_, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
+        ic_->apply(U_, grid_.nx, grid_.ny, grid_.ng, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
     }
 }
 
@@ -155,7 +274,7 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
 void Solver2D::applyBC(std::vector<Vec4>& U) const {
     // 1) Exchange halos across MPI subdomain interfaces
     //    NOTE: This assumes Vec4 is a tightly-packed POD of 4 doubles.
-    mp_.exchangeHalos2D(reinterpret_cast<double*>(U.data()), nx_, ny_, ng_, 4);
+    mp_.exchangeHalos2D(reinterpret_cast<double*>(U.data()), grid_.nx, grid_.ny, grid_.ng, 4);
 
     // Determine whether this rank touches each global boundary.
     // MPI_PROC_NULL means there is no neighbor in that direction.
@@ -175,20 +294,20 @@ void Solver2D::applyBC(std::vector<Vec4>& U) const {
         bcApply.top.type = boundary::BcType::Internal;
     }
 
-    boundary::apply2D(U, nx_, ny_, ng_, bcApply);
+    boundary::apply2D(U, grid_.nx, grid_.ny, grid_.ng, bcApply);
 }
 
 // Compute a stable time step from a 2D CFL estimate:
 //   dt = CFL / max( (|u|+a)/dx + (|v|+a)/dy )
 // We reduce the maximum across all ranks so everyone advances with the same dt.
 double Solver2D::computeDt(const std::vector<Vec4>& U) const {
-    const double dx = (x1_ - x0_) / nxGlobal_;
-    const double dy = (y1_ - y0_) / nyGlobal_;
+    const double dx = grid_.dx();
+    const double dy = grid_.dy();
     double maxS = 1e-14;
 
-    for (int j = 0; j < ny_; ++j) {
-        for (int i = 0; i < nx_; ++i) {
-            const auto W = evalFlowVars(U[idx(ng_ + i, ng_ + j)], gamma_);
+    for (int j = 0; j < grid_.ny; ++j) {
+        for (int i = 0; i < grid_.nx; ++i) {
+            const auto W = evalFlowVars(U[idx(grid_.ng + i, grid_.ng + j)], gamma_);
             const double S = (std::abs(W.u) + W.a) / dx + (std::abs(W.v) + W.a) / dy;
             maxS = std::max(maxS, S);
         }
@@ -207,81 +326,64 @@ double Solver2D::computeDt(const std::vector<Vec4>& U) const {
 void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     std::fill(RHS.begin(), RHS.end(), Vec4{});
 
+
     // Characteristic reconstruction returns conservative face states on x- and y-faces.
     // U must already have valid ghost cells when calling buildRHS.
-    recon_.reconstructFacesX(U, nx_, ny_, ng_, gamma_, ULxBuf_, URxBuf_);
-    recon_.reconstructFacesY(U, nx_, ny_, ng_, gamma_, ULyBuf_, URyBuf_);
+    recon_.reconstructFacesX(U, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.UL, faces_.x.UR);
+    recon_.reconstructFacesY(U, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.UL, faces_.y.UR);
 
     // X-faces: compute numerical flux using dir=0 (x-normal).
-    for (int j = 0; j < ny_; ++j) {
-        for (int i = 0; i < nx_ + 1; ++i) {
-            const int f = i + (nx_ + 1) * j;
-            FxBuf_[f] = flux_->numericalFlux(ULxBuf_[f], URxBuf_[f], 0, gamma_);
+    for (int j = 0; j < grid_.ny; ++j) {
+        for (int i = 0; i < grid_.nx + 1; ++i) {
+            const int f = idxFaceX(i, j);
+            faces_.x.F[f] = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
         }
     }
 
     // Y-faces: compute numerical flux using dir=1 (y-normal).
-    for (int j = 0; j < ny_ + 1; ++j) {
-        for (int i = 0; i < nx_; ++i) {
-            const int f = i + nx_ * j;
-            GyBuf_[f] = flux_->numericalFlux(ULyBuf_[f], URyBuf_[f], 1, gamma_);
+    for (int j = 0; j < grid_.ny + 1; ++j) {
+        for (int i = 0; i < grid_.nx; ++i) {
+            const int f = idxFaceY(i, j);
+            faces_.y.F[f] = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
         }
     }
 
-    const double dx = (x1_ - x0_) / nxGlobal_;
-    const double dy = (y1_ - y0_) / nyGlobal_;
+    const double dx = grid_.dx();
+    const double dy = grid_.dy();
 
     // Divergence of fluxes -> RHS (cell-centered):
     //   RHS = -(FxR-FxL)/dx - (GyT-GyB)/dy
-    for (int j = 0; j < ny_; ++j) {
-        for (int i = 0; i < nx_; ++i) {
-            const Vec4& FxL = FxBuf_[i     + (nx_ + 1) * j];
-            const Vec4& FxR = FxBuf_[i + 1 + (nx_ + 1) * j];
-            const Vec4& GyB = GyBuf_[i + nx_ * j];
-            const Vec4& GyT = GyBuf_[i + nx_ * (j + 1)];
+    for (int j = 0; j < grid_.ny; ++j) {
+        for (int i = 0; i < grid_.nx; ++i) {
+            const Vec4& FxL = faces_.x.F[idxFaceX(i,     j)];
+            const Vec4& FxR = faces_.x.F[idxFaceX(i + 1, j)];
+            const Vec4& GyB = faces_.y.F[idxFaceY(i, j)];
+            const Vec4& GyT = faces_.y.F[idxFaceY(i, j + 1)];
 
             Vec4 R{};
             for (int k = 0; k < 4; ++k) {
                 R[k] = -(FxR[k] - FxL[k]) / dx - (GyT[k] - GyB[k]) / dy;
             }
-            RHS[idx(ng_ + i, ng_ + j)] = R;
+            RHS[idx(grid_.ng + i, grid_.ng + j)] = R;
         }
     }
 }
 
 StateScanReport Solver2D::scanInteriorStates(const std::vector<Vec4>& U) const {
     StateScanReport report{};
-    report.total = static_cast<std::size_t>(nx_) * static_cast<std::size_t>(ny_);
+    report.total = static_cast<std::size_t>(grid_.nx) * static_cast<std::size_t>(grid_.ny);
     report.minRho = std::numeric_limits<double>::infinity();
     report.minP   = std::numeric_limits<double>::infinity();
 
-    for (int j = 0; j < ny_; ++j) {
-        for (int i = 0; i < nx_; ++i) {
-            const auto result = checkConservative(U[idx(ng_ + i, ng_ + j)], gamma_, stateLimits_);
+    for (int j = 0; j < grid_.ny; ++j) {
+        for (int i = 0; i < grid_.nx; ++i) {
+            const auto result = checkConservative(U[idx(grid_.ng + i, grid_.ng + j)], gamma_, stateLimits_);
 
             report.minRho = std::min(report.minRho, result.rho);
             report.minP   = std::min(report.minP,   result.p);
 
             if (!result.ok) {
-                switch (result.status) {
-                    case StateStatus::NonFinite:
-                        ++report.nonFiniteCount;
-                        break;
-                    case StateStatus::NegativeDensity:
-                    case StateStatus::DensityTooSmall:
-                        ++report.badDensityCount;
-                        break;
-                    case StateStatus::NegativePressure:
-                    case StateStatus::PressureTooSmall:
-                        ++report.badPressureCount;
-                        break;
-                    case StateStatus::NegativeInternalEnergy:
-                        ++report.badInternalEnergyCount;
-                        break;
-                    case StateStatus::Ok:
-                    default:
-                        break;
-                }
+                accumulateStateFailure(report, result.status);
             }
         }
     }
@@ -309,20 +411,7 @@ void Solver2D::appendStateDiagnosticsCsv(int step, double t, const StateScanRepo
                                          const std::string& tag) const {
     if (!enableStateDiagnostics_) return;
 
-    const unsigned long long localCounts[5] = {
-        static_cast<unsigned long long>(report.total),
-        static_cast<unsigned long long>(report.nonFiniteCount),
-        static_cast<unsigned long long>(report.badDensityCount),
-        static_cast<unsigned long long>(report.badPressureCount),
-        static_cast<unsigned long long>(report.badInternalEnergyCount)
-    };
-    unsigned long long globalCounts[5] = {0, 0, 0, 0, 0};
-
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_UNSIGNED_LONG_LONG, MPI_SUM, mp_.cartComm());
-
-    const double localMin[2] = {report.minRho, report.minP};
-    double globalMin[2] = {0.0, 0.0};
-    MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, mp_.cartComm());
+    const ReducedStateScanReport global = reduceStateScanReportMPI(report, mp_.cartComm());
 
     if (!mp_.isRoot()) return;
 
@@ -348,13 +437,13 @@ void Solver2D::appendStateDiagnosticsCsv(int step, double t, const StateScanRepo
     ofs << tag << ","
         << step << ","
         << std::setprecision(16) << t << ","
-        << globalCounts[0] << ","
-        << globalMin[0] << ","
-        << globalMin[1] << ","
-        << globalCounts[1] << ","
-        << globalCounts[2] << ","
-        << globalCounts[3] << ","
-        << globalCounts[4] << "\n";
+        << global.total << ","
+        << global.minRho << ","
+        << global.minP << ","
+        << global.nonFiniteCount << ","
+        << global.badDensityCount << ","
+        << global.badPressureCount << ","
+        << global.badInternalEnergyCount << "\n";
 }
 
 // Periodic output.
@@ -364,37 +453,13 @@ void Solver2D::writeOutput(int step, double t) const {
     if (outputEvery_ <= 0) return;
     if (step % outputEvery_ != 0) return;
 
-    namespace fs = std::filesystem;
-    const fs::path outDir = "solution";
-
-    // Create output directory once on root; barrier keeps ranks in sync.
-    if (mp_.isRoot()) {
-        fs::create_directories(outDir);
-    }
-    mp_.barrier();
-
-    // File naming convention: <prefix>_stepXXXX_t=TTTTTT.vtk
-    // Step is zero-padded for easy sorting.
-    std::ostringstream stepSS;
-    stepSS << std::setw(4) << std::setfill('0') << step;
-
-    std::ostringstream tSS;
-    tSS << std::fixed << std::setprecision(6) << t;
-
-    const fs::path fname = outDir / (outPrefix_ + "_step" + stepSS.str() + "_t=" + tSS.str() + ".vtk");
-    if (mp_.isRoot()) {
-        std::cout << "[2D] Writing merged " << fname.string() << " at t=" << t << "\n";
-    }
-
-    // MPI gather + merged VTK write.
-    writeVTK2D_GatherMPI(fname.string(),
-                         U_, nx_, ny_, ng_,
-                         iBeg_, jBeg_,
-                         nxGlobal_, nyGlobal_,
-                         x0_, x1_,
-                         y0_, y1_,
-                         gamma_,
-                         mp_.cartComm());
+    ensureOutputDirectoryExists(mp_);
+    const std::string fname = makeStepOutputPath(outPrefix_, step, t);
+    writeMergedVtkFile2D(mp_, fname, "step", t,
+                         U_, grid_.nx, grid_.ny, grid_.ng,
+                         grid_.iBeg, grid_.jBeg,
+                         grid_.nxGlobal, grid_.nyGlobal,
+                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
 }
 
 // Main time-marching loop.
@@ -405,9 +470,9 @@ void Solver2D::run() {
     double t = 0.0;
     int step = 0;
     std::cout << "[2D][r" << mp_.rank() << "] Starting run, finalTime=" << finalTime_
-              << ", global=" << nxGlobal_ << "x" << nyGlobal_
-              << ", local=" << nx_ << "x" << ny_
-              << ", begin=(" << iBeg_ << "," << jBeg_ << ")\n";
+              << ", global=" << grid_.nxGlobal << "x" << grid_.nyGlobal
+              << ", local=" << grid_.nx << "x" << grid_.ny
+              << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
 
     // Initial RHS build and output.
     applyBC(U_);
@@ -442,13 +507,7 @@ void Solver2D::run() {
 
     // Optional final snapshot.
     if (writeFinal_) {
-        namespace fs = std::filesystem;
-        const fs::path outDir = "solution";
-
-        if (mp_.isRoot()) {
-            fs::create_directories(outDir);
-        }
-        mp_.barrier();
+        ensureOutputDirectoryExists(mp_);
 
         applyBC(U_);
         const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
@@ -456,21 +515,11 @@ void Solver2D::run() {
             appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "final");
         }
 
-        std::ostringstream tSS;
-        tSS << std::fixed << std::setprecision(6) << t;
-
-        const fs::path fname = outDir / (outPrefix_ + "_final_t=" + tSS.str() + ".vtk");
-        if (mp_.isRoot()) {
-            std::cout << "[2D] Writing merged final " << fname.string() << " at t=" << t << "\n";
-        }
-
-        writeVTK2D_GatherMPI(fname.string(),
-                             U_, nx_, ny_, ng_,
-                             iBeg_, jBeg_,
-                             nxGlobal_, nyGlobal_,
-                             x0_, x1_,
-                             y0_, y1_,
-                             gamma_,
-                             mp_.cartComm());
+        const std::string fname = makeFinalOutputPath(outPrefix_, t);
+        writeMergedVtkFile2D(mp_, fname, "final", t,
+                             U_, grid_.nx, grid_.ny, grid_.ng,
+                             grid_.iBeg, grid_.jBeg,
+                             grid_.nxGlobal, grid_.nyGlobal,
+                             grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
     }
 }
