@@ -4,7 +4,7 @@
 //
 // Responsibilities:
 // - Build a 2D Cartesian communicator (px-by-py) using MPI_Cart_create.
-// - Provide deterministic global-to-local decomposition for 1D and 2D grids.
+// - Provide deterministic global-to-local decomposition for 2D grids.
 // - Expose neighbor ranks (west/east/south/north).
 // - Provide halo exchange helpers for ghost cells.
 // - Provide a few common collectives (barrier, allreduce max/min/sum).
@@ -29,7 +29,7 @@ static inline void mpiCheck(int err, const char* where) {
     throw std::runtime_error(std::string("MPI error at: ") + where);
 }
 
-// Split a 1D index range [0, globalN) into P contiguous blocks.
+// Split a global index range [0, globalN) into P contiguous blocks.
 //
 // Returns {begin,count} for the block owned by process coordinate `coord`.
 // The first `rem = globalN % P` blocks get one extra element.
@@ -162,24 +162,6 @@ Subdomain2D MpiParallel::decompose(int globalNx, int globalNy) const {
     return sub;
 }
 
-// Compute this-rank 1D subdomain for a global (globalNx) interior grid.
-// Requires py == 1 (a single row of ranks) so the split is purely along x.
-Subdomain1D MpiParallel::decompose1D(int globalNx) const {
-    if (globalNx <= 0) {
-        throw std::runtime_error("MpiParallel::decompose1D: globalNx must be > 0");
-    }
-    if (py_ != 1) {
-        throw std::runtime_error("MpiParallel::decompose1D: requires py == 1 for 1D runs");
-    }
-
-    Subdomain1D sub;
-    sub.x = split1D(globalNx, px_, cx_);
-
-    if (sub.nx() <= 0) {
-        throw std::runtime_error("MpiParallel::decompose1D: local nx <= 0 (grid too small for px)");
-    }
-    return sub;
-}
 
 // Synchronize all ranks in the Cartesian communicator.
 void MpiParallel::barrier() const {
@@ -382,108 +364,5 @@ void MpiParallel::exchangeHalos2D(double* data,
     }
 }
 
-// Exchange 1D ghost layers with west/east neighbors.
-//
-// This is a specialization for 1D runs:
-// - Requires py == 1
-// - Only exchanges along x
-// - Packs ng cells from each side (each with ncomp doubles)
-void MpiParallel::exchangeHalos1D(double* data,
-                                 int nxLocal,
-                                 int ng, int ncomp) const
-{
-    if (!data) throw std::runtime_error("exchangeHalos1D: data is null");
-    if (nxLocal <= 0) throw std::runtime_error("exchangeHalos1D: nxLocal must be > 0");
-    if (ng < 0) throw std::runtime_error("exchangeHalos1D: ng must be >= 0");
-    if (ncomp <= 0) throw std::runtime_error("exchangeHalos1D: ncomp must be > 0");
-    if (ng == 0) return;
-
-    // For 1D runs we require a single row of ranks (py==1). We still reuse the cart communicator.
-    if (py_ != 1) {
-        throw std::runtime_error("exchangeHalos1D: requires py == 1 for 1D runs");
-    }
-
-    // Total cells including ghosts would be: nxLocal + 2*ng.
-    // We don't need the value explicitly here because packing/unpacking uses only
-    // local interior indices and the strip width `ng`.
-
-    // Buffer sizes (in doubles): ng cells * ncomp components.
-    const int stripCells = ng;           // ng cells
-    const int stripDbl   = stripCells * ncomp;
-
-    auto cellPtr = [&](int I) -> double* {
-        return data + static_cast<std::size_t>(I) * static_cast<std::size_t>(ncomp);
-    };
-    auto cellPtrC = [&](int I) -> const double* {
-        return data + static_cast<std::size_t>(I) * static_cast<std::size_t>(ncomp);
-    };
-
-    auto packCells = [&](int I0, std::vector<double>& buf) {
-        buf.resize(stripDbl);
-        int t = 0;
-        for (int di = 0; di < ng; ++di) {
-            const double* src = cellPtrC(I0 + di);
-            std::memcpy(&buf[t], src, sizeof(double) * ncomp);
-            t += ncomp;
-        }
-    };
-
-    auto unpackCells = [&](int I0, const std::vector<double>& buf) {
-        int t = 0;
-        for (int di = 0; di < ng; ++di) {
-            double* dst = cellPtr(I0 + di);
-            std::memcpy(dst, &buf[t], sizeof(double) * ncomp);
-            t += ncomp;
-        }
-    };
-
-    // Tags: match x-direction tags used in 2D halo exchange (consistency across the code).
-    constexpr int TAG_X_W2E = 200; // data travelling west -> east
-    constexpr int TAG_X_E2W = 201; // data travelling east -> west
-
-    MPI_Request req[4];
-    int nreq = 0;
-
-    // --- 1) Post receives first ---
-    if (nbr_.west != MPI_PROC_NULL) {
-        recvW_.resize(stripDbl);
-        mpiCheck(MPI_Irecv(recvW_.data(), stripDbl, MPI_DOUBLE, nbr_.west, TAG_X_W2E, cart_, &req[nreq++]),
-                 "MPI_Irecv1D(W)");
-    }
-    if (nbr_.east != MPI_PROC_NULL) {
-        recvE_.resize(stripDbl);
-        mpiCheck(MPI_Irecv(recvE_.data(), stripDbl, MPI_DOUBLE, nbr_.east, TAG_X_E2W, cart_, &req[nreq++]),
-                 "MPI_Irecv1D(E)");
-    }
-
-    // --- 2) Pack interior strips and post sends ---
-    // Send left interior strip (I0=ng) to west as east->west
-    if (nbr_.west != MPI_PROC_NULL) {
-        packCells(ng, sendW_);
-        mpiCheck(MPI_Isend(sendW_.data(), stripDbl, MPI_DOUBLE, nbr_.west, TAG_X_E2W, cart_, &req[nreq++]),
-                 "MPI_Isend1D(W)");
-    }
-    // Send right interior strip (I0=ng+nxLocal-ng) to east as west->east
-    if (nbr_.east != MPI_PROC_NULL) {
-        packCells(ng + nxLocal - ng, sendE_);
-        mpiCheck(MPI_Isend(sendE_.data(), stripDbl, MPI_DOUBLE, nbr_.east, TAG_X_W2E, cart_, &req[nreq++]),
-                 "MPI_Isend1D(E)");
-    }
-
-    // --- 3) Wait for communications ---
-    if (nreq > 0) {
-        mpiCheck(MPI_Waitall(nreq, req, MPI_STATUSES_IGNORE), "MPI_Waitall(exchangeHalos1D)");
-    }
-
-    // --- 4) Unpack into ghost layers ---
-    // left ghost: I0=0
-    if (nbr_.west != MPI_PROC_NULL) {
-        unpackCells(0, recvW_);
-    }
-    // right ghost: I0=ng+nxLocal
-    if (nbr_.east != MPI_PROC_NULL) {
-        unpackCells(ng + nxLocal, recvE_);
-    }
-}
 
 } // namespace mpi_parallel

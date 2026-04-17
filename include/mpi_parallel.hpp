@@ -8,7 +8,7 @@
 //   - Halo exchange for cell-centered arrays with ghost layers
 //   - A few common collectives (barrier, allreduce)
 //
-// The solvers keep their own arrays (including ghosts) and call exchangeHalos*()
+// The solver keeps its own arrays (including ghosts) and calls exchangeHalos2D()
 // before reconstruction/flux evaluation so that stencils see consistent neighbor data.
 
 #pragma once
@@ -28,18 +28,6 @@ namespace mpi_parallel {
 struct Range1D {
     int begin = 0;
     int count = 0;
-};
-
-// Subdomain1D
-// -----------
-// This-rank 1D subdomain (interior only, no ghosts).
-// The solver allocates ghosts itself; this struct only reports the global start
-// index and the number of interior cells owned by this rank.
-struct Subdomain1D {
-    Range1D x;
-
-    int nx() const { return x.count; }
-    int iBeg() const { return x.begin; }
 };
 
 // Subdomain2D
@@ -62,12 +50,11 @@ struct Subdomain2D {
 //
 // Typical workflow:
 //   1) Create MpiParallel(px, py)
-//   2) Ask for this rank's subdomain: decompose(...) or decompose1D(...)
-//   3) During time stepping, call exchangeHalos*() to update ghost layers
+//   2) Ask for this rank's subdomain: decompose(...)
+//   3) During time stepping, call exchangeHalos2D() to update ghost layers
 //
 // Important:
-// - The runtime must launch with: mpirun -np (px*py)
-// - For 1D runs, require py==1 (split only along x).
+// - The runtime uses a 2D Cartesian decomposition.
 class MpiParallel {
 public:
     struct Neighbors {
@@ -121,10 +108,6 @@ public:
     // (interior only; ghosts are managed by solver arrays, not by this struct)
     Subdomain2D decompose(int globalNx, int globalNy) const;
 
-    // Compute this-rank subdomain for a 1D global grid (globalNx) using px() along x.
-    // Requirement: py() == 1 for 1D runs.
-    Subdomain1D decompose1D(int globalNx) const;
-
     // Collectives on cart communicator
     void barrier() const;
 
@@ -139,7 +122,7 @@ public:
     // - array storage includes ghosts: nxTot = nxLocal + 2*ng, nyTot = nyLocal + 2*ng
     // - row-major cells: cellIndex = i + nxTot*j, where i in [0..nxTot-1], j in [0..nyTot-1]
     // - AoS components: each cell has ncomp doubles contiguous:
-    //   (e.g., ncomp=3 for 1D conservative, ncomp=4 for 2D conservative)
+    //   (e.g., ncomp=4 for 2D conservative variables)
     //      cellPtr = data + (cellIndex * ncomp)
     //
     // What it does:
@@ -150,26 +133,8 @@ public:
                          int nxLocal, int nyLocal,
                          int ng, int ncomp) const;
 
-    // Halo exchange for 1D cell-centered arrays stored as contiguous doubles.
-    //
-    // Required memory layout:
-    // - local interior: nxLocal cells
-    // - array storage includes ghosts: nxTot = nxLocal + 2*ng
-    // - cells in 1D: cellIndex = i, where i in [0..nxTot-1]
-    // - AoS components: each cell has ncomp doubles contiguous:
-    //   (e.g., ncomp=3 for (rho, rho*u, rho*E))
-    //      cellPtr = data + (cellIndex * ncomp)
-    //
-    // What it does:
-    // - exchanges ng cells with west/east neighbors (along x)
-    // - fills ghost layers (i<ng, i>=ng+nxLocal)
-    //
-    void exchangeHalos1D(double* data,
-                         int nxLocal,
-                         int ng, int ncomp) const;
-
 private:
-    // Split a global 1D range into P blocks and return the block for a given coord.
+    // Split a global index range into P blocks and return the block for a given coord.
     // The first (globalN % P) blocks get one extra cell.
     static Range1D split1D(int globalN, int P, int coord);
 
