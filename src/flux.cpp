@@ -7,7 +7,7 @@
 
 // flux.cpp
 // --------
-// Implementations of numerical fluxes used by the finite-volume solvers.
+// Implementations of numerical fluxes used by the 2D finite-volume solver.
 //
 // General interface used throughout this module:
 //   numericalFlux(UL, UR, dir, gamma) -> F
@@ -34,7 +34,7 @@
 //       std::string name() const override { return "myNewScheme"; }
 //       Cons numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const override {
 //           // 0) Validate direction
-//           //    if (Dim==2) dir must be 0 or 1
+//           //    dir must be 0 or 1 for the 2D solver
 //
 //           // 1) Build the state representation you actually need
 //           //    - conservative only: keep UL/UR as-is
@@ -76,12 +76,8 @@
 //
 //       Cons numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const override {
 //           // (0) Direction validation
-//           if constexpr (Dim == 1) {
-//               (void)dir; // only x-direction
-//           } else {
-//               if (dir != 0 && dir != 1)
-//                   throw std::runtime_error("myNewScheme flux: dir must be 0 or 1");
-//           }
+//           if (dir != 0 && dir != 1)
+//               throw std::runtime_error("myNewScheme flux: dir must be 0 or 1");
 //
 //           // (1) Build the state form you actually need on this path.
 //           // Cached flow variables are preferred in hot paths because they avoid
@@ -90,14 +86,8 @@
 //           const auto WR = evalFlowVars(UR, gamma);
 //
 //           // Normal velocities for this face
-//           double uLn, uRn;
-//           if constexpr (Dim == 1) {
-//               uLn = WL.u;
-//               uRn = WR.u;
-//           } else {
-//               uLn = (dir == 0) ? WL.u : WL.v;
-//               uRn = (dir == 0) ? WR.u : WR.v;
-//           }
+//           const double uLn = (dir == 0) ? WL.u : WL.v;
+//           const double uRn = (dir == 0) ? WR.u : WR.v;
 //           const double aL = WL.a;
 //           const double aR = WR.a;
 //
@@ -125,7 +115,7 @@
 //   prefer physFluxFromPrim(...) instead of converting back to conservative and then
 //   re-entering physFlux(...).
 // - For AUSM-like schemes, step (3) computes (mDot, pInt) and then assembles momentum
-//   and energy fluxes using an upwinded side.
+//   and energy fluxes using an upwinded side in the selected 2D face-normal direction.
 //
 // Debugging tip:
 // - If you get "Undefined symbol ... FluxMyNewScheme", it usually means flux.cpp
@@ -186,14 +176,8 @@ typename FluxRusanov<Dim>::Cons
 FluxRusanov<Dim>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
-    double unL, unR;
-    if constexpr (Dim == 1) {
-        unL = WL.u;
-        unR = WR.u;
-    } else {
-        unL = (dir == 0) ? WL.u : WL.v;
-        unR = (dir == 0) ? WR.u : WR.v;
-    }
+    const double unL = (dir == 0) ? WL.u : WL.v;
+    const double unR = (dir == 0) ? WR.u : WR.v;
     const double smax = std::max(std::abs(unL) + WL.a, std::abs(unR) + WR.a);
     const Cons FL = physFluxFromFlowVars(UL, WL, dir);
     const Cons FR = physFluxFromFlowVars(UR, WR, dir);
@@ -204,8 +188,7 @@ FluxRusanov<Dim>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double 
     return F;
 }
 
-// Explicit instantiations for Dim=1,2
-template class FluxRusanov<1>;
+// Explicit instantiation for Dim=2
 template class FluxRusanov<2>;
 
 // HLLC (Harten–Lax–van Leer–Contact) in this module
@@ -229,63 +212,6 @@ template class FluxRusanov<2>;
 //
 // This structure (speed estimates + star-state construction + piecewise selection)
 // is the typical "HLL-family" programming pattern for approximate Riemann solvers.
-// --------------------
-// FluxHLLC<1>
-// --------------------
-ConsD<1> FluxHLLC<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    (void)dir;
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
-
-    const double aL = WL.a;
-    const double aR = WR.a;
-    const double SL = std::min(WL.u - aL, WR.u - aR);
-    const double SR = std::max(WL.u + aL, WR.u + aR);
-
-    const Cons FL = physFluxFromFlowVars(UL, WL, 0);
-    const Cons FR = physFluxFromFlowVars(UR, WR, 0);
-
-    // Wave-speed selection (three regions):
-    //   SL>0 -> left flux, SR<0 -> right flux, otherwise compute star-region flux.
-    if (SL >= 0.0) return FL;
-    if (SR <= 0.0) return FR;
-
-    const double rhoL = WL.rho, rhoR = WR.rho;
-    const double uL = WL.u, uR = WR.u;
-    const double pL = WL.p,    pR = WR.p;
-
-    const double num = pR - pL + rhoL * uL * (SL - uL) - rhoR * uR * (SR - uR);
-    const double den = rhoL * (SL - uL) - rhoR * (SR - uR);
-    const double SM  = (std::abs(den) < 1e-14) ? 0.0 : num / den;
-
-    auto star = [&](const Cons& U, const FlowVars1& W, double S, double Sstar) -> Cons {
-        const double rho = W.rho;
-        const double un  = W.u;
-        const double p   = W.p;
-        const double E   = U[2];
-
-        const double rho_star = rho * (S - un) / (S - Sstar);
-        const double p_star   = p + rho * (S - un) * (Sstar - un);
-        const double E_star   = ((S - un) * E - p * un + p_star * Sstar) / (S - Sstar);
-
-        Cons Us{};
-        Us[0] = rho_star;
-        Us[1] = rho_star * Sstar;
-        Us[2] = E_star;
-        return Us;
-    };
-
-    const Cons ULs = star(UL, WL, SL, SM);
-    const Cons URs = star(UR, WR, SR, SM);
-
-    Cons F{};
-    if (SM >= 0.0) {
-        for (int k = 0; k < 3; ++k) F[k] = FL[k] + SL * (ULs[k] - UL[k]);
-    } else {
-        for (int k = 0; k < 3; ++k) F[k] = FR[k] + SR * (URs[k] - UR[k]);
-    }
-    return F;
-}
 
 // 2D HLLC notes
 // ------------
@@ -404,34 +330,6 @@ namespace ausm_detail {
 //        pInt =      P^+(ML)*pL   + P^-(MR)*pR
 //   5) Upwind the transported quantities using the sign of mDot.
 //      Assemble conservative flux components.
-// --------------------
-// FluxAUSM<1>
-// --------------------
-ConsD<1> FluxAUSM<1>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    (void)dir;
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
-
-    const double aL = WL.a;
-    const double aR = WR.a;
-    const double a  = std::max(1e-14, 0.5 * (aL + aR));
-
-    const double ML = WL.u / a;
-    const double MR = WR.u / a;
-
-    const double mDot = a * (ausm_detail::Mplus(ML) * WL.rho + ausm_detail::Mminus(MR) * WR.rho);
-    const double pInt = ausm_detail::Pplus(ML) * WL.p + ausm_detail::Pminus(MR) * WR.p;
-
-    const bool upL = (mDot >= 0.0);
-    const double uUp = upL ? WL.u : WR.u;
-    const double HUp = upL ? WL.H : WR.H;
-
-    Cons F{};
-    F[0] = mDot;
-    F[1] = mDot * uUp + pInt;
-    F[2] = mDot * HUp;
-    return F;
-}
 
 // --------------------
 // FluxAUSM<2>
@@ -487,14 +385,7 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 //   - If W0 is already available as a primitive state, return the physical flux
 //     directly with physFluxFromPrim(W0, dir, gamma).
 //
-// In 1D we call a dedicated helper: exact_riemann::godunovExactFlux1D.
-// --------------------
-// FluxGodunovExact<1>
-// --------------------
-Vec3 FluxGodunovExact<1>::numericalFlux(const Vec3& UL, const Vec3& UR, int dir, double gamma) const {
-    (void)dir;
-    return exact_riemann::godunovExactFlux1D(UL, UR, gamma);
-}
+// In 2D this implementation uses a directional exact 1D Riemann reduction.
 
 // 2D exact flux here uses a 1D directional reduction:
 // - Solve a 1D exact Riemann problem in the normal direction `dir` using (rho, un, p).
@@ -541,7 +432,7 @@ ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int 
 // Add a new flux in 3 steps:
 //   1) Implement numericalFlux(UL,UR,dir,gamma) for your scheme (in flux.cpp).
 //      - Keep UL/UR as conservative inputs.
-//      - For 2D: treat u[dir] as the normal component, and keep tangential momentum consistent.
+//      - Treat u[dir] as the normal component, and keep tangential momentum consistent.
 //   2) Register the string name -> object mapping below.
 //   3) Enable it from cfg:
 //        flux = <name>
@@ -554,5 +445,4 @@ std::unique_ptr<FluxD<Dim>> makeFluxD(const std::string& name) {
     throw std::runtime_error("Unknown flux: " + name);
 }
 
-template std::unique_ptr<FluxD<1>> makeFluxD<1>(const std::string& name);
 template std::unique_ptr<FluxD<2>> makeFluxD<2>(const std::string& name);
