@@ -1,17 +1,19 @@
-//
-//  state.cpp
-//  EulerSolver_CFD_Training
-//
-//  Created by SHUANG QIU on 2026/3/23.
-//
 
 #include "state.hpp"
 
 #include <algorithm>
 #include <cmath>
 
+// -----------------------------------------------------------------------------
+// Internal helpers used only inside this translation unit.
+// These routines support primitive-state validation and positivity repair for
+// the current 2D-only solver path.
+// -----------------------------------------------------------------------------
 namespace {
 
+// Shared primitive-state validation for array-based primitive containers.
+// Checks finiteness first, then density/pressure admissibility against the
+// configured lower bounds in StateLimits.
 template<typename Prim>
 StateCheckResult checkPrimitiveImpl(const Prim& W, const StateLimits& limits) {
     StateCheckResult result{};
@@ -56,6 +58,9 @@ StateCheckResult checkPrimitiveImpl(const Prim& W, const StateLimits& limits) {
     return result;
 }
 
+// Shared primitive-state repair.
+// Applies simple density/pressure floors while leaving velocity components
+// unchanged.
 template<typename Prim>
 void repairPrimitiveImpl(Prim& W, const StateLimits& limits) {
     const double rhoFloor = std::max(limits.eps, limits.rhoMin);
@@ -66,6 +71,9 @@ void repairPrimitiveImpl(Prim& W, const StateLimits& limits) {
 
 } // namespace
 
+// Conservative -> primitive conversion for an ideal gas.
+// U = (rho, rho*u[, rho*v], rho*E) is converted into
+// W = (rho, u[, v], p).
 template<int Dim>
 typename EosIdealGas<Dim>::Prim
 EosIdealGas<Dim>::consToPrim(const Cons& U, double gamma) {
@@ -86,6 +94,8 @@ EosIdealGas<Dim>::consToPrim(const Cons& U, double gamma) {
     return W;
 }
 
+// Primitive -> conservative conversion for an ideal gas.
+// The total energy is rebuilt from pressure and kinetic energy.
 template<int Dim>
 typename EosIdealGas<Dim>::Cons
 EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
@@ -104,25 +114,14 @@ EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
 }
 
 
+// Ideal-gas sound speed.
 template<int Dim>
 double EosIdealGas<Dim>::soundSpeed(const Prim& W, double gamma) {
     return std::sqrt(std::max(0.0, gamma * W.p / W.rho));
 }
 
-template<>
-FlowVars1 EosIdealGas<1>::evalFlowVars(const ConsD<1>& U, double gamma) {
-    FlowVars1 W{};
-    W.rho = U[0];
-    W.u = U[1] / W.rho;
-
-    const double kinetic = 0.5 * W.rho * W.u * W.u;
-    const double eInt = U[2] - kinetic;
-    W.p = (gamma - 1.0) * eInt;
-    W.a = std::sqrt(std::max(0.0, gamma * W.p / W.rho));
-    W.H = (U[2] + W.p) / W.rho;
-    return W;
-}
-
+// Cached primitive / thermodynamic quantities used in hot paths such as
+// numerical flux evaluation and CFL-related scans.
 template<>
 FlowVars2 EosIdealGas<2>::evalFlowVars(const ConsD<2>& U, double gamma) {
     FlowVars2 W{};
@@ -138,6 +137,8 @@ FlowVars2 EosIdealGas<2>::evalFlowVars(const ConsD<2>& U, double gamma) {
     return W;
 }
 
+// Physical Euler flux in the requested coordinate direction.
+// dir = 0 selects the x-flux, dir = 1 selects the y-flux in 2D.
 template<int Dim>
 typename EosIdealGas<Dim>::Cons
 EosIdealGas<Dim>::physFlux(const Cons& U, int dir, double gamma) {
@@ -158,15 +159,7 @@ EosIdealGas<Dim>::physFlux(const Cons& U, int dir, double gamma) {
     return F;
 }
 
-bool isFiniteState(const Vec3& U) {
-    for (double value : U) {
-        if (!std::isfinite(value)) {
-            return false;
-        }
-    }
-    return true;
-}
-
+// Fast finite check on a 2D conservative state vector.
 bool isFiniteState(const Vec4& U) {
     for (double value : U) {
         if (!std::isfinite(value)) {
@@ -176,14 +169,7 @@ bool isFiniteState(const Vec4& U) {
     return true;
 }
 
-static inline double internalEnergy1D(const Vec3& U) {
-    const double rho = U[0];
-    const double invRho = 1.0 / rho;
-    const double u = U[1] * invRho;
-    const double kinetic = 0.5 * rho * u * u;
-    return U[2] - kinetic;
-}
-
+// Recover internal energy from a 2D conservative state.
 static inline double internalEnergy2D(const Vec4& U) {
     const double rho = U[0];
     const double invRho = 1.0 / rho;
@@ -193,10 +179,13 @@ static inline double internalEnergy2D(const Vec4& U) {
     return U[3] - kinetic;
 }
 
+// Ideal-gas pressure from internal energy density.
 static inline double pressureFromInternalEnergy(double eInt, double gamma) {
     return (gamma - 1.0) * eInt;
 }
 
+// Early density-only screen used before the more expensive conservative-state
+// checks.
 static inline StateCheckResult quickRejectDensity(double rho, const StateLimits& limits) {
     StateCheckResult result{};
     result.rho = rho;
@@ -219,59 +208,14 @@ static inline StateCheckResult quickRejectDensity(double rho, const StateLimits&
     return result;
 }
 
-StateCheckResult checkPrimitive(const Prim1& W, const StateLimits& limits) {
-    return checkPrimitiveImpl(W, limits);
-}
-
+// Public 2D primitive-state validation entry point.
 StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits) {
     return checkPrimitiveImpl(W, limits);
 }
 
-StateCheckResult quickCheckConservative(const Vec3& U, double gamma, const StateLimits& limits) {
-    if (!isFiniteState(U)) {
-        StateCheckResult result{};
-        result.ok = false;
-        result.status = StateStatus::NonFinite;
-        return result;
-    }
-
-    StateCheckResult result = quickRejectDensity(U[0], limits);
-    if (!result.ok) {
-        return result;
-    }
-
-    result.eInt = internalEnergy1D(U);
-    if (!std::isfinite(result.eInt)) {
-        result.ok = false;
-        result.status = StateStatus::NonFinite;
-        return result;
-    }
-    if (result.eInt < 0.0) {
-        result.ok = false;
-        result.status = StateStatus::NegativeInternalEnergy;
-        return result;
-    }
-
-    result.p = pressureFromInternalEnergy(result.eInt, gamma);
-    if (!std::isfinite(result.p)) {
-        result.ok = false;
-        result.status = StateStatus::NonFinite;
-        return result;
-    }
-    if (result.p < 0.0) {
-        result.ok = false;
-        result.status = StateStatus::NegativePressure;
-        return result;
-    }
-    if (result.p <= limits.pMin) {
-        result.ok = false;
-        result.status = StateStatus::PressureTooSmall;
-        return result;
-    }
-
-    return result;
-}
-
+// Fast conservative-state admissibility screen.
+// This checks finiteness, density, internal energy, and pressure without doing
+// the full primitive-state reconstruction/reporting chain.
 StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const StateLimits& limits) {
     if (!isFiniteState(U)) {
         StateCheckResult result{};
@@ -317,21 +261,9 @@ StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const State
     return result;
 }
 
-StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimits& limits) {
-    StateCheckResult result = quickCheckConservative(U, gamma, limits);
-    if (!result.ok) {
-        return result;
-    }
-
-    const Prim1 W = EosIdealGas<1>::consToPrim(U, gamma);
-    const StateCheckResult primResult = checkPrimitive(W, limits);
-    if (!primResult.ok) {
-        return primResult;
-    }
-
-    return result;
-}
-
+// Full conservative-state check.
+// Runs the quick screen first, then converts to primitive variables for the
+// fuller admissibility check.
 StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits) {
     StateCheckResult result = quickCheckConservative(U, gamma, limits);
     if (!result.ok) {
@@ -347,21 +279,13 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
     return result;
 }
 
-void repairPrimitive(Prim1& W, const StateLimits& limits) {
-    repairPrimitiveImpl(W, limits);
-}
-
+// Public 2D primitive-state repair entry point.
 void repairPrimitive(Prim2& W, const StateLimits& limits) {
     repairPrimitiveImpl(W, limits);
 }
 
-bool repairConservative(Vec3& U, double gamma, const StateLimits& limits) {
-    Prim1 W = EosIdealGas<1>::consToPrim(U, gamma);
-    repairPrimitive(W, limits);
-    U = EosIdealGas<1>::primToCons(W, gamma);
-    return quickCheckConservative(U, gamma, limits).ok;
-}
-
+// Conservative-state repair via primitive conversion, floor enforcement, and
+// back-conversion to conservative form.
 bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
     Prim2 W = EosIdealGas<2>::consToPrim(U, gamma);
     repairPrimitive(W, limits);
@@ -369,23 +293,13 @@ bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
     return quickCheckConservative(U, gamma, limits).ok;
 }
 
-FlowVars1 evalFlowVars(const Vec3& U, double gamma) {
-    return EosIdealGas<1>::evalFlowVars(U, gamma);
-}
-
+// Convenience wrapper for cached 2D flow-variable evaluation.
 FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
     return EosIdealGas<2>::evalFlowVars(U, gamma);
 }
 
-Vec3 physFluxFromFlowVars(const Vec3& U, const FlowVars1& W, int dir) {
-    (void)dir;
-    Vec3 F{};
-    F[0] = U[1];
-    F[1] = U[1] * W.u + W.p;
-    F[2] = (U[2] + W.p) * W.u;
-    return F;
-}
-
+// Physical flux assembled from conservative storage plus cached primitive /
+// thermodynamic quantities.
 Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir) {
     Vec4 F{};
     const double un = (dir == 0) ? W.u : W.v;
@@ -404,21 +318,7 @@ Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir) {
     return F;
 }
 
-Vec3 physFluxFromPrim(const Prim1& W, int dir, double gamma) {
-    (void)dir;
-    Vec3 F{};
-
-    const double rho = W.rho;
-    const double u   = W.u[0];
-    const double p   = W.p;
-    const double E   = p / (gamma - 1.0) + 0.5 * rho * u * u;
-
-    F[0] = rho * u;
-    F[1] = rho * u * u + p;
-    F[2] = (E + p) * u;
-    return F;
-}
-
+// Physical flux assembled directly from primitive variables.
 Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma) {
     Vec4 F{};
 
@@ -443,6 +343,5 @@ Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma) {
     return F;
 }
 
-// Explicit template instantiations for the dimensions used in this solver.
-template struct EosIdealGas<1>;
+// Explicit template instantiation for the dimension currently used in this solver.
 template struct EosIdealGas<2>;

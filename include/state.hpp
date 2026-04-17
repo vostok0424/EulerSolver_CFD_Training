@@ -2,15 +2,13 @@
 
 // state.hpp
 // ---------
-// Basic state types and ideal-gas EOS helpers for the Euler equations.
+// Basic state types and ideal-gas EOS helpers for the current 2D Euler solver.
 //
 // The solver stores the solution in **conservative variables** (U):
-//   Dim = 1: U = (rho, rho*u, rho*E)
 //   Dim = 2: U = (rho, rho*u, rho*v, rho*E)
 //
 // For some operations (e.g., limiters, characteristic reconstruction, or output),
 // it is more convenient to work with **primitive variables** (W):
-//   Dim = 1: W = (rho, u, p)
 //   Dim = 2: W = (rho, u, v, p)
 //
 // EosIdealGas provides:
@@ -52,19 +50,9 @@ struct PrimD {
 template<int Dim>
 using ConsD = std::array<double, Dim+2>;
 
-// FlowVars1 / FlowVars2
-// --------------------
 // Cached primitive and thermodynamic quantities derived from conservative states.
 // These are intended to reduce repeated conservative -> primitive conversion and
 // repeated recomputation of pressure / sound speed / total enthalpy in hot paths.
-struct FlowVars1 {
-    double rho{};
-    double u{};
-    double p{};
-    double a{};
-    double H{};
-};
-
 struct FlowVars2 {
     double rho{};
     double u{};
@@ -147,7 +135,6 @@ struct EosIdealGas {
 
     // Build cached primitive / thermodynamic quantities from a conservative state.
     // These helpers are intended for hot paths such as numerical fluxes and CFL scans.
-    static FlowVars1 evalFlowVars(const ConsD<1>& U, double gamma);
     static FlowVars2 evalFlowVars(const ConsD<2>& U, double gamma);
 
     // Physical Euler flux in the requested direction.
@@ -158,25 +145,19 @@ struct EosIdealGas {
 
 using Prim1 = PrimD<1>;
 using Prim2 = PrimD<2>;
-using Vec3  = ConsD<1>;
 using Vec4  = ConsD<2>;
 
 // Cached primitive / thermodynamic evaluation helpers.
-FlowVars1 evalFlowVars(const Vec3& U, double gamma);
 FlowVars2 evalFlowVars(const Vec4& U, double gamma);
 
-Vec3 physFluxFromFlowVars(const Vec3& U, const FlowVars1& W, int dir);
 Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir);
 
-Vec3 physFluxFromPrim(const Prim1& W, int dir, double gamma);
 Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma);
 
 // Fast finite checks on conservative states.
-bool isFiniteState(const Vec3& U);
 bool isFiniteState(const Vec4& U);
 
 // Primitive-state checks.
-StateCheckResult checkPrimitive(const Prim1& W, const StateLimits& limits);
 StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits);
 
 // Conservative-state checks.
@@ -185,16 +166,12 @@ StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits);
 // checkConservative performs the fuller admissibility check and returns the same
 // detailed diagnostic structure when the fast screen fails or deeper reporting
 // is needed.
-StateCheckResult quickCheckConservative(const Vec3& U, double gamma, const StateLimits& limits);
 StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const StateLimits& limits);
-StateCheckResult checkConservative(const Vec3& U, double gamma, const StateLimits& limits);
 StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits);
 
 // Primitive-state positivity clamps.
-void repairPrimitive(Prim1& W, const StateLimits& limits);
 void repairPrimitive(Prim2& W, const StateLimits& limits);
 
 // Conservative-state repair via primitive conversion, clamping, and back
 // conversion. This remains a final fallback after quick/full validation fails.
-bool repairConservative(Vec3& U, double gamma, const StateLimits& limits);
 bool repairConservative(Vec4& U, double gamma, const StateLimits& limits);
