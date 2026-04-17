@@ -15,7 +15,7 @@
 // - A factory makeTimeIntegratorT<State>(name) to select by cfg string
 //
 // Design notes:
-// - The integrator is templated on State (e.g., Vec3 for 1D, Vec4 for 2D).
+// - The integrator is templated on State (currently used with Vec4 in the 2D solver).
 // - The RHS callback receives (U, R) and is allowed to modify U in-place before
 //   computing R. This is intentional: solvers often need to fill ghost cells or
 //   exchange MPI halos at each stage.
@@ -138,7 +138,7 @@ private:
 // Supported names (case-sensitive):
 //   euler, rk2, ssprk3, rk4
 //
-// The factory is explicitly instantiated for Vec3 / Vec4 in time_integrator.cpp.
+// The factory is explicitly instantiated for Vec4 in time_integrator.cpp.
 // This keeps the header lightweight and avoids multiple-definition issues.
 template<typename State>
 std::unique_ptr<TimeIntegratorT<State>> makeTimeIntegratorT(const std::string& name);

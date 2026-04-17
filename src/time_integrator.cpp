@@ -70,7 +70,7 @@
 // -----------------------------------------------------------------------------
 
 #include "time_integrator.hpp"
-#include "state.hpp"   // for Vec3 / Vec4 explicit instantiation
+#include "state.hpp"   // for Vec4 explicit instantiation
 #include <stdexcept>
 
 
@@ -244,14 +244,8 @@ std::unique_ptr<TimeIntegratorT<State>> makeTimeIntegratorT(const std::string& n
 }
 
 // ---- Explicit template instantiations ----
-// This training project only uses Vec3 (1D conservative) and Vec4 (2D conservative).
+// This solver currently uses Vec4 (2D conservative state).
 // Explicit instantiation keeps compile times reasonable and avoids linker surprises.
-template class TI_EulerT<Vec3>;
-template class TI_RK2T<Vec3>;
-template class TI_SSPRK3T<Vec3>;
-template class TI_RK4T<Vec3>;
-template std::unique_ptr<TimeIntegratorT<Vec3>> makeTimeIntegratorT<Vec3>(const std::string&);
-
 template class TI_EulerT<Vec4>;
 template class TI_RK2T<Vec4>;
 template class TI_SSPRK3T<Vec4>;
