@@ -7,18 +7,18 @@
 
 // boundary.cpp
 // -----------
-// Boundary-condition (BC) application for 1D/2D Euler on a Cartesian grid.
+// Boundary-condition (BC) application for 2D Euler on a Cartesian grid.
 //
 // This module fills ghost cells based on boundary types selected in the cfg file.
 // The solver is expected to:
-//   1) Read BC data once via read1D/read2D(cfg)
+//   1) Read BC data once via read2D(cfg)
 //   2) Perform MPI halo exchange (for internal interfaces)
-//   3) Call apply1D/apply2D(...) to fill physical boundary ghost cells
+//   3) Call apply2D(...) to fill physical boundary ghost cells
 //
 // Supported BC names (case-sensitive; no aliases):
 //   - "internal"      : MPI subdomain interface (ghost cells come from halo exchange)
 //   - "zeroGradient"  : copy nearest interior cell into ghosts
-//   - "inlet"         : fixed primitive state (rho, u[,v], p) from cfg
+//   - "inlet"         : fixed primitive state (rho, u, v, p) from cfg
 //   - "outlet"        : subsonic pressure outlet (impose p, extrapolate rho and velocity)
 //   - "slipWall"      : inviscid slip wall (reflect normal momentum)
 //   - "symmetry"      : same treatment as slipWall here (reflect normal momentum)
@@ -102,19 +102,6 @@ static inline bool hasAnyPrefix(const Cfg& cfg, const std::string& prefix,
     return false;
 }
 
-static Prim1 readInletPrim1(const Cfg& cfg, const std::string& side) {
-    const std::string p1 = "bc." + side + ".inlet.";
-    const std::string p0 = "bc.inlet.";
-
-    const bool sideHas = hasAnyPrefix(cfg, p1, {"rho", "u", "p"});
-    const std::string p = sideHas ? p1 : p0;
-
-    Prim1 W{};
-    W.rho = readDoubleStrict(cfg, p + "rho");
-    W.u[0] = readDoubleStrict(cfg, p + "u");
-    W.p = readDoubleStrict(cfg, p + "p");
-    return W;
-}
 
 static Prim2 readInletPrim2(const Cfg& cfg, const std::string& side) {
     const std::string p1 = "bc." + side + ".inlet.";
@@ -138,32 +125,6 @@ static double readOutletP(const Cfg& cfg, const std::string& side) {
     return readDoubleStrict(cfg, k0);
 }
 
-Bc1D read1D(const Cfg& cfg) {
-    const std::string base = normalizeName(cfg.getString("bc", "zeroGradient"));
-
-    Bc1D b;
-    b.gamma = cfg.getDouble("gamma", 1.4);
-
-    const std::string leftName = pickName(cfg, "bc.left", base);
-    const std::string rightName = pickName(cfg, "bc.right", base);
-
-    b.left.type = parseBcType(leftName, "read1D.left");
-    b.right.type = parseBcType(rightName, "read1D.right");
-
-    if (b.left.type == BcType::Inlet) {
-        b.left.inlet = readInletPrim1(cfg, "left");
-    } else if (b.left.type == BcType::Outlet) {
-        b.left.pout = readOutletP(cfg, "left");
-    }
-
-    if (b.right.type == BcType::Inlet) {
-        b.right.inlet = readInletPrim1(cfg, "right");
-    } else if (b.right.type == BcType::Outlet) {
-        b.right.pout = readOutletP(cfg, "right");
-    }
-
-    return b;
-}
 
 Bc2D read2D(const Cfg& cfg) {
     const std::string base = normalizeName(cfg.getString("bc", "zeroGradient"));
@@ -208,24 +169,11 @@ Bc2D read2D(const Cfg& cfg) {
     return b;
 }
 
-// ---- outlet state helpers ----
+// ---- outlet state helper ----
 // The outlet BC here is a simple pressure outlet:
 // - If the boundary-normal Mach number is supersonic (M>=1): extrapolate everything.
 // - If subsonic: impose pressure p_out and extrapolate density and velocity.
 
-static inline Vec3 outletState1D(const Vec3& Uin, double pout, double gamma) {
-    const Prim1 W = EosIdealGas<1>::consToPrim(Uin, gamma);
-    const double a = EosIdealGas<1>::soundSpeed(W, gamma);
-    const double M = (a > 0.0) ? std::abs(W.u[0]) / a : 0.0;
-
-    if (M >= 1.0) {
-        return Uin;
-    }
-
-    Prim1 Wo = W;
-    Wo.p = pout;
-    return EosIdealGas<1>::primToCons(Wo, gamma);
-}
 
 static inline Vec4 outletState2D(const Vec4& Uin, double pout, int normalDir,
                                  double gamma) {
@@ -243,53 +191,6 @@ static inline Vec4 outletState2D(const Vec4& Uin, double pout, int normalDir,
     return EosIdealGas<2>::primToCons(Wo, gamma);
 }
 
-void apply1D(std::vector<Vec3>& U, int nx, int ng, const Bc1D& bc) {
-    const double gamma = bc.gamma;
-
-    // LEFT
-    if (bc.left.type == BcType::Internal) {
-        // MPI subdomain interface: do nothing
-    } else if (bc.left.type == BcType::ZeroGradient) {
-        for (int g = 0; g < ng; ++g) U[ng - 1 - g] = U[ng];
-    } else if (bc.left.type == BcType::Inlet) {
-        const Vec3 Uin = EosIdealGas<1>::primToCons(bc.left.inlet, gamma);
-        for (int g = 0; g < ng; ++g) U[ng - 1 - g] = Uin;
-    } else if (bc.left.type == BcType::Outlet) {
-        const Vec3 Uadj = U[ng];
-        const Vec3 Uo = outletState1D(Uadj, bc.left.pout, gamma);
-        for (int g = 0; g < ng; ++g) U[ng - 1 - g] = Uo;
-    } else if (isWallLike(bc.left.type)) {
-        for (int g = 0; g < ng; ++g) {
-            Vec3 G = U[ng + g];
-            G[1] = -G[1];
-            U[ng - 1 - g] = G;
-        }
-    } else {
-        throw std::runtime_error("boundary: unsupported left BC type in apply1D.");
-    }
-
-    // RIGHT
-    if (bc.right.type == BcType::Internal) {
-        // MPI subdomain interface: do nothing
-    } else if (bc.right.type == BcType::ZeroGradient) {
-        for (int g = 0; g < ng; ++g) U[nx + ng + g] = U[nx + ng - 1];
-    } else if (bc.right.type == BcType::Inlet) {
-        const Vec3 Uin = EosIdealGas<1>::primToCons(bc.right.inlet, gamma);
-        for (int g = 0; g < ng; ++g) U[nx + ng + g] = Uin;
-    } else if (bc.right.type == BcType::Outlet) {
-        const Vec3 Uadj = U[nx + ng - 1];
-        const Vec3 Uo = outletState1D(Uadj, bc.right.pout, gamma);
-        for (int g = 0; g < ng; ++g) U[nx + ng + g] = Uo;
-    } else if (isWallLike(bc.right.type)) {
-        for (int g = 0; g < ng; ++g) {
-            Vec3 G = U[nx + ng - 1 - g];
-            G[1] = -G[1];
-            U[nx + ng + g] = G;
-        }
-    } else {
-        throw std::runtime_error("boundary: unsupported right BC type in apply1D.");
-    }
-}
 
 void apply2D(std::vector<Vec4>& U, int nx, int ny, int ng, const Bc2D& bc) {
     const double gamma = bc.gamma;
