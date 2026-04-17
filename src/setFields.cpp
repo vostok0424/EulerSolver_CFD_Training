@@ -3,13 +3,12 @@
 // Optional initial-field overrides (similar to OpenFOAM's setFields concept).
 //
 // Purpose:
-// - Start from a uniform background primitive state (rho,u[,v],p).
-// - Then apply a list of rectangular regions (in 1D: x-interval; in 2D: x-y box)
-//   that overwrite the initial state.
+// - Start from a uniform background primitive state (rho,u,v,p).
+// - Then apply a list of rectangular regions (x-y boxes)
 //
 // Notes:
 // - This module writes ONLY interior cells. Ghost cells are filled later by boundary conditions.
-// - Region indices in cfg start from 1: setFields.region1.*, region2.*, ...
+// - Region indices in cfg start from 1: setFields.region1.*, setFields.region2.*, ...
 // - If multiple regions overlap, later regions overwrite earlier ones (r increasing).
 
 
@@ -35,52 +34,6 @@ ShockDir parseShockDir(const std::string& s)
     if (s == "+y" || s == "y" || s == "+Y" || s == "Y") return ShockDir::PlusY;
     if (s == "-y" || s == "-Y") return ShockDir::MinusY;
     throw std::runtime_error("setFields: invalid shockDir='" + s + "' (expected +x, -x, +y, or -y)");
-}
-
-Prim1 buildRegionPrim1D(const Prim1& bg, double gamma, const Cfg& cfg, const std::string& base)
-{
-    Prim1 W = bg;
-    const double shockMach = cfg.getDouble(base + "shockMach", -1.0);
-    if (shockMach > 0.0) {
-        if (shockMach <= 1.0) {
-            throw std::runtime_error("setFields: shockMach must be > 1 for " + base);
-        }
-
-        W.rho = cfg.getDouble(base + "rho", bg.rho);
-        W.u[0] = cfg.getDouble(base + "u", 0.0);
-        W.p = cfg.getDouble(base + "p", bg.p);
-        const std::string dirStr = cfg.getString(base + "shockDir", "+x");
-        const ShockDir dir = parseShockDir(dirStr);
-        if (dir == ShockDir::PlusY || dir == ShockDir::MinusY) {
-            throw std::runtime_error("setFields: y-directed shockDir is invalid in 1D for " + base);
-        }
-
-        const double rho1 = W.rho;
-        const double u1 = W.u[0];
-        const double p1 = W.p;
-        const double a1 = std::sqrt(gamma * p1 / rho1);
-        const double sign = (dir == ShockDir::PlusX) ? 1.0 : -1.0;
-        const double Vs = u1 + sign * shockMach * a1;
-        const double w1 = std::abs(Vs - u1);
-        const double rhoRatio = ((gamma + 1.0) * shockMach * shockMach)
-                              / ((gamma - 1.0) * shockMach * shockMach + 2.0);
-        const double pRatio = 1.0 + (2.0 * gamma / (gamma + 1.0))
-                                    * (shockMach * shockMach - 1.0);
-        const double rho2 = rho1 * rhoRatio;
-        const double p2 = p1 * pRatio;
-        const double w2 = w1 * (rho1 / rho2);
-        const double u2 = Vs - sign * w2;
-
-        W.rho = rho2;
-        W.u[0] = u2;
-        W.p = p2;
-        return W;
-    }
-
-    W.rho = cfg.getDouble(base + "rho", bg.rho);
-    W.u[0] = cfg.getDouble(base + "u", bg.u[0]);
-    W.p = cfg.getDouble(base + "p", bg.p);
-    return W;
 }
 
 Prim2 buildRegionPrim2D(const Prim2& bg, double gamma, const Cfg& cfg, const std::string& base)
@@ -141,49 +94,6 @@ Prim2 buildRegionPrim2D(const Prim2& bg, double gamma, const Cfg& cfg, const std
 }
 
 } // namespace
-
-void setFields1D(std::vector<Vec3>& U,
-                 int nx, int ng,
-                 double x0, double x1,
-                 double gamma,
-                 const Cfg& cfg)
-{
-    // Uniform grid spacing over the interior domain.
-    const double dx = (x1 - x0) / static_cast<double>(nx);
-
-    // Background primitive state (defaults are a simple uniform flow).
-    Prim1 bg{};
-    bg.rho = cfg.getDouble("setFields.bg.rho", 1.0);
-    bg.u[0]= cfg.getDouble("setFields.bg.u",   0.0);
-    bg.p   = cfg.getDouble("setFields.bg.p",   1.0);
-
-    // Convert background primitive state to conservative form stored in U.
-    const Vec3 Ubg = EosIdealGas<1>::primToCons(bg, gamma);
-
-    // Fill interior cells [ng .. ng+nx-1] with the background state.
-    for (int i=0;i<nx;++i) U[ng+i] = Ubg;
-
-    // Apply region overrides (piecewise-constant patches).
-    const int nRegions = cfg.getInt("setFields.nRegions", 0);
-    for (int r=1;r<=nRegions;++r) {
-        // Each region r has keys like:
-        //   setFields.region<r>.xMin, xMax, rho, u, p
-        const std::string base = "setFields.region" + std::to_string(r) + ".";
-        const double xMin = cfg.getDouble(base+"xMin", x0);
-        const double xMax = cfg.getDouble(base+"xMax", x1);
-
-        // Region state: either direct primitive override or shock-defined post-shock state.
-        const Prim1 W = buildRegionPrim1D(bg, gamma, cfg, base);
-        const Vec3 Ureg = EosIdealGas<1>::primToCons(W, gamma);
-
-        // Overwrite cells whose centers fall inside [xMin, xMax].
-        for (int i=0;i<nx;++i) {
-            // Cell-centered coordinate.
-            const double x = x0 + (i+0.5)*dx;
-            if (x>=xMin && x<=xMax) U[ng+i] = Ureg;
-        }
-    }
-}
 
 void setFields2D(std::vector<Vec4>& U,
                  int nx, int ny, int ng,
