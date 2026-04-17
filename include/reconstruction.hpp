@@ -23,8 +23,8 @@
 //   WENO5:      ng >= 3
 //
 // Design note:
-// The solver calls reconstructFaces*() after applyBC() so ghost cells contain valid
-// boundary/halo data.
+// The solver calls reconstructFacesX()/reconstructFacesY() after applyBC() so ghost cells
+// contain valid boundary/halo data.
 
 #include "cfg.hpp"
 #include "state.hpp"
@@ -134,34 +134,6 @@ struct Options {
 // with Roe linearization; no characteristic-mode cfg keys are exposed.
 // Limiter support is intentionally restricted to the small set above.
 Options readOptions(const Cfg& cfg);
-
-// Reconstruction1D
-// ----------------
-// Characteristic-space reconstruction only; admissibility/repair are delegated to state.hpp/state.cpp.
-// Fixed to conservative-characteristic projection with Roe linearization.
-// Build left/right face states UL/UR for all (nx+1) faces in a 1D mesh.
-//
-// Face indexing convention:
-//   faces i = 0..nx
-//   - face i separates cell (i-1) and cell i in the interior
-//   - UL[i] comes from the left side, UR[i] from the right side
-//
-// The input U is cell-centered and includes ghosts.
-class Reconstruction1D {
-public:
-    explicit Reconstruction1D(const Cfg& cfg);
-
-    const Options& options() const { return opt_; }
-
-    void reconstructFaces(const std::vector<Vec3>& U,
-                          int nx, int ng,
-                          double gamma,
-                          std::vector<Vec3>& UL,
-                          std::vector<Vec3>& UR) const;
-
-private:
-    Options opt_;
-};
 
 // Reconstruction2D
 // ----------------

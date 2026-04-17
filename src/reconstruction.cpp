@@ -1,5 +1,5 @@
 // reconstruction.cpp
-// Spatial reconstruction for finite-volume Euler solvers.
+// Spatial reconstruction for the 2D finite-volume Euler solver.
 // Reconstruct left/right conservative face states UL/UR from ghosted
 // cell-centered conservative states U.
 //
@@ -23,7 +23,7 @@
 // -----------------------------------------------------------------------------
 // Shared reconstruction pattern:
 //   1) Check array sizes and ghost-cell width.
-//   2) Build a Roe face eigensystem.
+//   2) Build a Roe face eigensystem for the local 2D face orientation.
 //   3) Project the local stencil to characteristic space.
 //   4) Reconstruct each scalar characteristic component.
 //   5) Map the reconstructed face states back to conservative variables.
@@ -177,46 +177,10 @@ Options readOptions(const Cfg& cfg) {
 // 4) Characteristic helpers
 // -----------------------------------------------------------------------------
 
-// Roe eigensystems used by characteristic reconstruction.
-struct Eigen3 { double R[3][3]; double L[3][3]; };
+// Roe eigensystem used by characteristic reconstruction.
 struct Eigen4 { double R[4][4]; double L[4][4]; };
 
 
-// Roe face state for 1D reconstruction.
-static inline void faceState1D(const Vec3& ULc, const Vec3& URc, double gamma,
-                               double& rho0, double& u0, double& p0, double& H0, double& c0) {
-    const double rhoL = ULc[0];
-    const double rhoR = URc[0];
-
-    const double invRhoL = 1.0 / rhoL;
-    const double invRhoR = 1.0 / rhoR;
-
-    const double uL = ULc[1] * invRhoL;
-    const double uR = URc[1] * invRhoR;
-
-    const double kineticL = 0.5 * ULc[1] * ULc[1] * invRhoL;
-    const double kineticR = 0.5 * URc[1] * URc[1] * invRhoR;
-
-    const double pL = (gamma - 1.0) * (ULc[2] - kineticL);
-    const double pR = (gamma - 1.0) * (URc[2] - kineticR);
-
-    const double HL = (ULc[2] + pL) * invRhoL;
-    const double HR = (URc[2] + pR) * invRhoR;
-
-    const double sL = std::sqrt(std::max(rhoL, 0.0));
-    const double sR = std::sqrt(std::max(rhoR, 0.0));
-    const double s  = sL + sR;
-
-    rho0 = sL * sR;
-    u0   = (sL * uL + sR * uR) / s;
-    H0   = (sL * HL + sR * HR) / s;
-
-    const double q2 = 0.5 * u0 * u0;
-    const double c2 = (gamma - 1.0) * std::max(0.0, H0 - q2);
-    c0 = std::sqrt(c2);
-
-    p0 = 0.5 * (pL + pR);
-}
 
 // Roe face state for 2D reconstruction.
 static inline void faceState2D(const Vec4& ULc, const Vec4& URc, double gamma,
@@ -262,29 +226,6 @@ static inline void faceState2D(const Vec4& ULc, const Vec4& URc, double gamma,
     p0 = 0.5 * (pL + pR);
 }
 
-// 1D conservative eigensystem.
-static inline void buildEigen1DConservative(double u, double H, double c, double gamma, Eigen3& e) {
-    const double beta  = (gamma - 1.0) / (c * c);
-    const double alpha = 0.5 * beta * u * u;
-
-    // R columns
-    e.R[0][0] = 1.0; e.R[1][0] = u - c; e.R[2][0] = H - u * c;
-    e.R[0][1] = 1.0; e.R[1][1] = u;     e.R[2][1] = 0.5 * u * u;
-    e.R[0][2] = 1.0; e.R[1][2] = u + c; e.R[2][2] = H + u * c;
-
-    // L rows
-    e.L[0][0] = 0.5 * (alpha + u / c);
-    e.L[0][1] = -0.5 * (beta * u + 1.0 / c);
-    e.L[0][2] = 0.5 * beta;
-
-    e.L[1][0] = 1.0 - alpha;
-    e.L[1][1] = beta * u;
-    e.L[1][2] = -beta;
-
-    e.L[2][0] = 0.5 * (alpha - u / c);
-    e.L[2][1] = -0.5 * (beta * u - 1.0 / c);
-    e.L[2][2] = 0.5 * beta;
-}
 
 // 2D conservative eigensystem for x-faces.
 static inline void buildEigen2DConservativeX(double u, double v, double H, double c, double gamma, Eigen4& e) {
@@ -355,11 +296,6 @@ static inline void buildEigen2DConservativeY(double u, double v, double H, doubl
 }
 
 
-static inline void reconstructConservativeFromChar1D(const Eigen3& e, const double* w, Vec3& q) {
-    for (int m = 0; m < 3; ++m) {
-        q[m] = e.R[m][0] * w[0] + e.R[m][1] * w[1] + e.R[m][2] * w[2];
-    }
-}
 
 static inline void reconstructConservativeFromChar2D(const Eigen4& e, const double* w, Vec4& q) {
     for (int m = 0; m < 4; ++m) {
@@ -367,11 +303,6 @@ static inline void reconstructConservativeFromChar2D(const Eigen4& e, const doub
     }
 }
 
-static inline void projectChar3(const Eigen3& e, const Vec3& q, double w[3]) {
-    for (int s = 0; s < 3; ++s) {
-        w[s] = e.L[s][0] * q[0] + e.L[s][1] * q[1] + e.L[s][2] * q[2];
-    }
-}
 
 
 static inline void projectChar4(const Eigen4& e, const Vec4& q, double w[4]) {
@@ -431,8 +362,8 @@ static inline bool isQuickAdmissibleState(const VecT& Uc, double gamma, const St
     return quickAdmissibleStateCached(Uc, gamma, limits, cache);
 }
 
-// First-order face loading shared by 1D and 2D drivers. The caller provides a
-// small loader that fills ULf/URf from neighboring cell-centered states.
+// First-order face loading shared by the 2D reconstruction drivers. The caller
+// provides a small loader that fills ULf/URf from neighboring cell-centered states.
 // Optional centralized repair is then applied to each face state.
 template <typename VecT, typename LoadFaceFn>
 static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
@@ -542,7 +473,7 @@ static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
     throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
 }
 
-// Final face-state selection pipeline shared by 1D and 2D reconstruction:
+// Final face-state selection pipeline shared by the 2D reconstruction paths:
 //   1) reconstruct with the requested high-order scheme;
 //   2) check admissibility;
 //   3) if enabled, fall back to first order when the high-order state fails;
@@ -621,106 +552,6 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
 }
 
 
-// The flux routine consumes reconstructed conservative face states UL/UR.
-// -----------------------------------------------------------------------------
-// Reconstruction1D
-// Reconstruct conservative face states on the 1D mesh.
-Reconstruction1D::Reconstruction1D(const Cfg& cfg) : opt_(readOptions(cfg)) {}
-
-void Reconstruction1D::reconstructFaces(const std::vector<Vec3>& U,
-                                        int nx, int ng,
-                                        double gamma,
-                                        std::vector<Vec3>& UL,
-                                        std::vector<Vec3>& UR) const {
-    const int nxTot = nx + 2 * ng;
-    if ((int)U.size() != nxTot) {
-        throw std::runtime_error("Reconstruction1D: U size mismatch");
-    }
-    if (ng < requiredGhostCells(opt_.scheme)) {
-        throw std::runtime_error("Reconstruction1D: ng too small for selected reconstruction.scheme");
-    }
-
-    UL.assign(nx + 1, Vec3{});
-    UR.assign(nx + 1, Vec3{});
-
-    const StateLimits limits = opt_.stateLimits();
-
-    if (opt_.scheme == Scheme::FirstOrder) {
-        for (int i = 0; i < nx + 1; ++i) {
-            auto loadFace = [&](Vec3& ULf, Vec3& URf) {
-                ULf = U[ng + i - 1];
-                URf = U[ng + i];
-            };
-            loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, UL[i], UR[i]);
-        }
-        return;
-    }
-    // High-order path: build a face-local Roe eigensystem, project the stencil
-    // to characteristic space, reconstruct each characteristic scalar, then
-    // map the face states back to conservative variables.
-    // Reconstruct one 1D face with the requested scheme.
-    auto reconstructFace = [&](int iFace, Scheme scheme, Vec3& ULf, Vec3& URf) {
-        const int kR = ng + iFace;
-        const int kL = kR - 1;
-
-        double rho0 = 0.0, u0 = 0.0, p0 = 0.0, H0 = 0.0, c0 = 0.0;
-        faceState1D(U[kL], U[kR], gamma, rho0, u0, p0, H0, c0);
-
-        Eigen3 eig{};
-        buildEigen1DConservative(u0, H0, std::max(c0, opt_.eps), gamma, eig);
-
-        auto fillMusclCache = [&](double (&wc)[4][3]) {
-            const Vec3* qBase = &U[kL - 1];
-            projectChar3(eig, qBase[0], wc[0]);
-            projectChar3(eig, qBase[1], wc[1]);
-            projectChar3(eig, qBase[2], wc[2]);
-            projectChar3(eig, qBase[3], wc[3]);
-        };
-
-        auto fillWenoCache = [&](double (&wc)[6][3]) {
-            const Vec3* qBase = &U[kL - 2];
-            projectChar3(eig, qBase[0], wc[0]);
-            projectChar3(eig, qBase[1], wc[1]);
-            projectChar3(eig, qBase[2], wc[2]);
-            projectChar3(eig, qBase[3], wc[3]);
-            projectChar3(eig, qBase[4], wc[4]);
-            projectChar3(eig, qBase[5], wc[5]);
-        };
-
-        reconstructHighOrderFaceFromChar<Vec3, Eigen3, 3>(scheme,
-                                                           eig,
-                                                           opt_.limiter,
-                                                           opt_.eps,
-                                                           fillMusclCache,
-                                                           fillWenoCache,
-                                                           reconstructConservativeFromChar1D,
-                                                           ULf,
-                                                           URf);
-    };
-
-    // Finalize each face with admissibility checks, fallback, and repair.
-    for (int i = 0; i < nx + 1; ++i) {
-        auto reconstructWithScheme = [&](Scheme scheme, Vec3& ULf, Vec3& URf) {
-            reconstructFace(i, scheme, ULf, URf);
-        };
-
-        auto loadFirstOrder = [&](Vec3& ULf, Vec3& URf) {
-            ULf = U[ng + i - 1];
-            URf = U[ng + i];
-        };
-
-        finalizeFaceWithFallback(opt_.scheme,
-                                 opt_.enableFallback,
-                                 opt_.positivityFix,
-                                 gamma,
-                                 limits,
-                                 reconstructWithScheme,
-                                 loadFirstOrder,
-                                 UL[i],
-                                 UR[i]);
-    }
-}
-
 // -------------------------
 // Reconstruction2D
 // -------------------------
@@ -766,9 +597,8 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
         }
         return;
     }
-    // High-order x-face path: the driver logic matches the 1D version, but the
-    // face-local Roe eigensystem and characteristic projection are built for
-    // the x-normal 2D Euler system.
+    // High-order x-face path: build the face-local Roe eigensystem and perform
+    // characteristic reconstruction for the x-normal 2D Euler system.
     // Reconstruct one x-face with the requested scheme.
     auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
         const int I_R = ng + iFace;
