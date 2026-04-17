@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# make.sh — portable build script for EulerSolver_CFD_Training
+# make.sh — portable build script for the 2D Euler solver
 #
 # Modes:
 #   ./make.sh            -> release build (default), output: ./solver
@@ -119,26 +119,38 @@ else
   fi
 fi
 
-# Collect sources
+# Collect sources explicitly for the 2D solver only.
+# This avoids accidentally compiling legacy 1D modules that are still present in the tree.
 shopt -s nullglob
-SRC=(src/*.cpp)
+SRC=(
+  src/main.cpp
+  src/cfg.cpp
+  src/state.cpp
+  src/flux.cpp
+  src/reconstruction.cpp
+  src/boundary.cpp
+  src/setFields.cpp
+  src/ic2d.cpp
+  src/io2d.cpp
+  src/solver2d.cpp
+  src/time_integrator.cpp
+  src/mpi_parallel.cpp
+  src/riemann_exact.cpp
+)
 
-# Support split state module if placed in project root
-if [[ -f "state.cpp" ]]; then
-  SRC+=("state.cpp")
-fi
-
-if (( ${#SRC[@]} == 0 )); then
-  echo "Error: no source files found in ./src/*.cpp or ./state.cpp" >&2
-  exit 1
-fi
-
-# Sanity check for split state module
-if [[ -f "state.cpp" || -f "src/state.cpp" ]]; then
-  if [[ ! -f "state.hpp" && ! -f "include/state.hpp" ]]; then
-    echo "Error: state.cpp exists, but state.hpp was not found in project root or include/." >&2
-    exit 1
+MISSING=()
+for f in "${SRC[@]}"; do
+  if [[ ! -f "$f" ]]; then
+    MISSING+=("$f")
   fi
+done
+
+if (( ${#MISSING[@]} > 0 )); then
+  echo "Error: missing required 2D source files:" >&2
+  for f in "${MISSING[@]}"; do
+    echo "  $f" >&2
+  done
+  exit 1
 fi
 
 mkdir -p "$BUILD_DIR"
@@ -151,9 +163,6 @@ done
 echo "[1/2] Compiling objects..."
 for i in "${!SRC[@]}"; do
   echo "  ${SRC[$i]} -> ${OBJ[$i]}"
-  if [[ "${SRC[$i]}" == "state.cpp" || "${SRC[$i]}" == "src/state.cpp" ]]; then
-    echo "    building split state module"
-  fi
   "$CXX" $CXXFLAGS_BASE $MPI_COMPILE_FLAGS -c "${SRC[$i]}" -o "${OBJ[$i]}"
 done
 
@@ -164,5 +173,5 @@ echo ""
 echo "============================"
 echo "Compile complete - Go for simulations."
 echo "============================"
-echo "Run serial: ./$TARGET cases/<configuration_file_name>.cfg"
-echo "Run parallel: mpirun -np 4 ./$TARGET cases/<configuration_file_name>.cfg (ensure px*py == np)"
+echo "Run serial: ./$TARGET cases/case2d_sod.cfg"
+echo "Run parallel: mpirun -np 4 ./$TARGET cases/case2d_sod.cfg (ensure px*py == np)"

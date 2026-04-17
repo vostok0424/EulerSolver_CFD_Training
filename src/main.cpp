@@ -6,11 +6,10 @@
 // - Initialise MPI (even for serial runs).
 // - Load a case configuration file (.cfg).
 // - Create an MPI Cartesian decomposition helper (mpi_parallel::MpiParallel).
-// - Dispatch to the 1D or 2D solver based on `dim` in the cfg.
+// - Run the 2D solver only; reject legacy dim=1 configurations.
 // - Ensure all ranks return the same exit code.
 
 #include "cfg.hpp"
-#include "solver1d.hpp"
 #include "solver2d.hpp"
 #include "mpi_parallel.hpp"
 
@@ -45,12 +44,12 @@ int main(int argc, char** argv) {
         Cfg cfg;
         cfg.load(cfgFile);
 
-        // Select solver dimension: dim=1 (1D) or dim=2 (2D).
-        const int dim = cfg.getInt("dim", 1);
+        // Legacy compatibility: read dim from cfg, but only dim=2 is supported now.
+        const int dim = cfg.getInt("dim", 2);
 
         // MPI decomposition parameters.
         // Must satisfy: px * py == MPI world size.
-        // For pure 1D runs, set py=1 so the domain is split only along x.
+        // This executable now targets 2D runs only.
         const int px = cfg.getInt("mpi.px", 1);
         const int py = cfg.getInt("mpi.py", 1);
 
@@ -63,25 +62,21 @@ int main(int argc, char** argv) {
                       << ", mpi.px=" << px << ", mpi.py=" << py << "\n";
         }
 
-        // Dispatch to the selected solver.
-        if (dim == 1) {
+        // Run the 2D solver only.
+        if (dim != 2) {
             if (mp.isRoot()) {
-                std::cout << "[main] dim=1, 1D solver\n";
+                std::cerr << "Unsupported dim=" << dim
+                          << ". This executable now supports 2D only."
+                          << " Please use dim=2 and a 2D case file.\n";
             }
-            Solver1D solver(cfg, mp);
-            solver.run();
-        } else if (dim == 2) {
+            exitCode = 1;
+        } else {
             if (mp.isRoot()) {
                 std::cout << "[main] dim=2, 2D solver\n";
             }
             // Solver2D receives the MPI helper so it can exchange halos and write merged output.
             Solver2D solver(cfg, mp);
             solver.run();
-        } else {
-            if (mp.isRoot()) {
-                std::cerr << "Unsupported dim=" << dim << ", only 1 or 2\n";
-            }
-            exitCode = 1;
         }
     }
     // Any exception becomes a non-zero exit code. Print only on root to avoid spam.
