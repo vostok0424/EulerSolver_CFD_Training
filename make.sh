@@ -135,6 +135,8 @@ SRC=(
   src/solver.cpp
   src/time_integrator.cpp
   src/mpi_parallel.cpp
+  src/diagnostics.cpp
+  src/cell_repair.cpp
 )
 
 MISSING=()

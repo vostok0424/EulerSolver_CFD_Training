@@ -18,9 +18,10 @@
 //
 // Notes:
 // - This EOS assumes an ideal gas with constant gamma.
-// - State validation is split into a lightweight conservative quick check and a
-//   fuller conservative admissibility check used when more detailed diagnosis is
-//   needed.
+// - This header provides state definitions, EOS helpers, and single-state
+//   validation utilities.
+// - Global scan/summary diagnostics and repair logic now live outside this
+//   module.
 
 #include <array>
 #include <cstddef>
@@ -98,19 +99,6 @@ struct StateCheckResult {
     double eInt = 0.0;
 };
 
-// StateScanReport
-// ---------------
-// Summary diagnostics for scanning a collection of states.
-struct StateScanReport {
-    std::size_t total = 0;
-    std::size_t nonFiniteCount = 0;
-    std::size_t badDensityCount = 0;
-    std::size_t badPressureCount = 0;
-    std::size_t badInternalEnergyCount = 0;
-    double minRho = 0.0;
-    double minP = 0.0;
-};
-
 // EosIdealGas<Dim>
 // ---------------
 // Ideal-gas equation of state utilities for Euler.
@@ -168,10 +156,3 @@ StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits);
 // is needed.
 StateCheckResult quickCheckConservative(const Vec4& U, double gamma, const StateLimits& limits);
 StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimits& limits);
-
-// Primitive-state positivity clamps.
-void repairPrimitive(Prim2& W, const StateLimits& limits);
-
-// Conservative-state repair via primitive conversion, clamping, and back
-// conversion. This remains a final fallback after quick/full validation fails.
-bool repairConservative(Vec4& U, double gamma, const StateLimits& limits);

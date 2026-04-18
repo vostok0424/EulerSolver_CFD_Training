@@ -34,60 +34,53 @@ constexpr const char* kOutputDir2D = "solution";
 
 struct ReducedStateScanReport {
     unsigned long long total{0};
-    unsigned long long nonFiniteCount{0};
-    unsigned long long badDensityCount{0};
-    unsigned long long badPressureCount{0};
-    unsigned long long badInternalEnergyCount{0};
+    int nonFiniteCount{0};
+    int badDensityCount{0};
+    int badPressureCount{0};
+    int badInternalEnergyCount{0};
+    int repairedCellCount{0};
     double minRho{0.0};
-    double minP{0.0};
+    double minPressure{0.0};
+    double minInternalEnergy{0.0};
 };
 
-void accumulateStateFailure(StateScanReport& report, StateStatus status) {
-    switch (status) {
-        case StateStatus::NonFinite:
-            ++report.nonFiniteCount;
-            break;
-        case StateStatus::NegativeDensity:
-        case StateStatus::DensityTooSmall:
-            ++report.badDensityCount;
-            break;
-        case StateStatus::NegativePressure:
-        case StateStatus::PressureTooSmall:
-            ++report.badPressureCount;
-            break;
-        case StateStatus::NegativeInternalEnergy:
-            ++report.badInternalEnergyCount;
-            break;
-        case StateStatus::Ok:
-        default:
-            break;
-    }
-}
 
-ReducedStateScanReport reduceStateScanReportMPI(const StateScanReport& report, MPI_Comm comm) {
-    const unsigned long long localCounts[5] = {
-        static_cast<unsigned long long>(report.total),
-        static_cast<unsigned long long>(report.nonFiniteCount),
-        static_cast<unsigned long long>(report.badDensityCount),
-        static_cast<unsigned long long>(report.badPressureCount),
-        static_cast<unsigned long long>(report.badInternalEnergyCount)
+ReducedStateScanReport reduceStateScanReportMPI(const diagnostics::StateScanReport& report,
+                                                unsigned long long localTotal,
+                                                MPI_Comm comm) {
+    const unsigned long long localTotalCount = localTotal;
+    unsigned long long globalTotalCount = 0;
+    MPI_Allreduce(&localTotalCount, &globalTotalCount, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+
+    int localCounts[5] = {
+        report.nonFiniteCount,
+        report.badDensityCount,
+        report.badPressureCount,
+        report.badInternalEnergyCount,
+        report.repairedCellCount
     };
-    unsigned long long globalCounts[5] = {0, 0, 0, 0, 0};
+    int globalCounts[5] = {0, 0, 0, 0, 0};
+    MPI_Allreduce(localCounts, globalCounts, 5, MPI_INT, MPI_SUM, comm);
 
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-
-    const double localMin[2] = {report.minRho, report.minP};
-    double globalMin[2] = {0.0, 0.0};
-    MPI_Allreduce(localMin, globalMin, 2, MPI_DOUBLE, MPI_MIN, comm);
+    const double huge = std::numeric_limits<double>::max();
+    const double localMin[3] = {
+        report.initialized ? report.minRho : huge,
+        report.initialized ? report.minPressure : huge,
+        report.initialized ? report.minInternalEnergy : huge
+    };
+    double globalMin[3] = {huge, huge, huge};
+    MPI_Allreduce(localMin, globalMin, 3, MPI_DOUBLE, MPI_MIN, comm);
 
     ReducedStateScanReport reduced{};
-    reduced.total = globalCounts[0];
-    reduced.nonFiniteCount = globalCounts[1];
-    reduced.badDensityCount = globalCounts[2];
-    reduced.badPressureCount = globalCounts[3];
-    reduced.badInternalEnergyCount = globalCounts[4];
-    reduced.minRho = globalMin[0];
-    reduced.minP = globalMin[1];
+    reduced.total = globalTotalCount;
+    reduced.nonFiniteCount = globalCounts[0];
+    reduced.badDensityCount = globalCounts[1];
+    reduced.badPressureCount = globalCounts[2];
+    reduced.badInternalEnergyCount = globalCounts[3];
+    reduced.repairedCellCount = globalCounts[4];
+    reduced.minRho = (globalMin[0] < huge) ? globalMin[0] : 0.0;
+    reduced.minPressure = (globalMin[1] < huge) ? globalMin[1] : 0.0;
+    reduced.minInternalEnergy = (globalMin[2] < huge) ? globalMin[2] : 0.0;
     return reduced;
 }
 
@@ -369,33 +362,14 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     }
 }
 
-StateScanReport Solver::scanInteriorStates(const std::vector<Vec4>& U) const {
-    StateScanReport report{};
-    report.total = static_cast<std::size_t>(grid_.nx) * static_cast<std::size_t>(grid_.ny);
-    report.minRho = std::numeric_limits<double>::infinity();
-    report.minP   = std::numeric_limits<double>::infinity();
-
-    for (int j = 0; j < grid_.ny; ++j) {
-        for (int i = 0; i < grid_.nx; ++i) {
-            const auto result = checkConservative(U[idx(grid_.ng + i, grid_.ng + j)], gamma_, stateLimits_);
-
-            report.minRho = std::min(report.minRho, result.rho);
-            report.minP   = std::min(report.minP,   result.p);
-
-            if (!result.ok) {
-                accumulateStateFailure(report, result.status);
-            }
-        }
-    }
-
-    if (!std::isfinite(report.minRho)) {
-        report.minRho = 0.0;
-    }
-    if (!std::isfinite(report.minP)) {
-        report.minP = 0.0;
-    }
-
-    return report;
+diagnostics::StateScanReport Solver::scanInteriorStates(const std::vector<Vec4>& U) const {
+    return diagnostics::scanInteriorStates(U,
+                                           grid_.nx,
+                                           grid_.ny,
+                                           grid_.ng,
+                                           gamma_,
+                                           stateLimits_.rhoMin,
+                                           stateLimits_.pMin);
 }
 
 bool Solver::shouldWriteStepOutput(int step) const {
@@ -407,11 +381,15 @@ bool Solver::shouldRecordStateDiagnostics(int step) const {
     return shouldWriteStepOutput(step);
 }
 
-void Solver::appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report,
-                                         const std::string& tag) const {
+void Solver::appendStateDiagnosticsCsv(int step,
+                                       double t,
+                                       const diagnostics::StateScanReport& report,
+                                       const std::string& tag) const {
     if (!enableStateDiagnostics_) return;
 
-    const ReducedStateScanReport global = reduceStateScanReportMPI(report, mp_.cartComm());
+    const unsigned long long localTotal =
+        static_cast<unsigned long long>(grid_.nx) * static_cast<unsigned long long>(grid_.ny);
+    const ReducedStateScanReport global = reduceStateScanReportMPI(report, localTotal, mp_.cartComm());
 
     if (!mp_.isRoot()) return;
 
@@ -430,7 +408,7 @@ void Solver::appendStateDiagnosticsCsv(int step, double t, const StateScanReport
     }
 
     if (needHeader) {
-        ofs << "tag,step,time,cells,minRho,minP,nonFinite,badDensity,badPressure,badEint\n";
+        ofs << "tag,step,time,cells,minRho,minP,minEint,nonFinite,badDensity,badPressure,badEint,repaired\n";
         stateDiagWriteHeader_ = false;
     }
 
@@ -439,11 +417,13 @@ void Solver::appendStateDiagnosticsCsv(int step, double t, const StateScanReport
         << std::setprecision(16) << t << ","
         << global.total << ","
         << global.minRho << ","
-        << global.minP << ","
+        << global.minPressure << ","
+        << global.minInternalEnergy << ","
         << global.nonFiniteCount << ","
         << global.badDensityCount << ","
         << global.badPressureCount << ","
-        << global.badInternalEnergyCount << "\n";
+        << global.badInternalEnergyCount << ","
+        << global.repairedCellCount << "\n";
 }
 
 // Periodic output.

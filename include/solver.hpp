@@ -18,7 +18,7 @@
 //        - buildRHS(U, RHS)
 //        - dt = computeDt(U)
 //        - time_integrator.step(U, dt, rhsFun)
-//        - scan interior states via the centralized state layer (optional diagnostics)
+//        - scan interior states via the diagnostics layer (optional diagnostics)
 //        - writeOutput(step, t)
 //
 // MPI:
@@ -36,6 +36,7 @@
 #include "setFields.hpp"
 #include "io.hpp"
 #include "boundary.hpp"
+#include "diagnostics.hpp"
 
 #include <memory>
 #include <string>
@@ -175,15 +176,15 @@ private:
     // Uses: reconstruction -> numerical flux -> finite-volume divergence.
     void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS);
 
-    // Scan interior cell states over the local physical block using the centralized state layer.
-    StateScanReport scanInteriorStates(const std::vector<Vec4>& U) const;
+    // Scan interior cell states over the local physical block using the diagnostics layer.
+    diagnostics::StateScanReport scanInteriorStates(const std::vector<Vec4>& U) const;
 
     // Return true when this step should write regular field output.
     bool shouldWriteStepOutput(int step) const;
     // Return true when state diagnostics should be recorded (bound to output steps).
     bool shouldRecordStateDiagnostics(int step) const;
     // Append one compact state-diagnostic record to the CSV file on the root rank.
-    void appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report, const std::string& tag) const;
+    void appendStateDiagnosticsCsv(int step, double t, const diagnostics::StateScanReport& report, const std::string& tag) const;
 
     // Write legacy VTK (.vtk) output for the current step/time.
     // In MPI runs, this may gather to rank 0 and write a single merged file.

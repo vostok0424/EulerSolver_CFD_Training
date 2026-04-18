@@ -14,6 +14,7 @@
 
 
 #include "reconstruction.hpp"
+#include "cell_repair.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -31,6 +32,18 @@
 // -----------------------------------------------------------------------------
 
 namespace recon {
+
+static inline cell_repair::CellRepairOptions makeCellRepairOptions(const StateLimits& limits) {
+    cell_repair::CellRepairOptions opts;
+    opts.enable = true;
+    opts.enforceDensityFloor = true;
+    opts.enforcePressureFloor = true;
+    opts.enforceInternalEnergyFloor = false;
+    opts.rhoFloor = limits.rhoMin;
+    opts.pFloor = limits.pMin;
+    opts.eintFloor = 0.0;
+    return opts;
+}
 
 // -----------------------------------------------------------------------------
 // 1) Limiter utilities
@@ -372,18 +385,18 @@ static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
                                             const StateLimits& limits,
                                             VecT& ULf,
                                             VecT& URf) {
-    loadFace(ULf, URf);
-    if (!positivityFix) {
-        return;
+        loadFace(ULf, URf);
+        if (!positivityFix) {
+            return;
+        }
+        const auto repairOpts = makeCellRepairOptions(limits);
+        if (!isAdmissibleState(ULf, gamma, limits)) {
+            cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts);
+        }
+        if (!isAdmissibleState(URf, gamma, limits)) {
+            cell_repair::repairCellStateInPlace(URf, gamma, repairOpts);
+        }
     }
-    if (!isAdmissibleState(ULf, gamma, limits)) {
-        repairConservative(ULf, gamma, limits);
-    }
-    if (!isAdmissibleState(URf, gamma, limits)) {
-        repairConservative(URf, gamma, limits);
-    }
-}
-
 
 template <typename VecT, typename EigenT, int NVAR>
 static inline void reconstructFaceMUSCLFromCharCache(const EigenT& eig,
@@ -491,67 +504,72 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
 {
     CachedStateCheck<VecT> leftCheck;
     CachedStateCheck<VecT> rightCheck;
-
+    
     auto resetChecks = [&]() {
         leftCheck = CachedStateCheck<VecT>{};
         rightCheck = CachedStateCheck<VecT>{};
     };
-
+    
     auto reconstructAndReset = [&](Scheme scheme) {
         reconstructFaceWithScheme(scheme, ULf, URf);
         resetChecks();
     };
-
+    
     auto loadFirstOrderAndReset = [&]() {
         loadFirstOrderFace(ULf, URf);
         resetChecks();
     };
-
+    
     auto faceAdmissible = [&]() {
         return admissibleStateCached(ULf, gamma, limits, leftCheck)
-            && admissibleStateCached(URf, gamma, limits, rightCheck);
+        && admissibleStateCached(URf, gamma, limits, rightCheck);
     };
-
+    
     // First try the requested reconstruction scheme.
     reconstructAndReset(requestedScheme);
-
+    
     bool ok = faceAdmissible();
-
+    
     // If the requested high-order state is not admissible, retry with a
     // first-order face state when fallback is enabled.
     if (!ok && enableFallback && requestedScheme != Scheme::FirstOrder) {
         loadFirstOrderAndReset();
         ok = quickAdmissibleStateCached(ULf, gamma, limits, leftCheck)
-          && quickAdmissibleStateCached(URf, gamma, limits, rightCheck);
+        && quickAdmissibleStateCached(URf, gamma, limits, rightCheck);
         if (!ok) {
             ok = faceAdmissible();
         }
     }
-
+    
     // As a final safeguard, attempt centralized conservative-state repair on
     // each face state independently.
     if (!ok && positivityFix) {
         bool okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
         bool okR = admissibleStateCached(URf, gamma, limits, rightCheck);
-        if (!okL) {
-            okL = repairConservative(ULf, gamma, limits);
-            leftCheck = CachedStateCheck<VecT>{};
-            if (okL) {
-                okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
+        if (!okL || !okR) {
+            const auto repairOpts = makeCellRepairOptions(limits);
+            if (!okL) {
+                cell_repair::CellRepairResult repairResultL;
+                cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts, &repairResultL);
+                leftCheck = CachedStateCheck<VecT>{};
+                okL = repairResultL.success;
+                if (okL) {
+                    okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
+                }
             }
-        }
-        if (!okR) {
-            okR = repairConservative(URf, gamma, limits);
-            rightCheck = CachedStateCheck<VecT>{};
-            if (okR) {
-                okR = admissibleStateCached(URf, gamma, limits, rightCheck);
+            if (!okR) {
+                cell_repair::CellRepairResult repairResultR;
+                cell_repair::repairCellStateInPlace(URf, gamma, repairOpts, &repairResultR);
+                rightCheck = CachedStateCheck<VecT>{};
+                okR = repairResultR.success;
+                if (okR) {
+                    okR = admissibleStateCached(URf, gamma, limits, rightCheck);
+                }
             }
         }
         ok = okL && okR;
     }
 }
-
-
 // -------------------------
 // Reconstruction2D
 // -------------------------

@@ -95,7 +95,7 @@ struct Options {
     bool enableFallback = true;
 
     // Numerical tolerances.
-    // Small epsilon used in WENO weights and positivity-related clamping.
+    // Small epsilon used in WENO weights and positivity-related repairing.
     double eps = 1e-12;
 
     // Small admissibility floors used by the centralized state-layer checks.

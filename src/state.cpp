@@ -6,8 +6,8 @@
 
 // -----------------------------------------------------------------------------
 // Internal helpers used only inside this translation unit.
-// These routines support primitive-state validation and positivity repair for
-// the current 2D-only solver path.
+// These routines support primitive-state validation and conservative-state
+// admissibility checks for the current 2D-only solver path.
 // -----------------------------------------------------------------------------
 namespace {
 
@@ -58,16 +58,6 @@ StateCheckResult checkPrimitiveImpl(const Prim& W, const StateLimits& limits) {
     return result;
 }
 
-// Shared primitive-state repair.
-// Applies simple density/pressure floors while leaving velocity components
-// unchanged.
-template<typename Prim>
-void repairPrimitiveImpl(Prim& W, const StateLimits& limits) {
-    const double rhoFloor = std::max(limits.eps, limits.rhoMin);
-    const double pFloor = std::max(limits.eps, limits.pMin);
-    W.rho = std::max(W.rho, rhoFloor);
-    W.p = std::max(W.p, pFloor);
-}
 
 } // namespace
 
@@ -279,19 +269,6 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
     return result;
 }
 
-// Public 2D primitive-state repair entry point.
-void repairPrimitive(Prim2& W, const StateLimits& limits) {
-    repairPrimitiveImpl(W, limits);
-}
-
-// Conservative-state repair via primitive conversion, floor enforcement, and
-// back-conversion to conservative form.
-bool repairConservative(Vec4& U, double gamma, const StateLimits& limits) {
-    Prim2 W = EosIdealGas<2>::consToPrim(U, gamma);
-    repairPrimitive(W, limits);
-    U = EosIdealGas<2>::primToCons(W, gamma);
-    return quickCheckConservative(U, gamma, limits).ok;
-}
 
 // Convenience wrapper for cached 2D flow-variable evaluation.
 FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
