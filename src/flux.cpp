@@ -1,5 +1,3 @@
-
-
 #include "flux.hpp"
 #include <algorithm>
 #include <cmath>
@@ -102,7 +100,7 @@
 //           // (4) Assemble final numerical flux
 //           Cons F{};
 //           for (int k = 0; k < Dim + 2; ++k) {
-//               F[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * smax * (UR[k] - UL[k]);
+///              F[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * smax * (UR[k] - UL[k]);
 //           }
 //           return F;
 //       }
@@ -392,10 +390,159 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 // - For the tangential velocity component, upwind from the side that determines the sample.
 // - Build a 2D primitive state W0 and evaluate the physical flux in direction `dir`
 //   directly from that primitive state.
+namespace {
+
+void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double& df) {
+    const double rho = W.rho;
+    const double pK  = W.p;
+    const double aK  = std::sqrt(std::max(0.0, gamma * pK / rho));
+
+    if (p > pK) {
+        const double A = 2.0 / ((gamma + 1.0) * rho);
+        const double B = (gamma - 1.0) / (gamma + 1.0) * pK;
+        const double sqrtTerm = std::sqrt(A / (p + B));
+        f  = (p - pK) * sqrtTerm;
+        df = sqrtTerm * (1.0 - 0.5 * (p - pK) / (p + B));
+    } else {
+        const double pratio = p / pK;
+        const double expo = (gamma - 1.0) / (2.0 * gamma);
+        f  = (2.0 * aK / (gamma - 1.0)) * (std::pow(pratio, expo) - 1.0);
+        df = (1.0 / (rho * aK)) * std::pow(pratio, -(gamma + 1.0) / (2.0 * gamma));
+    }
+}
+
+double guessPressurePVRSImpl(const Prim1& WL, const Prim1& WR, double gamma) {
+    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
+    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+    const double pPV = 0.5 * (WL.p + WR.p)
+                     - 0.125 * (WR.u[0] - WL.u[0]) * (WL.rho + WR.rho) * (aL + aR);
+    return std::max(1e-12, pPV);
+}
+
+} // namespace
+
+void FluxGodunov<2>::prefun(double p, const Prim1& W, double gamma, double& f, double& df) {
+    godunovPrefunImpl(p, W, gamma, f, df);
+}
+
+double FluxGodunov<2>::guessPressurePVRS(const Prim1& WL, const Prim1& WR, double gamma) {
+    return guessPressurePVRSImpl(WL, WR, gamma);
+}
+
+void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
+                            double& pStar, double& uStar) {
+    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
+    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+    if ((WR.u[0] - WL.u[0]) > (2.0 / (gamma - 1.0)) * (aL + aR)) {
+        throw std::runtime_error("Exact Riemann: vacuum not handled.");
+    }
+
+    double p = guessPressurePVRSImpl(WL, WR, gamma);
+
+    for (int it = 0; it < 40; ++it) {
+        double fL, dfL, fR, dfR;
+        godunovPrefunImpl(p, WL, gamma, fL, dfL);
+        godunovPrefunImpl(p, WR, gamma, fR, dfR);
+
+        const double g  = fL + fR + (WR.u[0] - WL.u[0]);
+        const double dg = dfL + dfR;
+
+        double pNew = p - g / std::max(1e-14, dg);
+        pNew = std::max(1e-12, pNew);
+
+        const double rel = std::abs(pNew - p) / (0.5 * (pNew + p) + 1e-14);
+        p = pNew;
+        if (rel < 1e-10) {
+            break;
+        }
+    }
+
+    double fL, dfL, fR, dfR;
+    godunovPrefunImpl(p, WL, gamma, fL, dfL);
+    godunovPrefunImpl(p, WR, gamma, fR, dfR);
+
+    pStar = p;
+    uStar = 0.5 * (WL.u[0] + WR.u[0] + fR - fL);
+}
+
+ExactSample1D FluxGodunov<2>::sampleAtS0(const Prim1& WL, const Prim1& WR, double gamma,
+                                         double pStar, double uStar) {
+    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
+    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+
+    ExactSample1D out{};
+
+    if (0.0 <= uStar) {
+        out.sideTag = -1;
+        if (pStar > WL.p) {
+            const double qL = std::sqrt(1.0 + (gamma + 1.0) / (2.0 * gamma) * (pStar / WL.p - 1.0));
+            const double SL = WL.u[0] - aL * qL;
+            if (0.0 <= SL) {
+                out = {WL.rho, WL.u[0], WL.p, -1};
+            } else {
+                const double pr = pStar / WL.p;
+                const double rhoStar = WL.rho * (pr + (gamma - 1.0) / (gamma + 1.0)) /
+                                      ((gamma - 1.0) / (gamma + 1.0) * pr + 1.0);
+                out = {rhoStar, uStar, pStar, -1};
+            }
+        } else {
+            const double SHL = WL.u[0] - aL;
+            const double aStarL = aL * std::pow(pStar / WL.p, (gamma - 1.0) / (2.0 * gamma));
+            const double STL = uStar - aStarL;
+            if (0.0 <= SHL) {
+                out = {WL.rho, WL.u[0], WL.p, -1};
+            } else if (0.0 >= STL) {
+                const double rhoStar = WL.rho * std::pow(pStar / WL.p, 1.0 / gamma);
+                out = {rhoStar, uStar, pStar, -1};
+            } else {
+                const double S = 0.0;
+                const double u = (2.0 / (gamma + 1.0)) * (aL + 0.5 * (gamma - 1.0) * WL.u[0] + S);
+                const double a = (2.0 / (gamma + 1.0)) * (aL + 0.5 * (gamma - 1.0) * (WL.u[0] - S));
+                const double rho = WL.rho * std::pow(a / aL, 2.0 / (gamma - 1.0));
+                const double p   = WL.p   * std::pow(a / aL, 2.0 * gamma / (gamma - 1.0));
+                out = {rho, u, p, -1};
+            }
+        }
+    } else {
+        out.sideTag = +1;
+        if (pStar > WR.p) {
+            const double qR = std::sqrt(1.0 + (gamma + 1.0) / (2.0 * gamma) * (pStar / WR.p - 1.0));
+            const double SR = WR.u[0] + aR * qR;
+            if (0.0 >= SR) {
+                out = {WR.rho, WR.u[0], WR.p, +1};
+            } else {
+                const double pr = pStar / WR.p;
+                const double rhoStar = WR.rho * (pr + (gamma - 1.0) / (gamma + 1.0)) /
+                                      ((gamma - 1.0) / (gamma + 1.0) * pr + 1.0);
+                out = {rhoStar, uStar, pStar, +1};
+            }
+        } else {
+            const double SHR = WR.u[0] + aR;
+            const double aStarR = aR * std::pow(pStar / WR.p, (gamma - 1.0) / (2.0 * gamma));
+            const double STR = uStar + aStarR;
+            if (0.0 >= SHR) {
+                out = {WR.rho, WR.u[0], WR.p, +1};
+            } else if (0.0 <= STR) {
+                const double rhoStar = WR.rho * std::pow(pStar / WR.p, 1.0 / gamma);
+                out = {rhoStar, uStar, pStar, +1};
+            } else {
+                const double S = 0.0;
+                const double u = (2.0 / (gamma + 1.0)) * (-aR + 0.5 * (gamma - 1.0) * WR.u[0] + S);
+                const double a = (2.0 / (gamma + 1.0)) * ( aR - 0.5 * (gamma - 1.0) * (WR.u[0] - S));
+                const double rho = WR.rho * std::pow(a / aR, 2.0 / (gamma - 1.0));
+                const double p   = WR.p   * std::pow(a / aR, 2.0 * gamma / (gamma - 1.0));
+                out = {rho, u, p, +1};
+            }
+        }
+    }
+
+    return out;
+}
+
 // --------------------
-// FluxGodunovExact<2>
+// FluxGodunov<2>
 // --------------------
-ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
+ConsD<2> FluxGodunov<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
 
@@ -408,9 +555,10 @@ ConsD<2> FluxGodunovExact<2>::numericalFlux(const Cons& UL, const Cons& UR, int 
     WR1.u[0] = (dir == 0) ? WR.u : WR.v;
     WR1.p = WR.p;
 
-    double pStar, uStar;
-    exact_riemann::starPU(WL1, WR1, gamma, pStar, uStar);
-    const auto S0 = exact_riemann::sampleAtS0(WL1, WR1, gamma, pStar, uStar);
+    double pStar = 0.0;
+    double uStar = 0.0;
+    starPU(WL1, WR1, gamma, pStar, uStar);
+    const auto S0 = sampleAtS0(WL1, WR1, gamma, pStar, uStar);
 
     Prim2 W0{};
     W0.rho = S0.rho;
@@ -441,8 +589,9 @@ std::unique_ptr<FluxD<Dim>> makeFluxD(const std::string& name) {
     if (name == "rusanov")      return std::make_unique<FluxRusanov<Dim>>();
     if (name == "hllc")         return std::make_unique<FluxHLLC<Dim>>();
     if (name == "ausm")         return std::make_unique<FluxAUSM<Dim>>();
-    if (name == "godunovExact") return std::make_unique<FluxGodunovExact<Dim>>();
+    if (name == "godunov")      return std::make_unique<FluxGodunov<Dim>>();
     throw std::runtime_error("Unknown flux: " + name);
 }
 
 template std::unique_ptr<FluxD<2>> makeFluxD<2>(const std::string& name);
+

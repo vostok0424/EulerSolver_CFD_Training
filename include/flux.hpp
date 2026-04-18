@@ -20,7 +20,6 @@
 // - `gamma` is the ratio of specific heats for an ideal gas.
 
 #include "state.hpp"
-#include "riemann_exact.hpp"
 #include <memory>
 #include <string>
 
@@ -99,16 +98,30 @@ public:
 // ------------------------------------------------------------
 // Dim=2: directional reduction (apply exact 1D Riemann logic in the requested dir).
 template<int Dim>
-class FluxGodunovExact;
+class FluxGodunov;
 
+struct ExactSample1D {
+    double rho{};
+    double u{};
+    double p{};
+    int sideTag{0}; // -1 left, +1 right
+};
 
 template<>
-class FluxGodunovExact<2> final : public FluxD<2> {
+class FluxGodunov<2> final : public FluxD<2> {
 public:
     using Cons = ConsD<2>;
-    using Prim = PrimD<2>;
-    std::string name() const override { return "godunovExact"; }
+
+    std::string name() const override { return "godunov"; }
     Cons numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const override;
+
+private:
+    static void prefun(double p, const Prim1& W, double gamma, double& f, double& df);
+    static double guessPressurePVRS(const Prim1& WL, const Prim1& WR, double gamma);
+    static void starPU(const Prim1& WL, const Prim1& WR, double gamma,
+                       double& pStar, double& uStar);
+    static ExactSample1D sampleAtS0(const Prim1& WL, const Prim1& WR, double gamma,
+                                    double pStar, double uStar);
 };
 
 // ------------------------------------------------------------

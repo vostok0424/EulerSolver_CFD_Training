@@ -135,7 +135,6 @@ SRC=(
   src/solver2d.cpp
   src/time_integrator.cpp
   src/mpi_parallel.cpp
-  src/riemann_exact.cpp
 )
 
 MISSING=()
