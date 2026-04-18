@@ -5,167 +5,39 @@
 
 // flux.cpp
 // --------
-// Implementations of numerical fluxes used by the 2D finite-volume solver.
+// Implementations of numerical flux functions used by the solver.
 //
-// General interface used throughout this module:
-//   numericalFlux(UL, UR, dir, gamma) -> F
-// where:
-//   - UL/UR are conservative states on the left/right side of a face
-//   - dir selects the face-normal direction (0=x, 1=y)
-//   - gamma is the ideal-gas ratio of specific heats
-//   - F is the conservative flux vector in direction `dir`
+// Conventions used in this file:
+//   - UL / UR : left and right conservative states at a face
+//   - dir     : face-normal direction (0 = x, 1 = y)
+//   - gamma   : ratio of specific heats
 //
-// Implementation style in this codebase:
-//   - Use cached flow variable helpers (evalFlowVars, FlowVars1/2) for hot-path state conversion.
-//   - Prefer direct flux builders (physFluxFromFlowVars, physFluxFromPrim) to avoid unnecessary state reconversion.
+// Design notes:
+//   - Use evalFlowVars(...) to cache primitive / thermodynamic quantities
+//     needed repeatedly in hot paths.
+//   - Prefer physFluxFromFlowVars(...) or physFluxFromPrim(...) when the
+//     corresponding state form is already available, so we avoid unnecessary
+//     conservative <-> primitive reconversion.
 //
-// ------------------------------------------------------------
-// How to add ("plant") a new numerical flux in this codebase
-// ------------------------------------------------------------
-// All fluxes share the same calling convention, so adding a new one is mostly
-// a matter of implementing one function and registering a name.
+// Fluxes currently implemented here:
+//   1. Rusanov / LLF
+//   2. HLLC
+//   3. AUSM
+//   4. Exact Godunov (directional 1D exact Riemann reduction in 2D)
 //
-// Step 1) Implement a new class (recommended location: flux.hpp + flux.cpp)
-//
-//   template<int Dim>
-//   struct FluxMyNewScheme final : public FluxD<Dim> {
-//       std::string name() const override { return "myNewScheme"; }
-//       Cons numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const override {
-//           // 0) Validate direction
-//           //    dir must be 0 or 1 for the 2D solver
-//
-//           // 1) Build the state representation you actually need
-//           //    - conservative only: keep UL/UR as-is
-//           //    - cached hot-path quantities: WL = evalFlowVars(UL), WR = evalFlowVars(UR)
-//           //    - exact/auxiliary solver returns primitive: keep W directly as Prim
-//
-//           // 2) Compute physical fluxes without unnecessary state reconversion
-//           //    - if only conservative state is available:
-//           //        FL = physFlux(UL, dir, gamma), FR = physFlux(UR, dir, gamma)
-//           //    - if cached FlowVars are already available:
-//           //        FL = physFluxFromFlowVars(UL, WL, dir), FR = physFluxFromFlowVars(UR, WR, dir)
-//           //    - if a primitive star/sample state is already available:
-//           //        F = physFluxFromPrim(W, dir, gamma)
-//
-//           // 3) Compute wave-speed estimates / split quantities / star states
-//           //    (this is where the scheme differs: LLF, HLLC, AUSM, Roe, etc.)
-//
-//           // 4) Assemble and return F (size Dim+2)
-//           //    (For 2D: treat the requested direction as the face-normal direction
-//           //     and carry tangential momentum consistently.)
-//       }
-//   };
-//
-// Step 2) Register it in the factory at the bottom of this file:
-//   if (name == "myNewScheme") return std::make_unique<FluxMyNewScheme<Dim>>();
-//
-// Step 3) Select it from cfg:
-//   flux = myNewScheme
-//
-// Template code (copy/paste starter)
-// ---------------------------------
-// The snippet below shows the typical structure used in this project.
-// Replace the parts marked "YOUR LOGIC" with your solver-specific details.
-//
-//   template<int Dim>
-//   struct FluxMyNewScheme final : public FluxD<Dim> {
-//       using Cons = ConsD<Dim>;
-//       std::string name() const override { return "myNewScheme"; }
-//
-//       Cons numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const override {
-//           // (0) Direction validation
-//           if (dir != 0 && dir != 1)
-//               throw std::runtime_error("myNewScheme flux: dir must be 0 or 1");
-//
-//           // (1) Build the state form you actually need on this path.
-//           // Cached flow variables are preferred in hot paths because they avoid
-//           // repeated conservative -> primitive conversion.
-//           const auto WL = evalFlowVars(UL, gamma);
-//           const auto WR = evalFlowVars(UR, gamma);
-//
-//           // Normal velocities for this face
-//           const double uLn = (dir == 0) ? WL.u : WL.v;
-//           const double uRn = (dir == 0) ? WR.u : WR.v;
-//           const double aL = WL.a;
-//           const double aR = WR.a;
-//
-//           // (2) Physical fluxes built directly from the cached state data
-//           const Cons FL = physFluxFromFlowVars(UL, WL, dir);
-//           const Cons FR = physFluxFromFlowVars(UR, WR, dir);
-//
-//           // (3) YOUR LOGIC: estimate wave speeds / build star states / split parts
-//           // Example (LLF/Rusanov template):
-//           const double smax = std::max(std::abs(uLn) + aL, std::abs(uRn) + aR);
-//
-//           // (4) Assemble final numerical flux
-//           Cons F{};
-//           for (int k = 0; k < Dim + 2; ++k) {
-///              F[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * smax * (UR[k] - UL[k]);
-//           }
-//           return F;
-//       }
-//   };
-//
-// Notes:
-// - If your scheme is HLL/HLLC/Roe-like, step (3) typically produces SL/SR/SM and/or
-//   star states U*_L/U*_R, then selects the correct flux by wave-speed sign.
-// - If an exact or auxiliary solver returns a primitive sample/star state directly,
-//   prefer physFluxFromPrim(...) instead of converting back to conservative and then
-//   re-entering physFlux(...).
-// - For AUSM-like schemes, step (3) computes (mDot, pInt) and then assembles momentum
-//   and energy fluxes using an upwinded side in the selected 2D face-normal direction.
-//
-// Debugging tip:
-// - If you get "Undefined symbol ... FluxMyNewScheme", it usually means flux.cpp
-//   containing the implementation is not compiled/linked into the target.
-//
-// Most Godunov-type fluxes follow the same high-level pattern:
-//
-//   1) Build the state representation needed by the scheme.
-//      In hot paths this is often cached flow data via evalFlowVars(...);
-//      in exact/sample-based paths it may be a primitive state returned directly.
-//
-//   2) Estimate characteristic signal speeds along the face normal.
-//      Typical choices:
-//        - Rusanov/LLF: smax = max(|u_n| + a)
-//        - HLL/HLLC:    SL and SR bounds for the Riemann fan
-//        - Exact:       solve for star region (p*, u*)
-//        - AUSM:        split convective and pressure parts via Mach number
-//
-//   3) Build the flux using one of these common templates:
-//
-//      (A) Local Lax-Friedrichs / Rusanov:
-//          F = 0.5*(F(UL)+F(UR)) - 0.5*smax*(UR-UL)
-//
-//      (B) HLL-family (piecewise constant Riemann fan):
-//          if (SL >= 0)  return F(UL)
-//          if (SR <= 0)  return F(UR)
-//          else          return HLL/HLLC middle-state flux
-//
-//      (C) Exact Godunov:
-//          solve exact Riemann -> sample at S=x/t=0 -> compute F(W0)
-//
-//      (D) Flux-splitting (AUSM):
-//          mDot  = convective mass flux from split Mach polynomials
-//          pInt  = interface pressure from split pressure polynomials
-//          then assemble momentum/energy fluxes using upwinded state
-//
-// In 2D, all of the above are applied in the requested direction `dir`:
-//   - un = u[dir] is the normal velocity component
-//   - tangential component(s) are carried through consistently
-//
+// Extension pattern for a new flux:
+//   1. Derive a new class from FluxD<Dim> in flux.hpp.
+//   2. Implement numericalFlux(...) in this file.
+//   3. Register the scheme in makeFluxD(...) at the bottom of this file.
 
-// --------------------
-// FluxRusanov (Rusanov / Local Lax-Friedrichs)
-// --------------------
-// General LLF template used here:
-//   smax = max(|u_n| + a) over left/right
-//   F    = 0.5*(F_L + F_R) - 0.5*smax*(U_R - U_L)
+// ============================================================================
+// Rusanov / Local Lax-Friedrichs
+// ============================================================================
 //
-// Implementation pattern:
-//   - build cached flow data WL/WR to compute u_n and sound speed a
-//   - build physical fluxes directly from the cached state data
-//   - apply the LLF formula component-wise
+// Template:
+//   F = 0.5 * (F_L + F_R) - 0.5 * s_max * (U_R - U_L)
+// where s_max is estimated from the largest left/right signal speed
+// |u_n| + a in the requested face-normal direction.
 template<int Dim>
 std::string FluxRusanov<Dim>::name() const { return "rusanov"; }
 
@@ -174,54 +46,39 @@ typename FluxRusanov<Dim>::Cons
 FluxRusanov<Dim>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
+
     const double unL = (dir == 0) ? WL.u : WL.v;
     const double unR = (dir == 0) ? WR.u : WR.v;
     const double smax = std::max(std::abs(unL) + WL.a, std::abs(unR) + WR.a);
+
     const Cons FL = physFluxFromFlowVars(UL, WL, dir);
     const Cons FR = physFluxFromFlowVars(UR, WR, dir);
 
     Cons F{};
-    for (int k = 0; k < Dim + 2; ++k)
+    for (int k = 0; k < Dim + 2; ++k) {
         F[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * smax * (UR[k] - UL[k]);
+    }
     return F;
 }
 
-// Explicit instantiation for Dim=2
+// Explicit instantiation for Dim = 2.
 template class FluxRusanov<2>;
 
-// HLLC (Harten–Lax–van Leer–Contact) in this module
-// -----------------------------------------------
-// HLLC represents the Riemann fan by three waves:
-//   SL  |  SM  |  SR
-// and two star states U*_L and U*_R separated by the contact wave SM.
+// ============================================================================
+// HLLC
+// ============================================================================
 //
-// The common implementation form used here:
-//   - Build cached flow data WL/WR and read sound speeds aL/aR from it
-//   - Estimate SL and SR (here: min/max of u_n ± a)
-//   - Compute physical fluxes FL and FR directly from the cached state data
-//   - Upwind selection:
-//       if SL >= 0: return FL
-//       if SR <= 0: return FR
-//       else:
-//         compute contact speed SM (from Rankine–Hugoniot across the two waves)
-//         construct star states U*_L and U*_R
-//         return FL + SL*(U*_L-UL)   if SM >= 0
-//         return FR + SR*(U*_R-UR)   otherwise
+// Three-wave approximate Riemann solver:
+//   S_L | S_M | S_R
 //
-// This structure (speed estimates + star-state construction + piecewise selection)
-// is the typical "HLL-family" programming pattern for approximate Riemann solvers.
-
-// 2D HLLC notes
-// ------------
-// The same HLLC template is applied in direction `dir`.
-// - un = u[dir] is the normal velocity component used for wave speeds.
-// - Tangential velocity components are preserved across the contact wave.
-//   In the star state construction below:
-//     - the normal momentum uses rho_star * SM
-//     - the tangential momentum uses rho_star * u_t (from the corresponding side)
-// --------------------
-// FluxHLLC<2>
-// --------------------
+// Programming pattern used here:
+//   - estimate outer wave speeds S_L and S_R
+//   - compute the contact speed S_M
+//   - construct left/right star states
+//   - select the correct flux branch by wave-speed sign
+//
+// In 2D, `dir` selects the normal direction used in the reduction.
+// Tangential momentum is carried from the corresponding side state.
 ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
@@ -284,61 +141,51 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     return F;
 }
 
-// --------------------
-// AUSM helpers
-// --------------------
-// AUSM is a flux-splitting family. It splits the interface flux into:
-//   - a convective (mass) part based on split Mach number polynomials
+// ============================================================================
+// AUSM
+// ============================================================================
+//
+// AUSM splits the interface flux into:
+//   - a convective part based on split Mach-number polynomials
 //   - a pressure part based on split pressure polynomials
 //
-// The helper functions below implement common polynomial splits:
-//   M^+(M), M^-(M)   and   P^+(M), P^-(M)
-// with smooth transitions for |M|<1.
+// The helper functions below implement the standard polynomial split pieces
+// M^+, M^-, P^+, and P^-.
 namespace ausm_detail {
-    inline double Mplus(double M) {
-        const double aM = std::abs(M);
-        if (aM >= 1.0) return 0.5 * (M + aM);
-        return 0.25 * (M + 1.0) * (M + 1.0);
-    }
-    inline double Mminus(double M) {
-        const double aM = std::abs(M);
-        if (aM >= 1.0) return 0.5 * (M - aM);
-        return -0.25 * (M - 1.0) * (M - 1.0);
-    }
-    inline double Pplus(double M) {
-        const double aM = std::abs(M);
-        if (aM >= 1.0) return 0.5 * (1.0 + (M >= 0.0 ? 1.0 : -1.0));
-        return 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
-    }
-    inline double Pminus(double M) {
-        const double aM = std::abs(M);
-        if (aM >= 1.0) return 0.5 * (1.0 - (M >= 0.0 ? 1.0 : -1.0));
-        return 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
-    }
+
+inline double Mplus(double M) {
+    const double aM = std::abs(M);
+    if (aM >= 1.0) return 0.5 * (M + aM);
+    return 0.25 * (M + 1.0) * (M + 1.0);
 }
 
-// AUSM implementation form in this module
-// --------------------------------------
-// Steps:
-//   1) Convert UL/UR -> WL/WR and compute sound speeds aL/aR.
-//   2) Choose a reference sound speed a (here: average with a small floor).
-//   3) Compute Mach numbers ML = uL/a, MR = uR/a.
-//   4) Compute mass flux and interface pressure:
-//        mDot = a * ( M^+(ML)*rhoL + M^-(MR)*rhoR )
-//        pInt =      P^+(ML)*pL   + P^-(MR)*pR
-//   5) Upwind the transported quantities using the sign of mDot.
-//      Assemble conservative flux components.
+inline double Mminus(double M) {
+    const double aM = std::abs(M);
+    if (aM >= 1.0) return 0.5 * (M - aM);
+    return -0.25 * (M - 1.0) * (M - 1.0);
+}
 
-// --------------------
-// FluxAUSM<2>
-// --------------------
+inline double Pplus(double M) {
+    const double aM = std::abs(M);
+    if (aM >= 1.0) return 0.5 * (1.0 + (M >= 0.0 ? 1.0 : -1.0));
+    return 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
+}
+
+inline double Pminus(double M) {
+    const double aM = std::abs(M);
+    if (aM >= 1.0) return 0.5 * (1.0 - (M >= 0.0 ? 1.0 : -1.0));
+    return 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
+}
+
+} // namespace ausm_detail
+
 ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    if (dir != 0 && dir != 1)
+    if (dir != 0 && dir != 1) {
         throw std::runtime_error("AUSM flux: dir must be 0 or 1");
+    }
 
-    // Directional form: use normal velocity un = u[dir] for Mach splitting.
-    // Momentum flux adds the interface pressure only in the normal direction.
-
+    // Use the normal velocity component for Mach splitting.
+    // Pressure contributes only to the normal momentum flux component.
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
 
@@ -374,24 +221,22 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
     return F;
 }
 
-// Exact Godunov flux in this module
-// --------------------------------
-// Programming pattern:
-//   - Build the directional left/right states needed by the exact Riemann solver.
-//   - Solve the exact Riemann problem for star state (p*, u*).
-//   - Sample the self-similar solution at S=x/t=0 to obtain W0.
-//   - If W0 is already available as a primitive state, return the physical flux
-//     directly with physFluxFromPrim(W0, dir, gamma).
+// ============================================================================
+// Exact Godunov
+// ============================================================================
 //
-// In 2D this implementation uses a directional exact 1D Riemann reduction.
-
-// 2D exact flux here uses a 1D directional reduction:
-// - Solve a 1D exact Riemann problem in the normal direction `dir` using (rho, un, p).
-// - For the tangential velocity component, upwind from the side that determines the sample.
-// - Build a 2D primitive state W0 and evaluate the physical flux in direction `dir`
-//   directly from that primitive state.
+// This implementation performs a directional exact 1D Riemann solve inside the
+// 2D flux function:
+//   1. extract (rho, u_n, p) on the chosen face-normal direction
+//   2. solve for the star state (p*, u*)
+//   3. sample the self-similar solution at S = x / t = 0
+//   4. rebuild a 2D primitive state and evaluate the physical flux
+//
+// The tangential velocity component is upwinded from the side that provides the
+// sampled state.
 namespace {
 
+// Pressure function used in the Newton iteration for p*.
 void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double& df) {
     const double rho = W.rho;
     const double pK  = W.p;
@@ -411,6 +256,7 @@ void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double
     }
 }
 
+// PVRS initial guess for the star-region pressure.
 double guessPressurePVRSImpl(const Prim1& WL, const Prim1& WR, double gamma) {
     const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
     const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
@@ -421,6 +267,7 @@ double guessPressurePVRSImpl(const Prim1& WL, const Prim1& WR, double gamma) {
 
 } // namespace
 
+// Thin wrappers kept as FluxGodunov private helpers declared in flux.hpp.
 void FluxGodunov<2>::prefun(double p, const Prim1& W, double gamma, double& f, double& df) {
     godunovPrefunImpl(p, W, gamma, f, df);
 }
@@ -429,16 +276,19 @@ double FluxGodunov<2>::guessPressurePVRS(const Prim1& WL, const Prim1& WR, doubl
     return guessPressurePVRSImpl(WL, WR, gamma);
 }
 
+// Solve the exact 1D Riemann problem for the star pressure and star velocity.
 void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
                             double& pStar, double& uStar) {
     const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
     const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+
     if ((WR.u[0] - WL.u[0]) > (2.0 / (gamma - 1.0)) * (aL + aR)) {
         throw std::runtime_error("Exact Riemann: vacuum not handled.");
     }
 
     double p = guessPressurePVRSImpl(WL, WR, gamma);
 
+    // Newton iteration for p*.
     for (int it = 0; it < 40; ++it) {
         double fL, dfL, fR, dfR;
         godunovPrefunImpl(p, WL, gamma, fL, dfL);
@@ -461,10 +311,12 @@ void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
     godunovPrefunImpl(p, WL, gamma, fL, dfL);
     godunovPrefunImpl(p, WR, gamma, fR, dfR);
 
+    // Recover the star-region pressure and velocity after convergence.
     pStar = p;
     uStar = 0.5 * (WL.u[0] + WR.u[0] + fR - fL);
 }
 
+// Sample the exact self-similar solution at S = 0.
 ExactSample1D FluxGodunov<2>::sampleAtS0(const Prim1& WL, const Prim1& WR, double gamma,
                                          double pStar, double uStar) {
     const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
@@ -539,9 +391,7 @@ ExactSample1D FluxGodunov<2>::sampleAtS0(const Prim1& WL, const Prim1& WR, doubl
     return out;
 }
 
-// --------------------
-// FluxGodunov<2>
-// --------------------
+// Evaluate the directional exact Godunov flux in 2D.
 ConsD<2> FluxGodunov<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
     const auto WL = evalFlowVars(UL, gamma);
     const auto WR = evalFlowVars(UR, gamma);
@@ -564,6 +414,7 @@ ConsD<2> FluxGodunov<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, 
     W0.rho = S0.rho;
     W0.p = S0.p;
     W0.u[dir] = S0.u;
+
     const int tan = 1 - dir;
     W0.u[tan] = (S0.sideTag < 0)
         ? ((tan == 0) ? WL.u : WL.v)
@@ -572,26 +423,17 @@ ConsD<2> FluxGodunov<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, 
     return physFluxFromPrim(W0, dir, gamma);
 }
 
-// --------------------
+// ============================================================================
 // Factory
-// --------------------
-// makeFluxD<Dim>(name) is the single place where new fluxes are registered.
-//
-// Add a new flux in 3 steps:
-//   1) Implement numericalFlux(UL,UR,dir,gamma) for your scheme (in flux.cpp).
-//      - Keep UL/UR as conservative inputs.
-//      - Treat u[dir] as the normal component, and keep tangential momentum consistent.
-//   2) Register the string name -> object mapping below.
-//   3) Enable it from cfg:
-//        flux = <name>
+// ============================================================================
+// Map a string name from configuration to the corresponding flux object.
 template<int Dim>
 std::unique_ptr<FluxD<Dim>> makeFluxD(const std::string& name) {
-    if (name == "rusanov")      return std::make_unique<FluxRusanov<Dim>>();
-    if (name == "hllc")         return std::make_unique<FluxHLLC<Dim>>();
-    if (name == "ausm")         return std::make_unique<FluxAUSM<Dim>>();
-    if (name == "godunov")      return std::make_unique<FluxGodunov<Dim>>();
+    if (name == "rusanov") return std::make_unique<FluxRusanov<Dim>>();
+    if (name == "hllc")    return std::make_unique<FluxHLLC<Dim>>();
+    if (name == "ausm")    return std::make_unique<FluxAUSM<Dim>>();
+    if (name == "godunov") return std::make_unique<FluxGodunov<Dim>>();
     throw std::runtime_error("Unknown flux: " + name);
 }
 
 template std::unique_ptr<FluxD<2>> makeFluxD<2>(const std::string& name);
-
