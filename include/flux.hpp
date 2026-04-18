@@ -58,13 +58,12 @@ public:
 };
 
 // ------------------------------------------------------------
-// HLLC (Harten–Lax–van Leer–Contact)
+// HLLC (Harten–Lax–vanLeer–Contact)
 // ------------------------------------------------------------
 // Captures contact and shear waves better than HLL/Rusanov.
 // Implemented as an explicit specialization for Dim=2.
 template<int Dim>
 class FluxHLLC;
-
 
 template<>
 class FluxHLLC<2> final : public FluxD<2> {
@@ -82,7 +81,6 @@ public:
 // Implemented as an explicit specialization for Dim=2.
 template<int Dim>
 class FluxAUSM;
-
 
 template<>
 class FluxAUSM<2> final : public FluxD<2> {

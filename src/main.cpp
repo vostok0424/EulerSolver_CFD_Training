@@ -10,7 +10,7 @@
 // - Ensure all ranks return the same exit code.
 
 #include "cfg.hpp"
-#include "solver2d.hpp"
+#include "solver.hpp"
 #include "mpi_parallel.hpp"
 
 // MPI is used for domain decomposition and halo exchange.
@@ -74,8 +74,8 @@ int main(int argc, char** argv) {
             if (mp.isRoot()) {
                 std::cout << "[main] dim=2, 2D solver\n";
             }
-            // Solver2D receives the MPI helper so it can exchange halos and write merged output.
-            Solver2D solver(cfg, mp);
+            // Solver receives the MPI helper so it can exchange halos and write merged output.
+            Solver solver(cfg, mp);
             solver.run();
         }
     }

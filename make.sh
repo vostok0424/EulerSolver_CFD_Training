@@ -130,9 +130,9 @@ SRC=(
   src/reconstruction.cpp
   src/boundary.cpp
   src/setFields.cpp
-  src/ic2d.cpp
-  src/io2d.cpp
-  src/solver2d.cpp
+  src/ic.cpp
+  src/io.cpp
+  src/solver.cpp
   src/time_integrator.cpp
   src/mpi_parallel.cpp
 )

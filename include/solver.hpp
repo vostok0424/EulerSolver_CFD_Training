@@ -1,10 +1,10 @@
 #pragma once
 
-// solver2d.hpp
+// solver.hpp
 // -------------
 // 2D finite-volume Euler solver (cell-centered, explicit time stepping).
 //
-// High-level workflow (see solver2d.cpp):
+// High-level workflow (see solver.cpp):
 //   1) Read cfg and set up mesh size, gas constants, and numerical options.
 //   2) Create modules via factories:
 //        - IC (initial condition)
@@ -32,9 +32,9 @@
 #include "time_integrator.hpp"
 #include "mpi_parallel.hpp"
 #include "reconstruction.hpp"
-#include "ic2d.hpp"
+#include "ic.hpp"
 #include "setFields.hpp"
-#include "io2d.hpp"
+#include "io.hpp"
 #include "boundary.hpp"
 
 #include <memory>
@@ -97,7 +97,7 @@ struct FaceBuffers2D {
     }
 };
 
-// Solver2D
+// Solver
 // --------
 // Owns the 2D solution arrays and orchestrates the simulation.
 //
@@ -108,11 +108,11 @@ struct FaceBuffers2D {
 // - Ghost layers occupy the outer ng_ cells on each side.
 //
 // idx(i,j) uses row-major storage: i changes fastest.
-class Solver2D {
+class Solver {
 public:
     // Construct the solver from a cfg object and an MPI helper (mp).
     // The solver stores a reference to mp; mp must outlive the solver.
-    Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp);
+    Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp);
 
     // Run the full simulation: initialise, time-step, and write outputs.
     void run();
@@ -141,7 +141,7 @@ private:
     // Pluggable numerical modules selected by cfg.
     std::unique_ptr<FluxD<2>> flux_;
     std::unique_ptr<TimeIntegratorT<Vec4>> ti_;
-    std::unique_ptr<IC2D> ic_;
+    std::unique_ptr<IC> ic_;
 
     // Run-control parameters.
     double gamma_{};

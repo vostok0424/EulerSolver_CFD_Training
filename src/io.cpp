@@ -1,4 +1,4 @@
-#include "io2d.hpp"
+#include "io.hpp"
 #include "state.hpp"
 #include <fstream>
 #include <stdexcept>
@@ -8,7 +8,7 @@
 #include <locale>
 #include <cstdio>
 
-// io2d.cpp
+// io.cpp
 // --------
 // Legacy VTK output for 2D solutions.
 //

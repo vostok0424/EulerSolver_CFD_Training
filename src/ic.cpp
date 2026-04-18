@@ -1,18 +1,18 @@
-#include "ic2d.hpp"
+#include "ic.hpp"
 #include <stdexcept>
 
-// ic2d.cpp
+// ic.cpp
 // --------
 // Implementations of 2D initial conditions.
 //
-// The solver allocates U with ghost cells and calls IC2D::apply(...) once to
+// The solver allocates U with ghost cells and calls IC::apply(...) once to
 // initialise the interior cells. Boundary conditions will fill ghost cells later.
 //
 // This file currently provides:
-//   - IC2D_SodX: 2D shock-tube with a discontinuity normal to the x-direction
-//   - makeIC2D:  factory to construct an IC object by name
+//   - IC_SodX: 2D shock-tube with a discontinuity normal to the x-direction
+//   - makeIC:  factory to construct an IC object by name
 
-void IC2D_SodX::apply(std::vector<Vec4>& U,
+void IC_SodX::apply(std::vector<Vec4>& U,
                       int nx, int ny, int ng,
                       double x0, double x1,
                       double y0, double y1,
@@ -33,20 +33,20 @@ void IC2D_SodX::apply(std::vector<Vec4>& U,
     // This IC varies only in x (uniform in y). dy is computed for completeness.
     (void)dy;
     // Discontinuity location. Default is the mid-point of the local domain.
-    const double xMid = cfg.getDouble("ic2d.sodx.xMid", 0.5*(x0+x1));
+    const double xMid = cfg.getDouble("ic.sodx.xMid", 0.5*(x0+x1));
 
     // Left/right primitive states (rho, u, v, p) read from cfg.
     // Defaults correspond to the standard Sod problem extended to 2D.
     Prim2 WL{}, WR{};
-    WL.rho = cfg.getDouble("ic2d.sodx.rhoL", 1.0);
-    WL.u[0]= cfg.getDouble("ic2d.sodx.uL",   0.0);
-    WL.u[1]= cfg.getDouble("ic2d.sodx.vL",   0.0);
-    WL.p   = cfg.getDouble("ic2d.sodx.pL",   1.0);
+    WL.rho = cfg.getDouble("ic.sodx.rhoL", 1.0);
+    WL.u[0]= cfg.getDouble("ic.sodx.uL",   0.0);
+    WL.u[1]= cfg.getDouble("ic.sodx.vL",   0.0);
+    WL.p   = cfg.getDouble("ic.sodx.pL",   1.0);
 
-    WR.rho = cfg.getDouble("ic2d.sodx.rhoR", 0.125);
-    WR.u[0]= cfg.getDouble("ic2d.sodx.uR",   0.0);
-    WR.u[1]= cfg.getDouble("ic2d.sodx.vR",   0.0);
-    WR.p   = cfg.getDouble("ic2d.sodx.pR",   0.1);
+    WR.rho = cfg.getDouble("ic.sodx.rhoR", 0.125);
+    WR.u[0]= cfg.getDouble("ic.sodx.uR",   0.0);
+    WR.u[1]= cfg.getDouble("ic.sodx.vR",   0.0);
+    WR.p   = cfg.getDouble("ic.sodx.pR",   0.1);
 
     // Convert primitive states to conservative vectors stored in U.
     const Vec4 UL = EosIdealGas<2>::primToCons(WL, gamma);
@@ -68,8 +68,8 @@ void IC2D_SodX::apply(std::vector<Vec4>& U,
 
 // Factory: create a 2D initial-condition object by name.
 // The caller owns the returned pointer.
-IC2D* makeIC2D(const std::string& name) {
+IC* makeIC(const std::string& name) {
     // Register new ICs here.
-    if (name == "sodx") return new IC2D_SodX();
+    if (name == "sodx") return new IC_SodX();
     throw std::runtime_error("Unknown 2D IC: " + name);
 }

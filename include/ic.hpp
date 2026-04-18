@@ -1,10 +1,10 @@
 #pragma once
 
-// ic2d.hpp
+// ic.hpp
 // Initial conditions (IC) for the 2D Euler solver.
 //
-// The solver constructs an IC object from the cfg file (see makeIC2D),
-// then calls IC2D::apply(...) once to fill the conservative state U.
+// The solver constructs an IC object from the cfg file (see makeIC),
+// then calls IC::apply(...) once to fill the conservative state U.
 //
 // Conventions:
 // - U is cell-centered and includes ghost cells.
@@ -14,14 +14,14 @@
 // - x0/x1/y0/y1 are the physical extents of THIS rank's local subdomain (important in MPI).
 //
 // To add a new IC:
-//   1) Create a new struct deriving from IC2D and implement apply().
-//   2) Register it in makeIC2D(name) in ic2d.cpp.
+//   1) Create a new struct deriving from IC and implement apply().
+//   2) Register it in makeIC(name) in ic.cpp.
 
 #include "state.hpp"
 #include "cfg.hpp"
 #include <vector>
 
-// IC2D
+// IC
 // ----
 // Abstract interface for a 2D initial condition.
 //
@@ -33,8 +33,8 @@
 // - x0, x1, y0, y1: local physical extent (important in MPI runs)
 // - gamma: ratio of specific heats
 // - cfg: configuration key-value access
-struct IC2D {
-    virtual ~IC2D() = default;
+struct IC {
+    virtual ~IC() = default;
     // Fill the solution vector U with the desired initial condition.
     // Implementations should at minimum initialize interior cells.
     virtual void apply(std::vector<Vec4>& U,
@@ -45,13 +45,13 @@ struct IC2D {
                        const Cfg& cfg) const = 0;
 };
 
-// IC2D_SodX
+// IC_SodX
 // ---------
 // 2D shock-tube initial condition with the discontinuity normal to the x-direction.
 //
 // The initial state is piecewise-constant in x (left/right), and uniform in y.
-// Parameters are read from cfg (see ic2d.cpp), with sensible defaults.
-struct IC2D_SodX final : public IC2D {
+// Parameters are read from cfg (see ic.cpp), with sensible defaults.
+struct IC_SodX final : public IC {
     void apply(std::vector<Vec4>& U,
                int nx, int ny, int ng,
                double x0, double x1,
@@ -66,4 +66,4 @@ struct IC2D_SodX final : public IC2D {
 //   ic = sodx
 //
 // The returned pointer is owned by the caller.
-IC2D* makeIC2D(const std::string& name);
+IC* makeIC(const std::string& name);

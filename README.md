@@ -81,13 +81,13 @@ EulerSolver_CFD_Training/
 ## Main Source Modules
 
 - src/main.cpp           program entry point, MPI initialization, 2D solver launch
-- src/solver2d.cpp       2D solver
+- src/solver.cpp       2D solver
 - src/flux.cpp           numerical flux implementations
 - src/reconstruction.cpp reconstruction methods
 - src/time_integrator.cpp time integration methods
 - src/boundary.cpp       boundary-condition handling
 - src/setFields.cpp      configurable initial-field assignment
-- src/io2d.cpp           2D output routines
+- src/io.cpp           2D output routines
 - src/mpi_parallel.cpp   MPI topology and communication helper
 - src/state.cpp          state diagnostics and state-related utilities
 - src/cfg.cpp            case-file parsing

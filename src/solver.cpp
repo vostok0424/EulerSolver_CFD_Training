@@ -1,4 +1,4 @@
-// solver2d.cpp
+// solver.cpp
 // -----------
 // 2D finite-volume Euler solver (MPI-capable).
 //
@@ -15,7 +15,7 @@
 // - idx(i,j) = i + (nx+2*ng)*j (row-major)
 // - Interior cells are (i,j) = (ng..ng+nx-1, ng..ng+ny-1)
 
-#include "solver2d.hpp"
+#include "solver.hpp"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -158,7 +158,7 @@ static_assert(sizeof(Vec4) == 4 * sizeof(double), "Vec4 must be exactly 4 double
 // Constructor: read configuration, build local subdomain, allocate fields,
 // choose numerical methods (flux/reconstruction/time integrator), and initialise
 // interior cells either via an IC (ic=...) or setFields.
-Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
+Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     : mp_(mp), recon_(cfg)
 {
     // --------------------
@@ -254,7 +254,7 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // Only this-rank interior block is initialised here; ghosts are filled later.
     const bool useSetFields = cfg.getBool("setFields.use", false);
     if (!useSetFields) {
-        ic_.reset(makeIC2D(cfg.getString("ic", "riemannx")));
+        ic_.reset(makeIC(cfg.getString("ic", "riemannx")));
     }
 
     // Initialize only this-rank block using local physical extents.
@@ -271,7 +271,7 @@ Solver2D::Solver2D(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
 // Step 2: Physical boundary conditions on the *global* domain boundaries only.
 //         For interior MPI interfaces we temporarily switch that side to
 //         boundary::BcType::Internal so boundary::apply2D(...) performs a no-op there.
-void Solver2D::applyBC(std::vector<Vec4>& U) const {
+void Solver::applyBC(std::vector<Vec4>& U) const {
     // 1) Exchange halos across MPI subdomain interfaces
     //    NOTE: This assumes Vec4 is a tightly-packed POD of 4 doubles.
     mp_.exchangeHalos2D(reinterpret_cast<double*>(U.data()), grid_.nx, grid_.ny, grid_.ng, 4);
@@ -300,7 +300,7 @@ void Solver2D::applyBC(std::vector<Vec4>& U) const {
 // Compute a stable time step from a 2D CFL estimate:
 //   dt = CFL / max( (|u|+a)/dx + (|v|+a)/dy )
 // We reduce the maximum across all ranks so everyone advances with the same dt.
-double Solver2D::computeDt(const std::vector<Vec4>& U) const {
+double Solver::computeDt(const std::vector<Vec4>& U) const {
     const double dx = grid_.dx();
     const double dy = grid_.dy();
     double maxS = 1e-14;
@@ -323,7 +323,7 @@ double Solver2D::computeDt(const std::vector<Vec4>& U) const {
 //   - Characteristic reconstruction produces conservative UL/UR on x-faces and y-faces
 //   - Flux module computes numerical fluxes Fx and Gy by a Riemann solver
 //   - Finite-volume divergence produces cell-centered RHS
-void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
+void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     std::fill(RHS.begin(), RHS.end(), Vec4{});
 
 
@@ -369,7 +369,7 @@ void Solver2D::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     }
 }
 
-StateScanReport Solver2D::scanInteriorStates(const std::vector<Vec4>& U) const {
+StateScanReport Solver::scanInteriorStates(const std::vector<Vec4>& U) const {
     StateScanReport report{};
     report.total = static_cast<std::size_t>(grid_.nx) * static_cast<std::size_t>(grid_.ny);
     report.minRho = std::numeric_limits<double>::infinity();
@@ -398,16 +398,16 @@ StateScanReport Solver2D::scanInteriorStates(const std::vector<Vec4>& U) const {
     return report;
 }
 
-bool Solver2D::shouldWriteStepOutput(int step) const {
+bool Solver::shouldWriteStepOutput(int step) const {
     return (outputEvery_ > 0) && (step % outputEvery_ == 0);
 }
 
-bool Solver2D::shouldRecordStateDiagnostics(int step) const {
+bool Solver::shouldRecordStateDiagnostics(int step) const {
     if (!enableStateDiagnostics_) return false;
     return shouldWriteStepOutput(step);
 }
 
-void Solver2D::appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report,
+void Solver::appendStateDiagnosticsCsv(int step, double t, const StateScanReport& report,
                                          const std::string& tag) const {
     if (!enableStateDiagnostics_) return;
 
@@ -449,7 +449,7 @@ void Solver2D::appendStateDiagnosticsCsv(int step, double t, const StateScanRepo
 // Periodic output.
 //
 // We gather all ranks' interior cell data to rank 0 and write ONE merged legacy VTK file.
-void Solver2D::writeOutput(int step, double t) const {
+void Solver::writeOutput(int step, double t) const {
     if (outputEvery_ <= 0) return;
     if (step % outputEvery_ != 0) return;
 
@@ -466,7 +466,7 @@ void Solver2D::writeOutput(int step, double t) const {
 // - Output an initial snapshot at step=0.
 // - The time integrator calls rhsFun(...) multiple times per time step.
 //   rhsFun ensures ghost cells are valid before characteristic reconstruction/flux evaluation.
-void Solver2D::run() {
+void Solver::run() {
     double t = 0.0;
     int step = 0;
     std::cout << "[2D][r" << mp_.rank() << "] Starting run, finalTime=" << finalTime_
