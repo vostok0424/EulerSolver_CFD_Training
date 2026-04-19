@@ -1,8 +1,6 @@
 #include "diagnostics.hpp"
 
-#include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -15,14 +13,22 @@
 
 namespace {
 
-// Conservative-state indexing convention used throughout the solver.
+// Conservative-state indexing convention used in this diagnostics module.
+// Only density is accessed directly here; pressure and internal energy are
+// evaluated through state-layer helper functions to avoid duplicated physics
+// logic inside diagnostics.
 constexpr int kRho  = 0;
 
 
+// Convert a 2D structured-grid index pair (i, j) into the corresponding
+// flattened storage index for vectors laid out in row-major order.
 inline int flatIndex(const int i, const int j, const int nxTot) {
     return j * nxTot + i;
 }
 
+// Update one tracked minimum value and its grid location.
+// Non-finite candidate values are ignored so that diagnostics minima are
+// derived only from physically readable finite states.
 inline void updateMinimum(double value,
                           int i,
                           int j,
@@ -42,6 +48,9 @@ inline void updateMinimum(double value,
     }
 }
 
+// Return true when the CSV file already exists on disk.
+// This is used only by the root rank to decide whether a header row must be
+// written before appending a new diagnostics record.
 inline bool fileExists(const std::string& fileName) {
     std::ifstream fin(fileName.c_str());
     return fin.good();
@@ -51,6 +60,9 @@ inline bool fileExists(const std::string& fileName) {
 
 namespace diagnostics {
 
+// Parse optional state-diagnostics controls from the case configuration.
+// Missing entries fall back to conservative defaults so diagnostics can be
+// enabled incrementally without requiring all keys to be present.
 StateDiagnosticsOptions parseStateDiagnosticsOptions(const Cfg& cfg) {
     StateDiagnosticsOptions opts;
 
@@ -62,6 +74,10 @@ StateDiagnosticsOptions parseStateDiagnosticsOptions(const Cfg& cfg) {
     return opts;
 }
 
+// Scan the local physical-cell block and summarize state admissibility.
+// Ghost cells are excluded deliberately: this routine is intended to assess
+// the solver-owned interior region after updates, repairs, and boundary
+// application have been completed for the current stage.
 StateScanReport scanInteriorStates(const std::vector<Vec4>& U,
                                    const int nx,
                                    const int ny,
@@ -75,6 +91,10 @@ StateScanReport scanInteriorStates(const std::vector<Vec4>& U,
     const int nyTot = ny + 2 * ng;
     const std::size_t expectedSize = static_cast<std::size_t>(nxTot * nyTot);
 
+    // A storage-size mismatch indicates that the state array cannot be mapped
+    // consistently onto the expected structured block. Mark the report as
+    // failed and encode the absolute size mismatch in nonFiniteCount so the
+    // caller can detect the setup error without continuing the scan.
     if (U.size() != expectedSize) {
         rep.hasNonFinite = true;
         rep.nonFiniteCount = static_cast<int>(expectedSize > U.size() ? expectedSize - U.size() : U.size() - expectedSize);
@@ -122,39 +142,15 @@ StateScanReport scanInteriorStates(const std::vector<Vec4>& U,
     return rep;
 }
 
-void accumulateStateScanReport(StateScanReport& dst,
-                               const StateScanReport& src) {
-    dst.hasNonFinite = dst.hasNonFinite || src.hasNonFinite;
-    dst.hasBadDensity = dst.hasBadDensity || src.hasBadDensity;
-    dst.hasBadPressure = dst.hasBadPressure || src.hasBadPressure;
-    dst.hasBadInternalEnergy = dst.hasBadInternalEnergy || src.hasBadInternalEnergy;
 
-    dst.nonFiniteCount += src.nonFiniteCount;
-    dst.badDensityCount += src.badDensityCount;
-    dst.badPressureCount += src.badPressureCount;
-    dst.badInternalEnergyCount += src.badInternalEnergyCount;
-    dst.repairedCellCount += src.repairedCellCount;
-
-    if (src.initialized) {
-        if (!dst.initialized || src.minRho < dst.minRho) {
-            dst.minRho = src.minRho;
-            dst.minRhoI = src.minRhoI;
-            dst.minRhoJ = src.minRhoJ;
-        }
-        if (!dst.initialized || src.minPressure < dst.minPressure) {
-            dst.minPressure = src.minPressure;
-            dst.minPressureI = src.minPressureI;
-            dst.minPressureJ = src.minPressureJ;
-        }
-        if (!dst.initialized || src.minInternalEnergy < dst.minInternalEnergy) {
-            dst.minInternalEnergy = src.minInternalEnergy;
-            dst.minInternalEnergyI = src.minInternalEnergyI;
-            dst.minInternalEnergyJ = src.minInternalEnergyJ;
-        }
-        dst.initialized = true;
-    }
-}
-
+// Reduce per-rank diagnostics reports into one communicator-wide summary.
+// Boolean flags are combined with MPI_MAX, counters are summed, and scalar
+// minima are reduced exactly with MPI_MIN.
+//
+// Note: the associated (i, j) locations of minima are not globally reduced as
+// authoritative coordinates here. A location is preserved only when the local
+// rank owns a minimum value equal to the reduced global minimum; otherwise the
+// location is reset to (-1, -1) to avoid reporting misleading coordinates.
 StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
                                          const mpi_parallel::MpiParallel& mpi) {
     StateScanReport global = local;
@@ -205,9 +201,11 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
     global.minInternalEnergy = globalMins[2];
     global.initialized = (globalMins[0] < huge) || (globalMins[1] < huge) || (globalMins[2] < huge);
 
-    // The global minimum values are reduced exactly, but the associated index
-    // locations are kept from the local report only when they match the reduced
-    // minima. This avoids introducing solver-wide coordinate assumptions here.
+    // The minimum values themselves are globally reduced exactly.
+    // Their stored index locations, however, remain conditionally valid: a
+    // local (i, j) pair is retained only when this rank owns a minimum equal
+    // to the reduced global minimum. Otherwise the location is cleared to
+    // (-1, -1) rather than implying a false global coordinate.
     if (!(local.initialized && local.minRho == global.minRho)) {
         global.minRhoI = -1;
         global.minRhoJ = -1;
@@ -224,6 +222,9 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
     return global;
 }
 
+// Return true when any hard state-admissibility failure was detected.
+// This lightweight predicate is used by callers that only need a yes/no gate
+// rather than the full diagnostic breakdown.
 bool hasStateFailure(const StateScanReport& report) {
     return report.hasNonFinite ||
            report.hasBadDensity ||
@@ -231,6 +232,9 @@ bool hasStateFailure(const StateScanReport& report) {
            report.hasBadInternalEnergy;
 }
 
+// Emit one compact human-readable diagnostics summary line.
+// This is intended for console monitoring and mirrors the key fields written
+// to CSV without introducing additional formatting dependencies.
 void printStateScanReport(const StateScanReport& report,
                           const int step,
                           const double time,
@@ -264,16 +268,21 @@ void printStateScanReport(const StateScanReport& report,
     std::cout << oss.str() << std::endl;
 }
 
+// Append one diagnostics record to the CSV log on the root rank.
+// The header row is written only when the file does not yet exist.
 void appendStateDiagnosticsCsv(const std::string& fileName,
                                const StateScanReport& report,
                                const int step,
                                const double time,
                                const std::string& tag,
                                const bool isRoot) {
+    // File output is intentionally restricted to the root rank so that one
+    // communicator-wide reduced report produces exactly one CSV record.
     if (!isRoot) {
         return;
     }
 
+    // Detect whether this append operation also needs to create the CSV header.
     const bool needHeader = !fileExists(fileName);
 
     std::ofstream fout(fileName.c_str(), std::ios::out | std::ios::app);

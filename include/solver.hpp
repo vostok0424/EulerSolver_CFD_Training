@@ -156,7 +156,6 @@ private:
     StateLimits stateLimits_{};
     bool enableStateDiagnostics_{true};
     std::string stateDiagCsvPath_;
-    mutable bool stateDiagWriteHeader_{true};
 
     // Flatten (i,j) into a 1D index for ghosted cell-centered arrays.
     int idx(int i, int j) const { return i + grid_.nxTot * j; }
@@ -176,15 +175,13 @@ private:
     // Uses: reconstruction -> numerical flux -> finite-volume divergence.
     void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS);
 
-    // Scan interior cell states over the local physical block using the diagnostics layer.
-    diagnostics::StateScanReport scanInteriorStates(const std::vector<Vec4>& U) const;
 
     // Return true when this step should write regular field output.
     bool shouldWriteStepOutput(int step) const;
     // Return true when state diagnostics should be recorded (bound to output steps).
     bool shouldRecordStateDiagnostics(int step) const;
-    // Append one compact state-diagnostic record to the CSV file on the root rank.
-    void appendStateDiagnosticsCsv(int step, double t, const diagnostics::StateScanReport& report, const std::string& tag) const;
+    // Scan, MPI-reduce, and append one state-diagnostics record when enabled.
+    void recordStateDiagnostics(int step, double t, const std::string& tag) const;
 
     // Write legacy VTK (.vtk) output for the current step/time.
     // In MPI runs, this may gather to rank 0 and write a single merged file.

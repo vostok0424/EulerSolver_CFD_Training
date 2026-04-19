@@ -311,13 +311,44 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     }
 }
 
+bool Solver::shouldWriteStepOutput(const int step) const {
+    return outputEvery_ > 0 && (step % outputEvery_ == 0);
+}
+
+bool Solver::shouldRecordStateDiagnostics(const int step) const {
+    return enableStateDiagnostics_ && shouldWriteStepOutput(step);
+}
+
+void Solver::recordStateDiagnostics(const int step,
+                                    const double t,
+                                    const std::string& tag) const {
+    if (!enableStateDiagnostics_) {
+        return;
+    }
+
+    const auto local = diagnostics::scanInteriorStates(U_,
+                                                       grid_.nx,
+                                                       grid_.ny,
+                                                       grid_.ng,
+                                                       gamma_,
+                                                       stateLimits_.rhoMin,
+                                                       stateLimits_.pMin);
+
+    const auto global = diagnostics::reduceStateScanReportMPI(local, mp_);
+
+    diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_,
+                                           global,
+                                           step,
+                                           t,
+                                           tag,
+                                           mp_.isRoot());
+}
 
 // Periodic output.
 //
 // We gather all ranks' interior cell data to rank 0 and write ONE merged legacy VTK file.
 void Solver::writeOutput(int step, double t) const {
-    if (outputEvery_ <= 0) return;
-    if (step % outputEvery_ != 0) return;
+    if (!shouldWriteStepOutput(step)) return;
 
     ensureOutputDirectoryExists(mp_);
     const std::string fname = makeStepOutputPath(outPrefix_, step, t);
@@ -344,17 +375,11 @@ void Solver::run() {
     applyBC(U_);
     buildRHS(U_, RHS_);
     applyBC(U_); // keep ghosts consistent for output/diagnostics
-    if (enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0)) {
-        const auto report = diagnostics::scanInteriorStates(U_,
-                                                            grid_.nx,
-                                                            grid_.ny,
-                                                            grid_.ng,
-                                                            gamma_,
-                                                            stateLimits_.rhoMin,
-                                                            stateLimits_.pMin);
-        const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
-        diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "initial", mp_.isRoot());
+    
+    if (shouldRecordStateDiagnostics(step)) {
+        recordStateDiagnostics(step, t, "initial");
     }
+    
     writeOutput(step, t);
 
     // RHS callback used by RK schemes.
@@ -373,17 +398,11 @@ void Solver::run() {
         t += dt;
         ++step;
         applyBC(U_);
-        if (enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0)) {
-            const auto report = diagnostics::scanInteriorStates(U_,
-                                                                grid_.nx,
-                                                                grid_.ny,
-                                                                grid_.ng,
-                                                                gamma_,
-                                                                stateLimits_.rhoMin,
-                                                                stateLimits_.pMin);
-            const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
-            diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "output", mp_.isRoot());
+        
+        if (shouldRecordStateDiagnostics(step)) {
+            recordStateDiagnostics(step, t, "output");
         }
+        
         writeOutput(step, t);
     }
 
@@ -392,20 +411,12 @@ void Solver::run() {
         ensureOutputDirectoryExists(mp_);
 
         applyBC(U_);
-        const bool finalAlreadyRecorded =
-            enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0);
-        if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
-            const auto report = diagnostics::scanInteriorStates(U_,
-                                                                grid_.nx,
-                                                                grid_.ny,
-                                                                grid_.ng,
-                                                                gamma_,
-                                                                stateLimits_.rhoMin,
-                                                                stateLimits_.pMin);
-            const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
-            diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "final", mp_.isRoot());
-        }
+        
+        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
 
+        if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
+            recordStateDiagnostics(step, t, "final");
+        }
         const std::string fname = makeFinalOutputPath(outPrefix_, t);
         writeMergedVtkFile2D(mp_, fname, "final", t,
                              U_, grid_.nx, grid_.ny, grid_.ng,
