@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // -----------------------------------------------------------------------------
 // Internal helpers used only inside this translation unit.
@@ -273,6 +274,24 @@ StateCheckResult checkConservative(const Vec4& U, double gamma, const StateLimit
 // Convenience wrapper for cached 2D flow-variable evaluation.
 FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
     return EosIdealGas<2>::evalFlowVars(U, gamma);
+}
+
+double safePressure(const Vec4& U, double gamma) {
+    const double rho = U[0];
+    if (!std::isfinite(rho) || rho <= 0.0) {
+        return -std::numeric_limits<double>::infinity();
+    }
+
+    return pressureFromInternalEnergy(internalEnergy2D(U), gamma);
+}
+
+double safeInternalEnergy(const Vec4& U) {
+    const double rho = U[0];
+    if (!std::isfinite(rho) || rho <= 0.0) {
+        return -std::numeric_limits<double>::infinity();
+    }
+
+    return internalEnergy2D(U) / rho;
 }
 
 // Physical flux assembled from conservative storage plus cached primitive /

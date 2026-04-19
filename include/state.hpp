@@ -138,6 +138,15 @@ using Vec4  = ConsD<2>;
 // Cached primitive / thermodynamic evaluation helpers.
 FlowVars2 evalFlowVars(const Vec4& U, double gamma);
 
+// Recover pressure from a 2D conservative state with a safety guard.
+// Returns negative infinity when rho is non-finite or non-positive.
+double safePressure(const Vec4& U, double gamma);
+
+// Recover specific internal energy e = E - 0.5|u|^2 from a 2D conservative
+// state with a safety guard. Returns negative infinity when rho is non-finite or non-positive.
+double safeInternalEnergy(const Vec4& U);
+
+
 Vec4 physFluxFromFlowVars(const Vec4& U, const FlowVars2& W, int dir);
 
 Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma);

@@ -20,7 +20,9 @@
 #include "state.hpp"
 
 // Forward declarations to avoid unnecessary header coupling.
-struct MpiParallel;
+namespace mpi_parallel {
+class MpiParallel;
+}
 class Cfg;
 
 // All diagnostics-related types and interfaces live in this namespace.
@@ -115,7 +117,7 @@ void accumulateStateScanReport(StateScanReport& dst,
 // Reduce a local state-scan report across all MPI ranks and return a global
 // report.
 StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
-                                         const MpiParallel& mpi);
+                                         const mpi_parallel::MpiParallel& mpi);
 
 // Return true if the report indicates any invalid or physically unacceptable
 // state.
@@ -135,6 +137,6 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
                                const StateScanReport& report,
                                int step,
                                double time,
-                               bool writeHeaderIfNeeded = true);
-
+                               const std::string& tag,
+                               bool isRoot);
 } // namespace diagnostics

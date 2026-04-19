@@ -10,39 +10,14 @@
 #include <sstream>
 
 #include <mpi.h>
-
 #include "cfg.hpp"
+#include "mpi_parallel.hpp"
 
 namespace {
 
 // Conservative-state indexing convention used throughout the solver.
 constexpr int kRho  = 0;
-constexpr int kRhoU = 1;
-constexpr int kRhoV = 2;
-constexpr int kE    = 3;
 
-inline double safePressure(const Vec4& U, const double gamma) {
-    const double rho = U[kRho];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double u = U[kRhoU] / rho;
-    const double v = U[kRhoV] / rho;
-    const double kinetic = 0.5 * rho * (u * u + v * v);
-    return (gamma - 1.0) * (U[kE] - kinetic);
-}
-
-inline double safeInternalEnergy(const Vec4& U) {
-    const double rho = U[kRho];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double u = U[kRhoU] / rho;
-    const double v = U[kRhoV] / rho;
-    return U[kE] / rho - 0.5 * (u * u + v * v);
-}
 
 inline int flatIndex(const int i, const int j, const int nxTot) {
     return j * nxTot + i;
@@ -181,8 +156,10 @@ void accumulateStateScanReport(StateScanReport& dst,
 }
 
 StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
-                                         const MpiParallel& /*mpi*/) {
+                                         const mpi_parallel::MpiParallel& mpi) {
     StateScanReport global = local;
+    const MPI_Comm comm = mpi.cartComm();
+    if (comm == MPI_COMM_NULL) return global;
 
     int localFlags[4] = {
         local.hasNonFinite ? 1 : 0,
@@ -191,7 +168,7 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
         local.hasBadInternalEnergy ? 1 : 0
     };
     int globalFlags[4] = {0, 0, 0, 0};
-    MPI_Allreduce(localFlags, globalFlags, 4, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(localFlags, globalFlags, 4, MPI_INT, MPI_MAX, comm);
 
     global.hasNonFinite = (globalFlags[0] != 0);
     global.hasBadDensity = (globalFlags[1] != 0);
@@ -206,7 +183,7 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
         local.repairedCellCount
     };
     int globalCounts[5] = {0, 0, 0, 0, 0};
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(localCounts, globalCounts, 5, MPI_INT, MPI_SUM, comm);
 
     global.nonFiniteCount = globalCounts[0];
     global.badDensityCount = globalCounts[1];
@@ -221,7 +198,7 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
         local.initialized ? local.minInternalEnergy : huge
     };
     double globalMins[3] = {huge, huge, huge};
-    MPI_Allreduce(localMins, globalMins, 3, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(localMins, globalMins, 3, MPI_DOUBLE, MPI_MIN, comm);
 
     global.minRho = globalMins[0];
     global.minPressure = globalMins[1];
@@ -291,8 +268,13 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
                                const StateScanReport& report,
                                const int step,
                                const double time,
-                               const bool writeHeaderIfNeeded) {
-    const bool needHeader = writeHeaderIfNeeded && !fileExists(fileName);
+                               const std::string& tag,
+                               const bool isRoot) {
+    if (!isRoot) {
+        return;
+    }
+
+    const bool needHeader = !fileExists(fileName);
 
     std::ofstream fout(fileName.c_str(), std::ios::out | std::ios::app);
     if (!fout) {
@@ -301,12 +283,13 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
     }
 
     if (needHeader) {
-        fout << "step,time,hasNonFinite,hasBadDensity,hasBadPressure,hasBadInternalEnergy,"
+        fout << "tag,step,time,hasNonFinite,hasBadDensity,hasBadPressure,hasBadInternalEnergy,"
              << "nonFiniteCount,badDensityCount,badPressureCount,badInternalEnergyCount,repairedCellCount,"
              << "minRho,minPressure,minInternalEnergy,minRhoI,minRhoJ,minPressureI,minPressureJ,minInternalEnergyI,minInternalEnergyJ\n";
     }
 
-    fout << step << ','
+    fout << tag << ','
+         << step << ','
          << std::setprecision(16) << time << ','
          << (report.hasNonFinite ? 1 : 0) << ','
          << (report.hasBadDensity ? 1 : 0) << ','

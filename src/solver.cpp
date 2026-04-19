@@ -32,57 +32,6 @@ namespace {
 
 constexpr const char* kOutputDir2D = "solution";
 
-struct ReducedStateScanReport {
-    unsigned long long total{0};
-    int nonFiniteCount{0};
-    int badDensityCount{0};
-    int badPressureCount{0};
-    int badInternalEnergyCount{0};
-    int repairedCellCount{0};
-    double minRho{0.0};
-    double minPressure{0.0};
-    double minInternalEnergy{0.0};
-};
-
-
-ReducedStateScanReport reduceStateScanReportMPI(const diagnostics::StateScanReport& report,
-                                                unsigned long long localTotal,
-                                                MPI_Comm comm) {
-    const unsigned long long localTotalCount = localTotal;
-    unsigned long long globalTotalCount = 0;
-    MPI_Allreduce(&localTotalCount, &globalTotalCount, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-
-    int localCounts[5] = {
-        report.nonFiniteCount,
-        report.badDensityCount,
-        report.badPressureCount,
-        report.badInternalEnergyCount,
-        report.repairedCellCount
-    };
-    int globalCounts[5] = {0, 0, 0, 0, 0};
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_INT, MPI_SUM, comm);
-
-    const double huge = std::numeric_limits<double>::max();
-    const double localMin[3] = {
-        report.initialized ? report.minRho : huge,
-        report.initialized ? report.minPressure : huge,
-        report.initialized ? report.minInternalEnergy : huge
-    };
-    double globalMin[3] = {huge, huge, huge};
-    MPI_Allreduce(localMin, globalMin, 3, MPI_DOUBLE, MPI_MIN, comm);
-
-    ReducedStateScanReport reduced{};
-    reduced.total = globalTotalCount;
-    reduced.nonFiniteCount = globalCounts[0];
-    reduced.badDensityCount = globalCounts[1];
-    reduced.badPressureCount = globalCounts[2];
-    reduced.badInternalEnergyCount = globalCounts[3];
-    reduced.repairedCellCount = globalCounts[4];
-    reduced.minRho = (globalMin[0] < huge) ? globalMin[0] : 0.0;
-    reduced.minPressure = (globalMin[1] < huge) ? globalMin[1] : 0.0;
-    reduced.minInternalEnergy = (globalMin[2] < huge) ? globalMin[2] : 0.0;
-    return reduced;
-}
 
 void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
     namespace fs = std::filesystem;
@@ -362,69 +311,6 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     }
 }
 
-diagnostics::StateScanReport Solver::scanInteriorStates(const std::vector<Vec4>& U) const {
-    return diagnostics::scanInteriorStates(U,
-                                           grid_.nx,
-                                           grid_.ny,
-                                           grid_.ng,
-                                           gamma_,
-                                           stateLimits_.rhoMin,
-                                           stateLimits_.pMin);
-}
-
-bool Solver::shouldWriteStepOutput(int step) const {
-    return (outputEvery_ > 0) && (step % outputEvery_ == 0);
-}
-
-bool Solver::shouldRecordStateDiagnostics(int step) const {
-    if (!enableStateDiagnostics_) return false;
-    return shouldWriteStepOutput(step);
-}
-
-void Solver::appendStateDiagnosticsCsv(int step,
-                                       double t,
-                                       const diagnostics::StateScanReport& report,
-                                       const std::string& tag) const {
-    if (!enableStateDiagnostics_) return;
-
-    const unsigned long long localTotal =
-        static_cast<unsigned long long>(grid_.nx) * static_cast<unsigned long long>(grid_.ny);
-    const ReducedStateScanReport global = reduceStateScanReportMPI(report, localTotal, mp_.cartComm());
-
-    if (!mp_.isRoot()) return;
-
-    namespace fs = std::filesystem;
-    const fs::path csvPath(stateDiagCsvPath_);
-    if (csvPath.has_parent_path()) {
-        fs::create_directories(csvPath.parent_path());
-    }
-
-    const bool needHeader = stateDiagWriteHeader_ || !fs::exists(csvPath);
-
-    std::ofstream ofs(csvPath, std::ios::app);
-    if (!ofs) {
-        std::cerr << "[2D][state] failed to open CSV: " << csvPath.string() << "\n";
-        return;
-    }
-
-    if (needHeader) {
-        ofs << "tag,step,time,cells,minRho,minP,minEint,nonFinite,badDensity,badPressure,badEint,repaired\n";
-        stateDiagWriteHeader_ = false;
-    }
-
-    ofs << tag << ","
-        << step << ","
-        << std::setprecision(16) << t << ","
-        << global.total << ","
-        << global.minRho << ","
-        << global.minPressure << ","
-        << global.minInternalEnergy << ","
-        << global.nonFiniteCount << ","
-        << global.badDensityCount << ","
-        << global.badPressureCount << ","
-        << global.badInternalEnergyCount << ","
-        << global.repairedCellCount << "\n";
-}
 
 // Periodic output.
 //
@@ -458,8 +344,16 @@ void Solver::run() {
     applyBC(U_);
     buildRHS(U_, RHS_);
     applyBC(U_); // keep ghosts consistent for output/diagnostics
-    if (shouldRecordStateDiagnostics(step)) {
-        appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "initial");
+    if (enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0)) {
+        const auto report = diagnostics::scanInteriorStates(U_,
+                                                            grid_.nx,
+                                                            grid_.ny,
+                                                            grid_.ng,
+                                                            gamma_,
+                                                            stateLimits_.rhoMin,
+                                                            stateLimits_.pMin);
+        const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
+        diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "initial", mp_.isRoot());
     }
     writeOutput(step, t);
 
@@ -479,8 +373,16 @@ void Solver::run() {
         t += dt;
         ++step;
         applyBC(U_);
-        if (shouldRecordStateDiagnostics(step)) {
-            appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "output");
+        if (enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0)) {
+            const auto report = diagnostics::scanInteriorStates(U_,
+                                                                grid_.nx,
+                                                                grid_.ny,
+                                                                grid_.ng,
+                                                                gamma_,
+                                                                stateLimits_.rhoMin,
+                                                                stateLimits_.pMin);
+            const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
+            diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "output", mp_.isRoot());
         }
         writeOutput(step, t);
     }
@@ -490,9 +392,18 @@ void Solver::run() {
         ensureOutputDirectoryExists(mp_);
 
         applyBC(U_);
-        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
+        const bool finalAlreadyRecorded =
+            enableStateDiagnostics_ && outputEvery_ > 0 && (step % outputEvery_ == 0);
         if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
-            appendStateDiagnosticsCsv(step, t, scanInteriorStates(U_), "final");
+            const auto report = diagnostics::scanInteriorStates(U_,
+                                                                grid_.nx,
+                                                                grid_.ny,
+                                                                grid_.ng,
+                                                                gamma_,
+                                                                stateLimits_.rhoMin,
+                                                                stateLimits_.pMin);
+            const auto global = diagnostics::reduceStateScanReportMPI(report, mp_);
+            diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_, global, step, t, "final", mp_.isRoot());
         }
 
         const std::string fname = makeFinalOutputPath(outPrefix_, t);
