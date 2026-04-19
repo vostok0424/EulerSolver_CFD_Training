@@ -30,7 +30,7 @@ enum class RepairMethod {
     DensityPressureFloor,
     InternalEnergyFloor,
     ConservativeRescale,
-    FallBackState,
+    FallbackState,
     Failed
 };
 

@@ -108,12 +108,6 @@ StateScanReport scanInteriorStates(const std::vector<Vec4>& U,
                                    double rhoFloor,
                                    double pFloor);
 
-// Merge one report into another on the current process.
-//
-// This is useful for combining multiple local scans before any MPI reduction.
-void accumulateStateScanReport(StateScanReport& dst,
-                               const StateScanReport& src);
-
 // Reduce a local state-scan report across all MPI ranks and return a global
 // report.
 StateScanReport reduceStateScanReportMPI(const StateScanReport& local,

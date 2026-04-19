@@ -207,12 +207,12 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     }
 }
 
-// Fill ghost cells.
+// Fill ghost cells for one solver state.
 //
-// Step 1: MPI halo exchange across subdomain interfaces (internal boundaries).
-// Step 2: Physical boundary conditions on the *global* domain boundaries only.
-//         For interior MPI interfaces we temporarily switch that side to
-//         boundary::BcType::Internal so boundary::apply2D(...) performs a no-op there.
+// Step 1: exchange MPI halos across subdomain interfaces.
+// Step 2: apply physical boundary conditions only on ranks that touch the
+// global domain boundary. Interior MPI interfaces are marked as Internal so
+// boundary::apply2D(...) leaves them untouched.
 void Solver::applyBC(std::vector<Vec4>& U) const {
     // 1) Exchange halos across MPI subdomain interfaces
     //    NOTE: This assumes Vec4 is a tightly-packed POD of 4 doubles.
@@ -239,9 +239,10 @@ void Solver::applyBC(std::vector<Vec4>& U) const {
     boundary::apply2D(U, grid_.nx, grid_.ny, grid_.ng, bcApply);
 }
 
-// Compute a stable time step from a 2D CFL estimate:
+// Compute a stable time step from the 2D CFL estimate
 //   dt = CFL / max( (|u|+a)/dx + (|v|+a)/dy )
-// We reduce the maximum across all ranks so everyone advances with the same dt.
+// and reduce the spectral-radius bound across all MPI ranks so every rank uses
+// the same accepted time step.
 double Solver::computeDt(const std::vector<Vec4>& U) const {
     const double dx = grid_.dx();
     const double dy = grid_.dy();
@@ -259,12 +260,12 @@ double Solver::computeDt(const std::vector<Vec4>& U) const {
     return cfl_ / maxSg;
 }
 
-// Build the semi-discrete RHS: RHS = -dF/dx - dG/dy.
+// Build the semi-discrete finite-volume RHS: RHS = -dF/dx - dG/dy.
 //
 // Pipeline:
-//   - Characteristic reconstruction produces conservative UL/UR on x-faces and y-faces
-//   - Flux module computes numerical fluxes Fx and Gy by a Riemann solver
-//   - Finite-volume divergence produces cell-centered RHS
+//   - characteristic reconstruction produces conservative UL/UR on x-faces and y-faces
+//   - the flux module computes numerical fluxes by a Riemann solver
+//   - flux differences produce the cell-centered RHS on the local interior block
 void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     std::fill(RHS.begin(), RHS.end(), Vec4{});
 
@@ -319,6 +320,8 @@ bool Solver::shouldRecordStateDiagnostics(const int step) const {
     return enableStateDiagnostics_ && shouldWriteStepOutput(step);
 }
 
+// Record one reduced state-diagnostics snapshot for the current solver state.
+// This helper owns the scan -> MPI reduce -> CSV append sequence.
 void Solver::recordStateDiagnostics(const int step,
                                     const double t,
                                     const std::string& tag) const {
@@ -344,9 +347,9 @@ void Solver::recordStateDiagnostics(const int step,
                                            mp_.isRoot());
 }
 
-// Periodic output.
-//
-// We gather all ranks' interior cell data to rank 0 and write ONE merged legacy VTK file.
+// Write one scheduled merged step snapshot when this step hits the configured
+// output cadence. All ranks contribute interior-cell data and rank 0 writes
+// the merged legacy VTK file.
 void Solver::writeOutput(int step, double t) const {
     if (!shouldWriteStepOutput(step)) return;
 
@@ -359,10 +362,44 @@ void Solver::writeOutput(int step, double t) const {
                          grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
 }
 
+// Write the terminal merged snapshot independent of the regular output cadence.
+void Solver::writeFinalOutput(const double t) const {
+    if (!writeFinal_) {
+        return;
+    }
+
+    ensureOutputDirectoryExists(mp_);
+    const std::string fname = makeFinalOutputPath(outPrefix_, t);
+    writeMergedVtkFile2D(mp_, fname, "final", t,
+                         U_, grid_.nx, grid_.ny, grid_.ng,
+                         grid_.iBeg, grid_.jBeg,
+                         grid_.nxGlobal, grid_.nyGlobal,
+                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
+}
+
+// Common diagnostics/output handling for the initial state and regular output
+// steps. This helper refreshes ghost cells, records state diagnostics on the
+// scheduled output cadence, and writes the merged step snapshot when needed.
+void Solver::processRegularOutputPhase(const int step,
+                                       const double t,
+                                       const std::string& diagnosticsTag) {
+    applyBC(U_);
+
+    if (shouldRecordStateDiagnostics(step)) {
+        recordStateDiagnostics(step, t, diagnosticsTag);
+    }
+
+    writeOutput(step, t);
+}
+
 // Main time-marching loop.
-// - Output an initial snapshot at step=0.
-// - The time integrator calls rhsFun(...) multiple times per time step.
-//   rhsFun ensures ghost cells are valid before characteristic reconstruction/flux evaluation.
+// - Build an initial RHS and process the initial diagnostics/output phase.
+// - Advance in time with the selected explicit integrator.
+// - After each accepted step, process the regular diagnostics/output phase.
+// - Optionally emit one terminal diagnostics/output phase at the final time.
+//
+// The time integrator calls rhsFun(...) multiple times per time step; rhsFun
+// refreshes ghost cells before reconstruction and flux evaluation.
 void Solver::run() {
     double t = 0.0;
     int step = 0;
@@ -371,25 +408,22 @@ void Solver::run() {
               << ", local=" << grid_.nx << "x" << grid_.ny
               << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
 
-    // Initial RHS build and output.
+    // Build the initial RHS once, then run the initial diagnostics/output phase
+    // through the same helper used by regular scheduled outputs.
     applyBC(U_);
     buildRHS(U_, RHS_);
-    applyBC(U_); // keep ghosts consistent for output/diagnostics
-    
-    if (shouldRecordStateDiagnostics(step)) {
-        recordStateDiagnostics(step, t, "initial");
-    }
-    
-    writeOutput(step, t);
+    processRegularOutputPhase(step, t, "initial");
 
-    // RHS callback used by RK schemes.
+    // RHS callback used by explicit multi-stage integrators.
     auto rhsFun = [this](std::vector<Vec4>& Uin, std::vector<Vec4>& Rout){
-        // For every stage, ensure ghosts are valid (MPI halos + physical BCs) before characteristic reconstruction/flux.
+        // For every stage, refresh ghost cells (MPI halos + physical BCs)
+        // before characteristic reconstruction and flux evaluation.
         applyBC(Uin);
         buildRHS(Uin, Rout);
     };
 
-    // Advance until finalTime (last step is clipped to hit finalTime exactly).
+    // Advance until finalTime. The last accepted step is clipped so the solver
+    // lands exactly on the requested terminal time.
     while (t < finalTime_) {
         double dt = computeDt(U_);
         if (t + dt > finalTime_) dt = finalTime_ - t;
@@ -397,31 +431,21 @@ void Solver::run() {
         ti_->step(U_, dt, rhsFun);
         t += dt;
         ++step;
-        applyBC(U_);
-        
-        if (shouldRecordStateDiagnostics(step)) {
-            recordStateDiagnostics(step, t, "output");
-        }
-        
-        writeOutput(step, t);
+
+        processRegularOutputPhase(step, t, "output");
     }
 
-    // Optional final snapshot.
+    // Optional terminal diagnostics/output phase. Diagnostics are skipped here
+    // only when the final step has already been recorded on the regular output
+    // cadence.
     if (writeFinal_) {
-        ensureOutputDirectoryExists(mp_);
-
         applyBC(U_);
-        
-        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
 
+        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
         if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
             recordStateDiagnostics(step, t, "final");
         }
-        const std::string fname = makeFinalOutputPath(outPrefix_, t);
-        writeMergedVtkFile2D(mp_, fname, "final", t,
-                             U_, grid_.nx, grid_.ny, grid_.ng,
-                             grid_.iBeg, grid_.jBeg,
-                             grid_.nxGlobal, grid_.nyGlobal,
-                             grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
+        
+        writeFinalOutput(t);
     }
 }
