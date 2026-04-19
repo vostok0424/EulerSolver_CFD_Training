@@ -1,4 +1,3 @@
-
 #include "state.hpp"
 
 #include <algorithm>
@@ -160,6 +159,62 @@ bool isFiniteState(const Vec4& U) {
     return true;
 }
 
+// Return u^2 + v^2 for a conservative state.
+// Non-finite inputs or invalid density yield +inf so callers can treat the
+// result as unreadable without duplicating local checks.
+double velocitySquared(const Vec4& U) {
+    if (!isFiniteState(U)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double rho = U[0];
+    if (!(rho > 0.0) || !std::isfinite(rho)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double ux = U[1] / rho;
+    const double uy = U[2] / rho;
+    if (!std::isfinite(ux) || !std::isfinite(uy)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    return ux * ux + uy * uy;
+}
+
+// Shared conservative-state pressure reader used by diagnostics/repair.
+// Returns NaN when the state cannot be interpreted safely.
+double pressureFromConservative(const Vec4& U, const double gamma) {
+    if (!isFiniteState(U)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double rho = U[0];
+    if (!(rho > 0.0) || !std::isfinite(rho)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double ke = 0.5 * (U[1] * U[1] + U[2] * U[2]) / rho;
+    const double p  = (gamma - 1.0) * (U[3] - ke);
+    return std::isfinite(p) ? p : std::numeric_limits<double>::quiet_NaN();
+}
+
+// Shared conservative-state specific internal-energy reader.
+// Returns NaN when rho is invalid or the derived value is non-finite.
+double specificInternalEnergyFromConservative(const Vec4& U) {
+    if (!isFiniteState(U)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double rho = U[0];
+    if (!(rho > 0.0) || !std::isfinite(rho)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double ke   = 0.5 * (U[1] * U[1] + U[2] * U[2]) / rho;
+    const double eint = (U[3] - ke) / rho;
+    return std::isfinite(eint) ? eint : std::numeric_limits<double>::quiet_NaN();
+}
+
 // Recover internal energy from a 2D conservative state.
 static inline double internalEnergy2D(const Vec4& U) {
     const double rho = U[0];
@@ -277,21 +332,13 @@ FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
 }
 
 double safePressure(const Vec4& U, double gamma) {
-    const double rho = U[0];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    return pressureFromInternalEnergy(internalEnergy2D(U), gamma);
+    const double p = pressureFromConservative(U, gamma);
+    return std::isfinite(p) ? p : -std::numeric_limits<double>::infinity();
 }
 
 double safeInternalEnergy(const Vec4& U) {
-    const double rho = U[0];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    return internalEnergy2D(U) / rho;
+    const double eint = specificInternalEnergyFromConservative(U);
+    return std::isfinite(eint) ? eint : -std::numeric_limits<double>::infinity();
 }
 
 // Physical flux assembled from conservative storage plus cached primitive /

@@ -154,6 +154,15 @@ Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma);
 // Fast finite checks on conservative states.
 bool isFiniteState(const Vec4& U);
 
+// Return u^2 + v^2 for a conservative state. Non-finite inputs yield +inf.
+double velocitySquared(const Vec4& U);
+
+// Shared conservative-state readers used by diagnostics and cell repair.
+// These helpers centralize basic physics interpretation so other modules do
+// not keep duplicate pressure/internal-energy formulas.
+double pressureFromConservative(const Vec4& U, double gamma);
+double specificInternalEnergyFromConservative(const Vec4& U);
+
 // Primitive-state checks.
 StateCheckResult checkPrimitive(const Prim2& W, const StateLimits& limits);
 

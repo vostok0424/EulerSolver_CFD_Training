@@ -16,21 +16,20 @@
 // Design boundary:
 // - this module repairs states
 // - this module does not perform global diagnostics, MPI reduction, or logging
-// - this module may use state-related ideas, but keeps its own local helpers so
-//   that repair behavior remains explicit and self-contained
+// - this module reuses shared conservative-state reading helpers from the
+//   state layer, while keeping repair-policy and fallback construction local
 
 #include "cell_repair.hpp"
+#include "cfg.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 
-#include "cfg.hpp"
 
 // Internal helpers used only by this translation unit.
 namespace {
 
-// Conservative-state indexing convention used throughout the solver.
+// Conservative-state indexing convention used by this repair module.
 constexpr int kRho  = 0;
 constexpr int kRhoU = 1;
 constexpr int kRhoV = 2;
@@ -42,74 +41,18 @@ inline double safeMax(const double a, const double b) {
     return (a > b) ? a : b;
 }
 
-// Basic finite-value checks for scalar and conservative-state inputs.
+// Basic finite-value check used by local repair-stage reconstruction logic.
 inline bool isFiniteScalar(const double x) {
     return std::isfinite(x);
 }
 
-inline bool isFiniteConservativeState(const Vec4& U) {
-    return isFiniteScalar(U[kRho]) &&
-           isFiniteScalar(U[kRhoU]) &&
-           isFiniteScalar(U[kRhoV]) &&
-           isFiniteScalar(U[kE]);
-}
-
-// Compute |u|^2 from a conservative state.
-//
-// If density is invalid, return +inf so downstream checks naturally fail.
-inline double velocitySquared(const Vec4& U) {
-    const double rho = U[kRho];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return std::numeric_limits<double>::infinity();
-    }
-
-    const double u = U[kRhoU] / rho;
-    const double v = U[kRhoV] / rho;
-    return u * u + v * v;
-}
-
-// Recover pressure from a conservative state using the ideal-gas Euler form.
-//
-// Invalid density or velocity information maps to -inf pressure so that repair
-// logic can treat the state as unacceptable without throwing exceptions.
-inline double pressureFromConservative(const Vec4& U, const double gamma) {
-    const double rho = U[kRho];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double vel2 = velocitySquared(U);
-    if (!std::isfinite(vel2)) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double kinetic = 0.5 * rho * vel2;
-    return (gamma - 1.0) * (U[kE] - kinetic);
-}
-
-// Recover specific internal energy from a conservative state.
-inline double specificInternalEnergyFromConservative(const Vec4& U) {
-    const double rho = U[kRho];
-    if (!std::isfinite(rho) || rho <= 0.0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double vel2 = velocitySquared(U);
-    if (!std::isfinite(vel2)) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    return U[kE] / rho - 0.5 * vel2;
-}
-
-// Check whether a conservative state satisfies the currently requested repair
-// floors.
-//
-// This is the acceptance test used after each repair stage.
+// Check whether the current state already satisfies the enabled repair floors.
+// State readability itself is delegated to shared state-layer helpers; this
+// module remains responsible only for repair policy and stage ordering.
 inline bool passesRequestedFloors(const Vec4& U,
                                   const double gamma,
                                   const cell_repair::CellRepairOptions& opts) {
-    if (!isFiniteConservativeState(U)) {
+    if (!isFiniteState(U)) {
         return false;
     }
 
@@ -130,11 +73,9 @@ inline bool passesRequestedFloors(const Vec4& U,
     return true;
 }
 
-// Construct a guaranteed finite fallback state that satisfies the requested
-// floor constraints as conservatively as possible.
-//
-// This is used only as a last resort when staged repair cannot recover the
-// original state.
+// Final fallback: construct a guaranteed finite state using only configured
+// floors and zero velocity. This is the last-resort path when staged repairs
+// cannot recover the original state.
 inline Vec4 makeFiniteFallbackState(const cell_repair::CellRepairOptions& opts,
                                     const double gamma) {
     const double rho = opts.enforceDensityFloor ? safeMax(opts.rhoFloor, 1.0e-12) : 1.0;
@@ -153,12 +94,12 @@ inline Vec4 makeFiniteFallbackState(const cell_repair::CellRepairOptions& opts,
     return Vec4{rho, rho * u, rho * v, E};
 }
 
-// First repair stage: enforce density and pressure floors while preserving the
-// local velocity implied by the incoming conservative state.
+// Repair stage 1: enforce density/pressure floors while preserving velocity.
+// Momentum and total energy are rebuilt from the floored density and pressure.
 inline bool applyDensityPressureFloor(Vec4& U,
                                       const double gamma,
                                       const cell_repair::CellRepairOptions& opts) {
-    if (!isFiniteConservativeState(U)) {
+    if (isFiniteState(U) && passesRequestedFloors(U, gamma, opts)) {
         return false;
     }
 
@@ -183,15 +124,15 @@ inline bool applyDensityPressureFloor(Vec4& U,
     U[kRhoU] = rho * ux;
     U[kRhoV] = rho * uy;
     U[kE] = pNew / (gamma - 1.0) + 0.5 * rho * (ux * ux + uy * uy);
-    return isFiniteConservativeState(U);
+    return isFiniteState(U);
 }
 
-// Second repair stage: raise specific internal energy when that option is
-// enabled.
+// Repair stage 2: raise specific internal energy to the requested floor and
+// rebuild total energy consistently with the current density and momentum.
 inline bool applyInternalEnergyFloor(Vec4& U,
                                      const double gamma,
                                      const cell_repair::CellRepairOptions& opts) {
-    if (!isFiniteConservativeState(U)) {
+    if (isFiniteState(U) && passesRequestedFloors(U, gamma, opts)) {
         return false;
     }
 
@@ -212,20 +153,17 @@ inline bool applyInternalEnergyFloor(Vec4& U,
     }
 
     U[kE] = rho * (eintTarget + 0.5 * (ux * ux + uy * uy));
-    return isFiniteConservativeState(U);
+    return isFiniteState(U);
 }
 
-// Final staged repair before fallback construction.
-//
-// This path rebuilds a conservative state from sanitized density, momentum, and
-// internal-energy information. If the incoming state is completely non-finite,
-// it immediately falls back to a known-safe state.
+// Repair stage 3: sanitize the conservative components directly, then rebuild
+// a finite admissible state from floored density, velocity, and internal-
+// energy information before the final fallback path is used.
 inline bool applyConservativeRescale(Vec4& U,
                                      const double gamma,
                                      const cell_repair::CellRepairOptions& opts) {
-    if (!isFiniteConservativeState(U)) {
-        U = makeFiniteFallbackState(opts, gamma);
-        return true;
+    if (isFiniteState(U) && passesRequestedFloors(U, gamma, opts)) {
+        return false;
     }
 
     double rho = U[kRho];
@@ -254,7 +192,7 @@ inline bool applyConservativeRescale(Vec4& U,
     U[kRhoU] = rho * ux;
     U[kRhoV] = rho * uy;
     U[kE] = rho * (eint + 0.5 * (ux * ux + uy * uy));
-    return isFiniteConservativeState(U);
+    return isFiniteState(U);
 }
 
 } // namespace
@@ -262,7 +200,7 @@ inline bool applyConservativeRescale(Vec4& U,
 // Public cell-repair interfaces.
 namespace cell_repair {
 
-// Parse all cell-repair-related runtime controls from the case configuration.
+// Parse all runtime controls and admissibility floors for cell repair.
 CellRepairOptions parseCellRepairOptions(const Cfg& cfg) {
     CellRepairOptions opts;
 
@@ -278,10 +216,10 @@ CellRepairOptions parseCellRepairOptions(const Cfg& cfg) {
     return opts;
 }
 
-// Attempt to repair one conservative cell state.
+// Apply staged admissibility-preserving repair to one conservative cell state.
 //
 // Repair order:
-// 1. accept the state immediately if it already satisfies all requested floors
+// 1. accept the state immediately if it already satisfies all enabled floors
 // 2. try density/pressure-floor repair
 // 3. try internal-energy-floor repair when enabled
 // 4. try conservative rescaling
@@ -308,7 +246,7 @@ CellRepairResult repairCellState(const Vec4& U,
         return result;
     }
 
-    // From this point onward, at least one repair stage will be attempted.
+    // From this point onward, staged repair has been entered.
     result.attempted = true;
 
     Vec4 candidate = result.U;
@@ -343,14 +281,15 @@ CellRepairResult repairCellState(const Vec4& U,
     }
 
     // Last resort: replace the state by a constructed finite fallback state.
+    // This path is recorded separately from ConservativeRescale in the result.
     result.U = makeFiniteFallbackState(opts, gamma);
     result.success = passesRequestedFloors(result.U, gamma, opts);
     result.changed = true;
-    result.method = result.success ? RepairMethod::ConservativeRescale : RepairMethod::Failed;
+    result.method = result.success ? RepairMethod::FallbackState : RepairMethod::Failed;
     return result;
 }
 
-// In-place wrapper around the single-state repair routine.
+// In-place wrapper around the single-state staged repair routine.
 bool repairCellStateInPlace(Vec4& U,
                             const double gamma,
                             const CellRepairOptions& opts,
@@ -367,7 +306,7 @@ bool repairCellStateInPlace(Vec4& U,
 }
 
 // Apply cell repair to every entry in a state array and accumulate batch-level
-// statistics.
+// repair counters.
 CellRepairReport repairCellArray(std::vector<Vec4>& U,
                                  const double gamma,
                                  const CellRepairOptions& opts) {
