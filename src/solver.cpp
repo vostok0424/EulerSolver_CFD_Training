@@ -329,6 +329,8 @@ void Solver::recordStateDiagnostics(const int step,
         return;
     }
 
+    ensureOutputDirectoryExists(mp_);
+
     const auto local = diagnostics::scanInteriorStates(U_,
                                                        grid_.nx,
                                                        grid_.ny,
