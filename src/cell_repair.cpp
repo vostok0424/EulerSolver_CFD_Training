@@ -1,10 +1,3 @@
-//
-//  cell_repair.cpp
-//  EulerSolver_CFD_Training
-//
-//  Created by SHUANG QIU on 2026/4/18.
-//
-
 // Cell-repair implementation for conservative cell-centered states.
 //
 // This module is responsible for:
@@ -104,19 +97,38 @@ inline bool applyDensityPressureFloor(Vec4& U,
     }
 
     double rho = U[kRho];
-    if (opts.enforceDensityFloor) {
+    if (!isFiniteScalar(rho) || rho <= 0.0) {
+        if (!opts.enforceDensityFloor) {
+            return false;
+        }
+        rho = opts.rhoFloor;
+    } else if (opts.enforceDensityFloor) {
         rho = safeMax(rho, opts.rhoFloor);
     }
-    if (!std::isfinite(rho) || rho <= 0.0) {
+    if (!isFiniteScalar(rho) || rho <= 0.0) {
         return false;
     }
 
-    const double ux = U[kRhoU] / U[kRho];
-    const double uy = U[kRhoV] / U[kRho];
-    const double pOld = pressureFromConservative(U, gamma);
+    double rhou = U[kRhoU];
+    double rhov = U[kRhoV];
+    if (!isFiniteScalar(rhou)) {
+        rhou = 0.0;
+    }
+    if (!isFiniteScalar(rhov)) {
+        rhov = 0.0;
+    }
+
+    const double ux = rhou / rho;
+    const double uy = rhov / rho;
+
+    double pOld = pressureFromConservative(U, gamma);
+    if (!isFiniteScalar(pOld)) {
+        pOld = opts.enforcePressureFloor ? opts.pFloor : 0.0;
+    }
     const double pNew = opts.enforcePressureFloor ? safeMax(pOld, opts.pFloor) : pOld;
 
-    if (!std::isfinite(ux) || !std::isfinite(uy) || !std::isfinite(pNew)) {
+    if (!isFiniteScalar(ux) || !isFiniteScalar(uy) || !isFiniteScalar(pNew) ||
+        pNew < 0.0 || !isFiniteScalar(gamma) || gamma <= 1.0) {
         return false;
     }
 
