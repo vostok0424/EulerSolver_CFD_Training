@@ -25,12 +25,20 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <type_traits>
 
 namespace {
 
 constexpr const char* kOutputDir2D = "solution";
+
+
+std::unordered_map<const Solver*, recon::ReconstructionStats> gLastReconstructionStats;
+
+recon::ReconstructionStats& accessLastReconstructionStats(const Solver* solver) {
+    return gLastReconstructionStats[solver];
+}
 
 
 void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
@@ -165,6 +173,7 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
     stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
                                       "solution/" + outPrefix_ + "_state_diagnostics.csv");
+    accessLastReconstructionStats(this).clear();
 
     // -----------------------------
     // 4) Boundary conditions
@@ -272,8 +281,24 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
 
     // Characteristic reconstruction returns conservative face states on x- and y-faces.
     // U must already have valid ghost cells when calling buildRHS.
-    recon_.reconstructFacesX(U, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.UL, faces_.x.UR);
-    recon_.reconstructFacesY(U, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.UL, faces_.y.UR);
+    auto& reconStats = accessLastReconstructionStats(this);
+    reconStats.clear();
+    recon_.reconstructFacesX(U,
+                             grid_.nx,
+                             grid_.ny,
+                             grid_.ng,
+                             gamma_,
+                             faces_.x.UL,
+                             faces_.x.UR,
+                             &reconStats);
+    recon_.reconstructFacesY(U,
+                             grid_.nx,
+                             grid_.ny,
+                             grid_.ng,
+                             gamma_,
+                             faces_.y.UL,
+                             faces_.y.UR,
+                             &reconStats);
 
     // X-faces: compute numerical flux using dir=0 (x-normal).
     for (int j = 0; j < grid_.ny; ++j) {
@@ -339,7 +364,8 @@ void Solver::recordStateDiagnostics(const int step,
                                                        stateLimits_.rhoMin,
                                                        stateLimits_.pMin);
 
-    const auto global = diagnostics::reduceStateScanReportMPI(local, mp_);
+    auto global = diagnostics::reduceStateScanReportMPI(local, mp_);
+    global.repairedCellCount = accessLastReconstructionStats(this).repairedStateCount;
 
     diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_,
                                            global,
@@ -363,6 +389,11 @@ void Solver::writeOutput(int step, double t) const {
                          grid_.nxGlobal, grid_.nyGlobal,
                          grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
 }
+
+// Note: solver statistics are cached in a file-local map keyed by `this` so
+// reconstruction diagnostics can be forwarded without changing solver.hpp.
+// This translation unit currently creates one long-lived Solver instance per run,
+// so explicit cache cleanup is not required for correctness during normal use.
 
 // Write the terminal merged snapshot independent of the regular output cadence.
 void Solver::writeFinalOutput(const double t) const {

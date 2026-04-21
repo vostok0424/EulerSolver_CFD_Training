@@ -45,6 +45,7 @@ static inline cell_repair::CellRepairOptions makeCellRepairOptions(const StateLi
     return opts;
 }
 
+
 // -----------------------------------------------------------------------------
 // 1) Limiter utilities
 // -----------------------------------------------------------------------------
@@ -384,19 +385,36 @@ static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
                                             double gamma,
                                             const StateLimits& limits,
                                             VecT& ULf,
-                                            VecT& URf) {
-        loadFace(ULf, URf);
-        if (!positivityFix) {
-            return;
-        }
-        const auto repairOpts = makeCellRepairOptions(limits);
-        if (!isAdmissibleState(ULf, gamma, limits)) {
-            cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts);
-        }
-        if (!isAdmissibleState(URf, gamma, limits)) {
-            cell_repair::repairCellStateInPlace(URf, gamma, repairOpts);
+                                            VecT& URf,
+                                            ReconstructionStats* stats = nullptr) {
+    loadFace(ULf, URf);
+    if (!positivityFix) {
+        return;
+    }
+    const auto repairOpts = makeCellRepairOptions(limits);
+    if (!isAdmissibleState(ULf, gamma, limits)) {
+        cell_repair::CellRepairResult repairResultL;
+        cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts, &repairResultL);
+        if (stats) {
+            if (repairResultL.success) {
+                ++stats->repairedStateCount;
+            } else {
+                ++stats->failedRepairCount;
+            }
         }
     }
+    if (!isAdmissibleState(URf, gamma, limits)) {
+        cell_repair::CellRepairResult repairResultR;
+        cell_repair::repairCellStateInPlace(URf, gamma, repairOpts, &repairResultR);
+        if (stats) {
+            if (repairResultR.success) {
+                ++stats->repairedStateCount;
+            } else {
+                ++stats->failedRepairCount;
+            }
+        }
+    }
+}
 
 template <typename VecT, typename EigenT, int NVAR>
 static inline void reconstructFaceMUSCLFromCharCache(const EigenT& eig,
@@ -500,39 +518,43 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             ReconstructFaceFn&& reconstructFaceWithScheme,
                                             LoadFirstOrderFn&& loadFirstOrderFace,
                                             VecT& ULf,
-                                            VecT& URf)
+                                            VecT& URf,
+                                            ReconstructionStats* stats = nullptr)
 {
     CachedStateCheck<VecT> leftCheck;
     CachedStateCheck<VecT> rightCheck;
-    
+
     auto resetChecks = [&]() {
         leftCheck = CachedStateCheck<VecT>{};
         rightCheck = CachedStateCheck<VecT>{};
     };
-    
+
     auto reconstructAndReset = [&](Scheme scheme) {
         reconstructFaceWithScheme(scheme, ULf, URf);
         resetChecks();
     };
-    
+
     auto loadFirstOrderAndReset = [&]() {
         loadFirstOrderFace(ULf, URf);
         resetChecks();
     };
-    
+
     auto faceAdmissible = [&]() {
         return admissibleStateCached(ULf, gamma, limits, leftCheck)
         && admissibleStateCached(URf, gamma, limits, rightCheck);
     };
-    
+
     // First try the requested reconstruction scheme.
     reconstructAndReset(requestedScheme);
-    
+
     bool ok = faceAdmissible();
-    
+
     // If the requested high-order state is not admissible, retry with a
     // first-order face state when fallback is enabled.
     if (!ok && enableFallback && requestedScheme != Scheme::FirstOrder) {
+        if (stats) {
+            ++stats->fallbackFaceCount;
+        }
         loadFirstOrderAndReset();
         ok = quickAdmissibleStateCached(ULf, gamma, limits, leftCheck)
         && quickAdmissibleStateCached(URf, gamma, limits, rightCheck);
@@ -540,7 +562,7 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
             ok = faceAdmissible();
         }
     }
-    
+
     // As a final safeguard, attempt centralized conservative-state repair on
     // each face state independently.
     if (!ok && positivityFix) {
@@ -551,6 +573,13 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
             if (!okL) {
                 cell_repair::CellRepairResult repairResultL;
                 cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts, &repairResultL);
+                if (stats) {
+                    if (repairResultL.success) {
+                        ++stats->repairedStateCount;
+                    } else {
+                        ++stats->failedRepairCount;
+                    }
+                }
                 leftCheck = CachedStateCheck<VecT>{};
                 okL = repairResultL.success;
                 if (okL) {
@@ -560,6 +589,13 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
             if (!okR) {
                 cell_repair::CellRepairResult repairResultR;
                 cell_repair::repairCellStateInPlace(URf, gamma, repairOpts, &repairResultR);
+                if (stats) {
+                    if (repairResultR.success) {
+                        ++stats->repairedStateCount;
+                    } else {
+                        ++stats->failedRepairCount;
+                    }
+                }
                 rightCheck = CachedStateCheck<VecT>{};
                 okR = repairResultR.success;
                 if (okR) {
@@ -583,7 +619,8 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                                          int nx, int ny, int ng,
                                          double gamma,
                                          std::vector<Vec4>& ULx,
-                                         std::vector<Vec4>& URx) const {
+                                         std::vector<Vec4>& URx,
+                                         ReconstructionStats* stats) const {
     const int nxTot = nx + 2 * ng;
     const int nyTot = ny + 2 * ng;
     if ((int)U.size() != nxTot * nyTot) {
@@ -598,6 +635,7 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
     if (URx.size() != nFaceX) URx.resize(nFaceX);
 
     const StateLimits limits = opt_.stateLimits();
+    ReconstructionStats localStats{};
 
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny; ++j) {
@@ -610,8 +648,11 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                     ULf = U[idx2(I_L, J, nxTot)];
                     URf = U[idx2(I_R, J, nxTot)];
                 };
-                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULx[f], URx[f]);
+                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULx[f], URx[f], &localStats);
             }
+        }
+        if (stats) {
+            stats->accumulate(localStats);
         }
         return;
     }
@@ -686,8 +727,12 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                                        reconstructWithScheme,
                                        loadFirstOrder,
                                        ULx[f],
-                                       URx[f]);
+                                       URx[f],
+                                       &localStats);
         }
+    }
+    if (stats) {
+        stats->accumulate(localStats);
     }
 }
 
@@ -696,7 +741,8 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                                          int nx, int ny, int ng,
                                          double gamma,
                                          std::vector<Vec4>& ULy,
-                                         std::vector<Vec4>& URy) const {
+                                         std::vector<Vec4>& URy,
+                                         ReconstructionStats* stats) const {
     const int nxTot = nx + 2 * ng;
     const int nyTot = ny + 2 * ng;
     if ((int)U.size() != nxTot * nyTot) {
@@ -711,6 +757,7 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
     if (URy.size() != nFaceY) URy.resize(nFaceY);
 
     const StateLimits limits = opt_.stateLimits();
+    ReconstructionStats localStats{};
 
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny + 1; ++j) {
@@ -723,8 +770,11 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                     ULf = U[idx2(I, J_B, nxTot)];
                     URf = U[idx2(I, J_T, nxTot)];
                 };
-                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULy[f], URy[f]);
+                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULy[f], URy[f], &localStats);
             }
+        }
+        if (stats) {
+            stats->accumulate(localStats);
         }
         return;
     }
@@ -811,8 +861,12 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                                        reconstructWithScheme,
                                        loadFirstOrder,
                                        ULy[f],
-                                       URy[f]);
+                                       URy[f],
+                                       &localStats);
         }
+    }
+    if (stats) {
+        stats->accumulate(localStats);
     }
 }
 } // namespace recon

@@ -330,11 +330,11 @@ CellRepairReport repairCellArray(std::vector<Vec4>& U,
 
         if (result.attempted) {
             ++report.attemptedCount;
-        }
-        if (result.success) {
-            ++report.successCount;
-        } else {
-            ++report.failureCount;
+            if (result.success) {
+                ++report.successCount;
+            } else {
+                ++report.failureCount;
+            }
         }
         if (result.changed) {
             ++report.changedCount;

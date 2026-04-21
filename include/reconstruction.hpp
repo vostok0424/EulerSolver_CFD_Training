@@ -118,6 +118,28 @@ struct Options {
     }
 };
 
+// Reconstruction statistics
+// -------------------------
+// Lightweight counters collected during face reconstruction.
+// These counters are intended to be accumulated by the caller per reconstruction pass.
+struct ReconstructionStats {
+    int fallbackFaceCount = 0;
+    int repairedStateCount = 0;
+    int failedRepairCount = 0;
+
+    void clear() {
+        fallbackFaceCount = 0;
+        repairedStateCount = 0;
+        failedRepairCount = 0;
+    }
+
+    void accumulate(const ReconstructionStats& other) {
+        fallbackFaceCount += other.fallbackFaceCount;
+        repairedStateCount += other.repairedStateCount;
+        failedRepairCount += other.failedRepairCount;
+    }
+};
+
 // Read reconstruction options from cfg.
 //
 // Expected keys (strict strings; invalid values should trigger clear errors):
@@ -157,13 +179,15 @@ public:
                            int nx, int ny, int ng,
                            double gamma,
                            std::vector<Vec4>& ULx,
-                           std::vector<Vec4>& URx) const;
+                           std::vector<Vec4>& URx,
+                           ReconstructionStats* stats = nullptr) const;
 
     void reconstructFacesY(const std::vector<Vec4>& U,
                            int nx, int ny, int ng,
                            double gamma,
                            std::vector<Vec4>& ULy,
-                           std::vector<Vec4>& URy) const;
+                           std::vector<Vec4>& URy,
+                           ReconstructionStats* stats = nullptr) const;
 
 private:
     Options opt_;
