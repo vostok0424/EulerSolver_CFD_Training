@@ -173,6 +173,32 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
     stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
                                       "solution/" + outPrefix_ + "_state_diagnostics.csv");
+
+    // Positivity-preserving flux limiter controls.  The limiter is disabled
+    // by default so existing cases keep their original numerical behavior
+    // unless positivityPreserving.enable is explicitly set to true.
+    positivityOptions_.enable = cfg.getBool("positivityPreserving.enable", false);
+    positivityOptions_.rhoFloor = cfg.getDouble("positivityPreserving.rhoFloor",
+                                               stateLimits_.rhoMin);
+    positivityOptions_.pFloor = cfg.getDouble("positivityPreserving.pFloor",
+                                             stateLimits_.pMin);
+    positivityOptions_.lowOrderFlux = positivity_preserving::parseLowOrderFluxType(
+        cfg.getString("positivityPreserving.lowOrderFlux", "rusanov"));
+    positivityOptions_.alphaMode = positivity_preserving::parseAlphaMode(
+        cfg.getString("positivityPreserving.alphaMode", "constant"));
+    positivityOptions_.pressureBisectionIters = cfg.getInt(
+        "positivityPreserving.pressureBisectionIters", 20);
+
+    if (positivityOptions_.pressureBisectionIters < 1) {
+        positivityOptions_.pressureBisectionIters = 1;
+    }
+    if (positivityOptions_.rhoFloor <= 0.0) {
+        positivityOptions_.rhoFloor = stateLimits_.rhoMin;
+    }
+    if (positivityOptions_.pFloor <= 0.0) {
+        positivityOptions_.pFloor = stateLimits_.pMin;
+    }
+
     accessLastReconstructionStats(this).clear();
 
     // -----------------------------
