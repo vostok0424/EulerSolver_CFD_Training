@@ -137,6 +137,7 @@ SRC=(
   src/mpi_parallel.cpp
   src/diagnostics.cpp
   src/cell_repair.cpp
+  src/positivity_preserving.cpp
 )
 
 MISSING=()
