@@ -35,7 +35,9 @@
 #include "setFields.hpp"
 #include "io.hpp"
 #include "boundary.hpp"
+
 #include "diagnostics.hpp"
+#include "positivity_preserving.hpp"
 
 #include <memory>
 #include <string>
@@ -158,6 +160,19 @@ private:
     StateLimits stateLimits_{};
     bool enableStateDiagnostics_{true};
     std::string stateDiagCsvPath_;
+
+    // Positivity-preserving flux limiter controls and statistics.
+    // The limiter is applied after high-order face flux evaluation and before
+    // finite-volume RHS assembly.  It is disabled by default until cfg-side
+    // options are wired in.
+    positivity_preserving::Options positivityOptions_{};
+    positivity_preserving::Stats positivityStats_{};
+
+    // Temporary dt bridge for the positivity-preserving flux limiter.
+    // buildRHS() currently does not receive dt directly, so run() sets this
+    // before invoking the explicit time integrator.  A later cleanup can pass
+    // dt through the RHS callback interface instead.
+    double currentDtForLimiter_{0.0};
 
     // Flatten (i,j) into a 1D row-major index for ghosted cell-centered arrays.
     int idx(int i, int j) const { return i + grid_.nxTot * j; }

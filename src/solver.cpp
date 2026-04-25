@@ -300,11 +300,44 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
                              faces_.y.UR,
                              &reconStats);
 
+    const double dx = grid_.dx();
+    const double dy = grid_.dy();
+
+    // Reset limiter statistics for this RHS evaluation.  The limiter remains
+    // disabled by default, so this has no effect on the current numerical path
+    // until positivityOptions_.enable is wired to cfg and set to true.
+    positivityStats_.reset();
+
+    // First solver-side implementation follows the constant multidimensional
+    // partition alphaX = alphaY = 0.5 used by the 2-D Hu-Adams-Shu extension.
+    // Therefore scaleX = 2*dt/(alphaX*dx) = 4*dt/dx, and similarly for y.
+    const double scaleX = (currentDtForLimiter_ > 0.0) ? 4.0 * currentDtForLimiter_ / dx : 0.0;
+    const double scaleY = (currentDtForLimiter_ > 0.0) ? 4.0 * currentDtForLimiter_ / dy : 0.0;
+
     // X-faces: compute numerical flux using dir=0 (x-normal).
     for (int j = 0; j < grid_.ny; ++j) {
         for (int i = 0; i < grid_.nx + 1; ++i) {
             const int f = idxFaceX(i, j);
-            faces_.x.F[f] = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
+            const Vec4 highOrderFlux = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
+
+            if (positivityOptions_.enable && scaleX > 0.0) {
+                const Vec4& leftCell  = U[idx(grid_.ng + i - 1, grid_.ng + j)];
+                const Vec4& rightCell = U[idx(grid_.ng + i,     grid_.ng + j)];
+
+                const auto limited = positivity_preserving::limitFaceFlux(
+                    leftCell,
+                    rightCell,
+                    highOrderFlux,
+                    scaleX,
+                    positivity_preserving::Direction::X,
+                    gamma_,
+                    positivityOptions_,
+                    positivityStats_);
+
+                faces_.x.F[f] = limited.flux;
+            } else {
+                faces_.x.F[f] = highOrderFlux;
+            }
         }
     }
 
@@ -312,12 +345,28 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     for (int j = 0; j < grid_.ny + 1; ++j) {
         for (int i = 0; i < grid_.nx; ++i) {
             const int f = idxFaceY(i, j);
-            faces_.y.F[f] = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
+            const Vec4 highOrderFlux = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
+
+            if (positivityOptions_.enable && scaleY > 0.0) {
+                const Vec4& bottomCell = U[idx(grid_.ng + i, grid_.ng + j - 1)];
+                const Vec4& topCell    = U[idx(grid_.ng + i, grid_.ng + j)];
+
+                const auto limited = positivity_preserving::limitFaceFlux(
+                    bottomCell,
+                    topCell,
+                    highOrderFlux,
+                    scaleY,
+                    positivity_preserving::Direction::Y,
+                    gamma_,
+                    positivityOptions_,
+                    positivityStats_);
+
+                faces_.y.F[f] = limited.flux;
+            } else {
+                faces_.y.F[f] = highOrderFlux;
+            }
         }
     }
-
-    const double dx = grid_.dx();
-    const double dy = grid_.dy();
 
     // Divergence of fluxes -> RHS (cell-centered):
     //   RHS = -(FxR-FxL)/dx - (GyT-GyB)/dy
@@ -460,6 +509,11 @@ void Solver::run() {
     while (t < finalTime_) {
         double dt = computeDt(U_);
         if (t + dt > finalTime_) dt = finalTime_ - t;
+
+        // buildRHS() uses this value to form the one-sided positivity-test
+        // scale factors while the current RHS callback interface does not yet
+        // pass dt explicitly.
+        currentDtForLimiter_ = dt;
 
         ti_->step(U_, dt, rhsFun);
         t += dt;
