@@ -6,7 +6,7 @@
 // Active cfg options:
 //   - reconstruction.scheme         : firstOrder | muscl | weno5
 //   - reconstruction.limiter        : none | minmod | vanleer
-//   - reconstruction.positivityFix  : enable post-reconstruction repair
+//   - reconstruction.positivityFix  : legacy option; no longer repairs face states here
 //   - reconstruction.enableFallback : fall back to first order when needed
 //
 // This implementation always uses conservative-characteristic reconstruction
@@ -14,7 +14,6 @@
 
 
 #include "reconstruction.hpp"
-#include "cell_repair.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -28,22 +27,11 @@
 //   3) Project the local stencil to characteristic space.
 //   4) Reconstruct each scalar characteristic component.
 //   5) Map the reconstructed face states back to conservative variables.
-//   6) Apply fallback and positivity repair if needed.
+//   6) Apply high-order to first-order fallback if needed.
 // -----------------------------------------------------------------------------
 
 namespace recon {
 
-static inline cell_repair::CellRepairOptions makeCellRepairOptions(const StateLimits& limits) {
-    cell_repair::CellRepairOptions opts;
-    opts.enable = true;
-    opts.enforceDensityFloor = true;
-    opts.enforcePressureFloor = true;
-    opts.enforceInternalEnergyFloor = false;
-    opts.rhoFloor = limits.rhoMin;
-    opts.pFloor = limits.pMin;
-    opts.eintFloor = 0.0;
-    return opts;
-}
 
 
 // -----------------------------------------------------------------------------
@@ -378,7 +366,9 @@ static inline bool isQuickAdmissibleState(const VecT& Uc, double gamma, const St
 
 // First-order face loading shared by the 2D reconstruction drivers. The caller
 // provides a small loader that fills ULf/URf from neighboring cell-centered states.
-// Optional centralized repair is then applied to each face state.
+// Face-state repair is intentionally not performed here; the active positivity
+// strategy is handled by the solver-side positivity_preserving flux limiter,
+// while cell_repair remains a later emergency fallback.
 template <typename VecT, typename LoadFaceFn>
 static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
                                             bool positivityFix,
@@ -387,33 +377,11 @@ static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
                                             VecT& ULf,
                                             VecT& URf,
                                             ReconstructionStats* stats = nullptr) {
+    (void)positivityFix;
+    (void)gamma;
+    (void)limits;
+    (void)stats;
     loadFace(ULf, URf);
-    if (!positivityFix) {
-        return;
-    }
-    const auto repairOpts = makeCellRepairOptions(limits);
-    if (!isAdmissibleState(ULf, gamma, limits)) {
-        cell_repair::CellRepairResult repairResultL;
-        cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts, &repairResultL);
-        if (stats) {
-            if (repairResultL.success) {
-                ++stats->repairedStateCount;
-            } else {
-                ++stats->failedRepairCount;
-            }
-        }
-    }
-    if (!isAdmissibleState(URf, gamma, limits)) {
-        cell_repair::CellRepairResult repairResultR;
-        cell_repair::repairCellStateInPlace(URf, gamma, repairOpts, &repairResultR);
-        if (stats) {
-            if (repairResultR.success) {
-                ++stats->repairedStateCount;
-            } else {
-                ++stats->failedRepairCount;
-            }
-        }
-    }
 }
 
 template <typename VecT, typename EigenT, int NVAR>
@@ -508,7 +476,8 @@ static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
 //   1) reconstruct with the requested high-order scheme;
 //   2) check admissibility;
 //   3) if enabled, fall back to first order when the high-order state fails;
-//   4) if enabled, attempt centralized positivity repair as a last step.
+//   4) leave any remaining positivity issue to solver-side flux limiting and
+//      later emergency cell repair instead of modifying face states here.
 template <typename VecT, typename ReconstructFaceFn, typename LoadFirstOrderFn>
 static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             bool enableFallback,
@@ -521,6 +490,7 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             VecT& URf,
                                             ReconstructionStats* stats = nullptr)
 {
+    (void)positivityFix;
     CachedStateCheck<VecT> leftCheck;
     CachedStateCheck<VecT> rightCheck;
 
@@ -563,48 +533,10 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
         }
     }
 
-    // As a final safeguard, attempt centralized conservative-state repair on
-    // each face state independently.
-    if (!ok && positivityFix) {
-        bool okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
-        bool okR = admissibleStateCached(URf, gamma, limits, rightCheck);
-        if (!okL || !okR) {
-            const auto repairOpts = makeCellRepairOptions(limits);
-            if (!okL) {
-                cell_repair::CellRepairResult repairResultL;
-                cell_repair::repairCellStateInPlace(ULf, gamma, repairOpts, &repairResultL);
-                if (stats) {
-                    if (repairResultL.success) {
-                        ++stats->repairedStateCount;
-                    } else {
-                        ++stats->failedRepairCount;
-                    }
-                }
-                leftCheck = CachedStateCheck<VecT>{};
-                okL = repairResultL.success;
-                if (okL) {
-                    okL = admissibleStateCached(ULf, gamma, limits, leftCheck);
-                }
-            }
-            if (!okR) {
-                cell_repair::CellRepairResult repairResultR;
-                cell_repair::repairCellStateInPlace(URf, gamma, repairOpts, &repairResultR);
-                if (stats) {
-                    if (repairResultR.success) {
-                        ++stats->repairedStateCount;
-                    } else {
-                        ++stats->failedRepairCount;
-                    }
-                }
-                rightCheck = CachedStateCheck<VecT>{};
-                okR = repairResultR.success;
-                if (okR) {
-                    okR = admissibleStateCached(URf, gamma, limits, rightCheck);
-                }
-            }
-        }
-        ok = okL && okR;
-    }
+    // No post-reconstruction face-state repair is performed here.  If the
+    // first-order fallback is still inadmissible, the state is left unchanged
+    // and downstream diagnostics/emergency repair layers will expose it.
+    (void)ok;
 }
 // -------------------------
 // Reconstruction2D
@@ -702,7 +634,7 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                                                            URf);
     };
 
-    // Finalize each x-face with admissibility checks, fallback, and repair.
+    // Finalize each x-face with admissibility checks and fallback only.
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx + 1; ++i) {
             const int f = i + (nx + 1) * j;
@@ -836,7 +768,7 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                                                            URf);
     };
 
-    // Finalize each y-face with admissibility checks, fallback, and repair.
+    // Finalize each y-face with admissibility checks and fallback only.
     for (int j = 0; j < ny + 1; ++j) {
         for (int i = 0; i < nx; ++i) {
             const int f = i + nx * j;
