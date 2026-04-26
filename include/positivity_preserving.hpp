@@ -1,4 +1,3 @@
-
 #ifndef POSITIVITY_PRESERVING_HPP
 #define POSITIVITY_PRESERVING_HPP
 
@@ -18,7 +17,7 @@
 // The intended usage is inside the solver after high-order face
 // fluxes have been computed and before the residual/RHS is assembled.
 // Reconstruction and Riemann solvers remain independent from this
-// module; cell_repair remains only an emergency fallback.
+// module; any remaining inadmissibility is exposed by diagnostics.
 // ================================================================
 
 namespace positivity_preserving {

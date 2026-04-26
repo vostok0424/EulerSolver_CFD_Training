@@ -329,9 +329,9 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
-    // Reset limiter statistics for this RHS evaluation.  The limiter remains
-    // disabled by default, so this has no effect on the current numerical path
-    // until positivityOptions_.enable is wired to cfg and set to true.
+    // Reset flux-limiter statistics for this RHS evaluation.  These statistics
+    // describe flux-level limiting only; no post-update cell repair is performed
+    // in the solver workflow.
     positivityStats_.reset();
 
     // First solver-side implementation follows the constant multidimensional
@@ -440,7 +440,6 @@ void Solver::recordStateDiagnostics(const int step,
                                                        stateLimits_.pMin);
 
     auto localWithLimiterStats = local;
-    localWithLimiterStats.repairedCellCount = accessLastReconstructionStats(this).repairedStateCount;
     localWithLimiterStats.positivityLimitedFaceCount = positivityStats_.limitedFaceCount;
     localWithLimiterStats.positivityDensityLimitedFaceCount = positivityStats_.densityLimitedFaceCount;
     localWithLimiterStats.positivityPressureLimitedFaceCount = positivityStats_.pressureLimitedFaceCount;
@@ -495,8 +494,8 @@ void Solver::writeFinalOutput(const double t) const {
 }
 
 // Common diagnostics/output handling for the initial state and regular output
-// steps. This helper refreshes ghost cells, records state diagnostics on the
-// scheduled output cadence, and writes the merged step snapshot when needed.
+// steps. This helper refreshes ghost cells, records state-health diagnostics on
+// the scheduled output cadence, and writes the merged step snapshot when needed.
 void Solver::processRegularOutputPhase(const int step,
                                        const double t,
                                        const std::string& diagnosticsTag) {
@@ -528,7 +527,7 @@ void Solver::run() {
     // Build the initial RHS once, then run the initial diagnostics/output phase
     // through the same helper used by regular scheduled outputs.  The initial
     // RHS is not tied to an accepted time step yet, so the positivity limiter
-    // scale bridge is kept at zero and the limiter statistics remain inactive.
+    // scale bridge is kept at zero and only state-health diagnostics are active.
     currentDtForLimiter_ = 0.0;
     applyBC(U_);
     buildRHS(U_, RHS_);

@@ -76,8 +76,8 @@ StateDiagnosticsOptions parseStateDiagnosticsOptions(const Cfg& cfg) {
 
 // Scan the local physical-cell block and summarize state admissibility.
 // Ghost cells are excluded deliberately: this routine is intended to assess
-// the solver-owned interior region after updates, repairs, and boundary
-// application have been completed for the current stage.
+// the solver-owned interior region after updates and boundary application
+// have been completed for the current stage.
 StateScanReport scanInteriorStates(const std::vector<Vec4>& U,
                                    const int nx,
                                    const int ny,
@@ -171,29 +171,27 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
     global.hasBadPressure = (globalFlags[2] != 0);
     global.hasBadInternalEnergy = (globalFlags[3] != 0);
 
-    int localCounts[9] = {
+    int localCounts[8] = {
         local.nonFiniteCount,
         local.badDensityCount,
         local.badPressureCount,
         local.badInternalEnergyCount,
-        local.repairedCellCount,
         local.positivityLimitedFaceCount,
         local.positivityDensityLimitedFaceCount,
         local.positivityPressureLimitedFaceCount,
         local.positivityFailedFaceCount
     };
-    int globalCounts[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    MPI_Allreduce(localCounts, globalCounts, 9, MPI_INT, MPI_SUM, comm);
+    int globalCounts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    MPI_Allreduce(localCounts, globalCounts, 8, MPI_INT, MPI_SUM, comm);
 
     global.nonFiniteCount = globalCounts[0];
     global.badDensityCount = globalCounts[1];
     global.badPressureCount = globalCounts[2];
     global.badInternalEnergyCount = globalCounts[3];
-    global.repairedCellCount = globalCounts[4];
-    global.positivityLimitedFaceCount = globalCounts[5];
-    global.positivityDensityLimitedFaceCount = globalCounts[6];
-    global.positivityPressureLimitedFaceCount = globalCounts[7];
-    global.positivityFailedFaceCount = globalCounts[8];
+    global.positivityLimitedFaceCount = globalCounts[4];
+    global.positivityDensityLimitedFaceCount = globalCounts[5];
+    global.positivityPressureLimitedFaceCount = globalCounts[6];
+    global.positivityFailedFaceCount = globalCounts[7];
 
     const double huge = std::numeric_limits<double>::max();
     const double localMins[6] = {
@@ -261,7 +259,6 @@ void printStateScanReport(const StateScanReport& report,
         << " badDensity=" << report.badDensityCount
         << " badPressure=" << report.badPressureCount
         << " badEint=" << report.badInternalEnergyCount
-        << " repaired=" << report.repairedCellCount
         << " ppLimitedFaces=" << report.positivityLimitedFaceCount
         << " ppDensityFaces=" << report.positivityDensityLimitedFaceCount
         << " ppPressureFaces=" << report.positivityPressureLimitedFaceCount
@@ -312,7 +309,7 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
 
     if (needHeader) {
         fout << "tag,step,time,hasNonFinite,hasBadDensity,hasBadPressure,hasBadInternalEnergy,"
-             << "nonFiniteCount,badDensityCount,badPressureCount,badInternalEnergyCount,repairedCellCount,"
+             << "nonFiniteCount,badDensityCount,badPressureCount,badInternalEnergyCount,"
              << "positivityLimitedFaceCount,positivityDensityLimitedFaceCount,positivityPressureLimitedFaceCount,positivityFailedFaceCount,"
              << "positivityMinThetaDensity,positivityMinThetaPressure,positivityMinThetaFinal,"
              << "minRho,minPressure,minInternalEnergy,minRhoI,minRhoJ,minPressureI,minPressureJ,minInternalEnergyI,minInternalEnergyJ\n";
@@ -329,7 +326,6 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
          << report.badDensityCount << ','
          << report.badPressureCount << ','
          << report.badInternalEnergyCount << ','
-         << report.repairedCellCount << ','
          << report.positivityLimitedFaceCount << ','
          << report.positivityDensityLimitedFaceCount << ','
          << report.positivityPressureLimitedFaceCount << ','

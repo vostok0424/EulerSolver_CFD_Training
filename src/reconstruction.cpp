@@ -6,7 +6,7 @@
 // Active cfg options:
 //   - reconstruction.scheme         : firstOrder | muscl | weno5
 //   - reconstruction.limiter        : none | minmod | vanleer
-//   - reconstruction.positivityFix  : legacy option; no longer repairs face states here
+//   - reconstruction.positivityFix  : enables face-state admissibility checks
 //   - reconstruction.enableFallback : fall back to first order when needed
 //
 // This implementation always uses conservative-characteristic reconstruction
@@ -366,9 +366,9 @@ static inline bool isQuickAdmissibleState(const VecT& Uc, double gamma, const St
 
 // First-order face loading shared by the 2D reconstruction drivers. The caller
 // provides a small loader that fills ULf/URf from neighboring cell-centered states.
-// Face-state repair is intentionally not performed here; the active positivity
-// strategy is handled by the solver-side positivity_preserving flux limiter,
-// while cell_repair remains a later emergency fallback.
+// Face-state repair is intentionally not performed here; any remaining
+// inadmissibility is exposed by diagnostics or handled by solver-side flux
+// limiting.
 template <typename VecT, typename LoadFaceFn>
 static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
                                             bool positivityFix,
@@ -474,10 +474,10 @@ static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
 
 // Final face-state selection pipeline shared by the 2D reconstruction paths:
 //   1) reconstruct with the requested high-order scheme;
-//   2) check admissibility;
+//   2) check admissibility when requested;
 //   3) if enabled, fall back to first order when the high-order state fails;
-//   4) leave any remaining positivity issue to solver-side flux limiting and
-//      later emergency cell repair instead of modifying face states here.
+//   4) leave any remaining inadmissibility to diagnostics or solver-side flux
+//      limiting instead of modifying face states here.
 template <typename VecT, typename ReconstructFaceFn, typename LoadFirstOrderFn>
 static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             bool enableFallback,
@@ -490,7 +490,6 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
                                             VecT& URf,
                                             ReconstructionStats* stats = nullptr)
 {
-    (void)positivityFix;
     CachedStateCheck<VecT> leftCheck;
     CachedStateCheck<VecT> rightCheck;
 
@@ -517,13 +516,14 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
     // First try the requested reconstruction scheme.
     reconstructAndReset(requestedScheme);
 
-    bool ok = faceAdmissible();
+    bool ok = !positivityFix || faceAdmissible();
 
     // If the requested high-order state is not admissible, retry with a
     // first-order face state when fallback is enabled.
     if (!ok && enableFallback && requestedScheme != Scheme::FirstOrder) {
         if (stats) {
             ++stats->fallbackFaceCount;
+            ++stats->admissibilityFallbackCount;
         }
         loadFirstOrderAndReset();
         ok = quickAdmissibleStateCached(ULf, gamma, limits, leftCheck)
@@ -531,11 +531,14 @@ static inline void finalizeFaceWithFallback(Scheme requestedScheme,
         if (!ok) {
             ok = faceAdmissible();
         }
+        if (!ok && stats) {
+            ++stats->failedAdmissibilityFallbackCount;
+        }
     }
 
-    // No post-reconstruction face-state repair is performed here.  If the
+    // No post-reconstruction face-state modification is performed here.  If the
     // first-order fallback is still inadmissible, the state is left unchanged
-    // and downstream diagnostics/emergency repair layers will expose it.
+    // and downstream diagnostics will expose it.
     (void)ok;
 }
 // -------------------------

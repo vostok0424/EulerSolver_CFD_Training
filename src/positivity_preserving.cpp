@@ -366,8 +366,8 @@ FaceLimitResult limitFaceFlux(
     const State rightLowOrderState = makeOneSidedUpdate(rightCell, lowOrderFlux, 1.0, scale);
 
     // If even the low-order one-sided states fail, the limiter cannot prove
-    // positivity for this face.  Return the low-order flux and let the later
-    // diagnostics/cell_repair safety net handle the remaining issue.
+    // positivity for this face. Return the low-order flux, mark the face as
+    // failed, and let diagnostics expose the remaining inadmissibility.
     if (!isAdmissibleForLimiter(leftLowOrderState, gamma, options) ||
         !isAdmissibleForLimiter(rightLowOrderState, gamma, options)) {
         result.flux = lowOrderFlux;

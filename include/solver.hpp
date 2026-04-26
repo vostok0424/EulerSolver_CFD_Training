@@ -156,15 +156,15 @@ private:
     std::string outPrefix_{};
 
     // Shared state-layer thresholds and diagnostics controls used for interior
-    // state checks and reporting.
+    // validity checks and reporting.  These checks only diagnose the conservative
+    // state; they do not modify or repair the solution.
     StateLimits stateLimits_{};
     bool enableStateDiagnostics_{true};
     std::string stateDiagCsvPath_;
 
-    // Positivity-preserving flux limiter controls and statistics.
-    // The limiter is applied after high-order face flux evaluation and before
-    // finite-volume RHS assembly.  It is disabled by default until cfg-side
-    // options are wired in.
+    // Positivity-preserving flux-limiter controls and statistics.
+    // This is a flux-level safeguard used during RHS construction, not a
+    // post-update cell-repair mechanism.
     positivity_preserving::Options positivityOptions_{};
     positivity_preserving::Stats positivityStats_{};
 
@@ -189,12 +189,13 @@ private:
     double computeDt(const std::vector<Vec4>& U) const;
     // Build the spatial finite-volume RHS for the given state vector.
     // Expects ghost cells already valid (call applyBC first).
-    // Uses: reconstruction -> numerical flux -> flux divergence.
+    // Uses: reconstruction -> numerical flux -> optional flux limiting ->
+    // flux divergence.  This routine must not perform post-update state repair.
     void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS);
 
     // Diagnostics/output orchestration helpers.
     // These keep run() focused on the main advance loop while centralizing
-    // cadence checks, diagnostics recording, and merged snapshot writing.
+    // cadence checks, state-health diagnostics, and merged snapshot writing.
     bool shouldWriteStepOutput(int step) const;
     bool shouldRecordStateDiagnostics(int step) const;
     void recordStateDiagnostics(int step, double t, const std::string& tag) const;

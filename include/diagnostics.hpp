@@ -39,9 +39,9 @@ namespace diagnostics {
 // - optional index locations of those minima
 //
 // The same structure can be used for:
-// - purely local reports
-// - accumulated reports
+// - local state-health reports
 // - MPI-reduced global reports
+// - optional step-history records
 struct StateScanReport {
     // Flags indicating whether at least one problematic state of a given type
     // was detected during the scan.
@@ -55,7 +55,6 @@ struct StateScanReport {
     int badDensityCount = 0;
     int badPressureCount = 0;
     int badInternalEnergyCount = 0;
-    int repairedCellCount = 0;
 
     // Positivity-preserving flux-limiter statistics associated with the
     // latest RHS evaluation or time-step stage.  Counts are summed across

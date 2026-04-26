@@ -87,15 +87,16 @@ struct Options {
     // Limiter for MUSCL (ignored for FirstOrder/WENO5).
     Limiter limiter = Limiter::VanLeer;
 
-    // Admissibility / repair controls.
-    // If enabled, reconstruction will call the centralized state-layer repair
-    // routine on reconstructed face states.
+    // Admissibility controls.
+    // If enabled, reconstructed face states are checked against shared
+    // state-layer limits. Invalid high-order candidates are rejected rather
+    // than repaired.
     bool positivityFix = true;
     // If a reconstructed face state is not admissible, retry with a lower-order scheme.
     bool enableFallback = true;
 
     // Numerical tolerances.
-    // Small epsilon used in WENO weights and positivity-related repairing.
+    // Small epsilon used in WENO weights and admissibility-related checks.
     double eps = 1e-12;
 
     // Small admissibility floors used by the centralized state-layer checks.
@@ -124,19 +125,19 @@ struct Options {
 // These counters are intended to be accumulated by the caller per reconstruction pass.
 struct ReconstructionStats {
     int fallbackFaceCount = 0;
-    int repairedStateCount = 0;
-    int failedRepairCount = 0;
+    int admissibilityFallbackCount = 0;
+    int failedAdmissibilityFallbackCount = 0;
 
     void clear() {
         fallbackFaceCount = 0;
-        repairedStateCount = 0;
-        failedRepairCount = 0;
+        admissibilityFallbackCount = 0;
+        failedAdmissibilityFallbackCount = 0;
     }
 
     void accumulate(const ReconstructionStats& other) {
         fallbackFaceCount += other.fallbackFaceCount;
-        repairedStateCount += other.repairedStateCount;
-        failedRepairCount += other.failedRepairCount;
+        admissibilityFallbackCount += other.admissibilityFallbackCount;
+        failedAdmissibilityFallbackCount += other.failedAdmissibilityFallbackCount;
     }
 };
 
@@ -159,7 +160,8 @@ Options readOptions(const Cfg& cfg);
 
 // Reconstruction2D
 // ----------------
-// Characteristic-space reconstruction only; admissibility/repair are delegated to state.hpp/state.cpp.
+// Characteristic-space reconstruction only; admissibility checks use shared
+// state-layer limits from state.hpp/state.cpp.
 // Fixed to conservative-characteristic projection with Roe linearization.
 // Build left/right face states in both x- and y-directions.
 //
