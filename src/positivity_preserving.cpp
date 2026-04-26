@@ -19,7 +19,8 @@ namespace {
 constexpr int kNumEq = 4;
 
 // Normalize user-facing configuration strings so that variants such as
-// "global_lf", "global-lf", and "Global LF" are parsed consistently.
+// "wave_speed_weighted", "wave-speed-weighted", and "Wave Speed Weighted"
+// are parsed consistently.
 std::string normalizeName(const std::string& name)
 {
     std::string out;
@@ -162,17 +163,12 @@ double clamp01(double value)
     return value;
 }
 
-// Parse the requested low-order flux type.  Unknown names intentionally
-// fall back to local Rusanov because it is the safest default here.
+// Parse the requested low-order flux type.  The first active implementation
+// intentionally fixes the positivity fallback flux to first-order local
+// Rusanov.  The cfg key is kept for forward compatibility.
 LowOrderFluxType parseLowOrderFluxType(const std::string& name)
 {
-    const std::string key = normalizeName(name);
-
-    if (key == "globallaxfriedrichs" || key == "globallf" ||
-        key == "laxfriedrichs" || key == "lf") {
-        return LowOrderFluxType::GlobalLaxFriedrichs;
-    }
-
+    (void)name;
     return LowOrderFluxType::Rusanov;
 }
 
@@ -337,71 +333,7 @@ State computeLocalRusanovFlux(
     return flux;
 }
 
-// Construct a global Lax-Friedrichs flux using a solver-provided maximum
-// wave speed.  This is closer to the paper's global LF fallback, but the
-// first solver integration can still use local Rusanov for simplicity.
-State computeGlobalLaxFriedrichsFlux(
-    const State& leftCell,
-    const State& rightCell,
-    Direction direction,
-    double gamma,
-    double globalMaxWaveSpeed)
-{
-    State flux = makeZeroState();
 
-    if (!hasFiniteComponents(leftCell) || !hasFiniteComponents(rightCell) ||
-        leftCell[0] <= 0.0 || rightCell[0] <= 0.0) {
-        return flux;
-    }
-
-    const double rhoL = leftCell[0];
-    const double rhoR = rightCell[0];
-
-    const double uL = leftCell[1] / rhoL;
-    const double vL = leftCell[2] / rhoL;
-    const double uR = rightCell[1] / rhoR;
-    const double vR = rightCell[2] / rhoR;
-
-    const double pL = safePressure(leftCell, gamma);
-    const double pR = safePressure(rightCell, gamma);
-
-    if (pL <= 0.0 || pR <= 0.0) {
-        return flux;
-    }
-
-    State FL = makeZeroState();
-    State FR = makeZeroState();
-
-    if (direction == Direction::X) {
-        FL[0] = leftCell[1];
-        FL[1] = leftCell[1] * uL + pL;
-        FL[2] = leftCell[1] * vL;
-        FL[3] = (leftCell[3] + pL) * uL;
-
-        FR[0] = rightCell[1];
-        FR[1] = rightCell[1] * uR + pR;
-        FR[2] = rightCell[1] * vR;
-        FR[3] = (rightCell[3] + pR) * uR;
-    } else {
-        FL[0] = leftCell[2];
-        FL[1] = leftCell[2] * uL;
-        FL[2] = leftCell[2] * vL + pL;
-        FL[3] = (leftCell[3] + pL) * vL;
-
-        FR[0] = rightCell[2];
-        FR[1] = rightCell[2] * uR;
-        FR[2] = rightCell[2] * vR + pR;
-        FR[3] = (rightCell[3] + pR) * vR;
-    }
-
-    const double a = std::max(0.0, globalMaxWaveSpeed);
-
-    for (int k = 0; k < kNumEq; ++k) {
-        flux[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * a * (rightCell[k] - leftCell[k]);
-    }
-
-    return flux;
-}
 
 // Limit a single face flux.  The method tests whether the high-order flux
 // can produce inadmissible one-sided states; if so, it first limits for
@@ -423,10 +355,9 @@ FaceLimitResult limitFaceFlux(
         return result;
     }
 
-    // First implementation path: use local Rusanov as the low-order
-    // fallback regardless of the configured enum.  The enum is kept so the
-    // solver can later switch between local and global LF without changing
-    // this public interface.
+    // The first active implementation always uses first-order local Rusanov
+    // as the positivity-preserving fallback flux.  The main candidate flux
+    // is provided by the solver through highOrderFlux.
     const State lowOrderFlux = computeLocalRusanovFlux(leftCell, rightCell, direction, gamma);
 
     const State leftHighOrderState = makeOneSidedUpdate(leftCell, highOrderFlux, -1.0, scale);

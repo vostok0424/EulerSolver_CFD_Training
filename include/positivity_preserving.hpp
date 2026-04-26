@@ -11,9 +11,9 @@
 //
 // This module implements an a posteriori positivity-preserving
 // limiter for conservative finite-volume Euler solvers.  It blends
-// a high-order numerical flux with a robust first-order low-order
-// flux whenever the high-order flux may produce negative density or
-// pressure in the local forward-Euler positivity test.
+// the solver-selected high-order candidate flux with a robust first-order
+// local Rusanov fallback flux whenever the candidate flux may produce
+// negative density or pressure in the local forward-Euler positivity test.
 //
 // The intended usage is inside the solver after high-order face
 // fluxes have been computed and before the residual/RHS is assembled.
@@ -31,8 +31,7 @@ enum class Direction {
 };
 
 enum class LowOrderFluxType {
-   Rusanov,
-   GlobalLaxFriedrichs
+   Rusanov
 };
 
 enum class AlphaMode {
@@ -119,7 +118,8 @@ FaceLimitResult limitFaceFlux(
 );
 
 // ----------------------------------------------------------------
-// Low-order flux construction.
+// Low-order positivity fallback flux construction.
+// The first active implementation uses first-order local Rusanov only.
 // ----------------------------------------------------------------
 
 State computeLocalRusanovFlux(
@@ -127,14 +127,6 @@ State computeLocalRusanovFlux(
    const State& rightCell,
    Direction direction,
    double gamma
-);
-
-State computeGlobalLaxFriedrichsFlux(
-   const State& leftCell,
-   const State& rightCell,
-   Direction direction,
-   double gamma,
-   double globalMaxWaveSpeed
 );
 
 // ----------------------------------------------------------------
