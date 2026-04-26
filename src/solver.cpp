@@ -439,8 +439,17 @@ void Solver::recordStateDiagnostics(const int step,
                                                        stateLimits_.rhoMin,
                                                        stateLimits_.pMin);
 
-    auto global = diagnostics::reduceStateScanReportMPI(local, mp_);
-    global.repairedCellCount = accessLastReconstructionStats(this).repairedStateCount;
+    auto localWithLimiterStats = local;
+    localWithLimiterStats.repairedCellCount = accessLastReconstructionStats(this).repairedStateCount;
+    localWithLimiterStats.positivityLimitedFaceCount = positivityStats_.limitedFaceCount;
+    localWithLimiterStats.positivityDensityLimitedFaceCount = positivityStats_.densityLimitedFaceCount;
+    localWithLimiterStats.positivityPressureLimitedFaceCount = positivityStats_.pressureLimitedFaceCount;
+    localWithLimiterStats.positivityFailedFaceCount = positivityStats_.failedFaceCount;
+    localWithLimiterStats.positivityMinThetaDensity = positivityStats_.minThetaDensity;
+    localWithLimiterStats.positivityMinThetaPressure = positivityStats_.minThetaPressure;
+    localWithLimiterStats.positivityMinThetaFinal = positivityStats_.minThetaFinal;
+
+    const auto global = diagnostics::reduceStateScanReportMPI(localWithLimiterStats, mp_);
 
     diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_,
                                            global,
@@ -517,7 +526,10 @@ void Solver::run() {
               << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
 
     // Build the initial RHS once, then run the initial diagnostics/output phase
-    // through the same helper used by regular scheduled outputs.
+    // through the same helper used by regular scheduled outputs.  The initial
+    // RHS is not tied to an accepted time step yet, so the positivity limiter
+    // scale bridge is kept at zero and the limiter statistics remain inactive.
+    currentDtForLimiter_ = 0.0;
     applyBC(U_);
     buildRHS(U_, RHS_);
     processRegularOutputPhase(step, t, "initial");

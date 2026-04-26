@@ -171,35 +171,49 @@ StateScanReport reduceStateScanReportMPI(const StateScanReport& local,
     global.hasBadPressure = (globalFlags[2] != 0);
     global.hasBadInternalEnergy = (globalFlags[3] != 0);
 
-    int localCounts[5] = {
+    int localCounts[9] = {
         local.nonFiniteCount,
         local.badDensityCount,
         local.badPressureCount,
         local.badInternalEnergyCount,
-        local.repairedCellCount
+        local.repairedCellCount,
+        local.positivityLimitedFaceCount,
+        local.positivityDensityLimitedFaceCount,
+        local.positivityPressureLimitedFaceCount,
+        local.positivityFailedFaceCount
     };
-    int globalCounts[5] = {0, 0, 0, 0, 0};
-    MPI_Allreduce(localCounts, globalCounts, 5, MPI_INT, MPI_SUM, comm);
+    int globalCounts[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    MPI_Allreduce(localCounts, globalCounts, 9, MPI_INT, MPI_SUM, comm);
 
     global.nonFiniteCount = globalCounts[0];
     global.badDensityCount = globalCounts[1];
     global.badPressureCount = globalCounts[2];
     global.badInternalEnergyCount = globalCounts[3];
     global.repairedCellCount = globalCounts[4];
+    global.positivityLimitedFaceCount = globalCounts[5];
+    global.positivityDensityLimitedFaceCount = globalCounts[6];
+    global.positivityPressureLimitedFaceCount = globalCounts[7];
+    global.positivityFailedFaceCount = globalCounts[8];
 
     const double huge = std::numeric_limits<double>::max();
-    const double localMins[3] = {
+    const double localMins[6] = {
         local.initialized ? local.minRho : huge,
         local.initialized ? local.minPressure : huge,
-        local.initialized ? local.minInternalEnergy : huge
+        local.initialized ? local.minInternalEnergy : huge,
+        local.positivityMinThetaDensity,
+        local.positivityMinThetaPressure,
+        local.positivityMinThetaFinal
     };
-    double globalMins[3] = {huge, huge, huge};
-    MPI_Allreduce(localMins, globalMins, 3, MPI_DOUBLE, MPI_MIN, comm);
+    double globalMins[6] = {huge, huge, huge, huge, huge, huge};
+    MPI_Allreduce(localMins, globalMins, 6, MPI_DOUBLE, MPI_MIN, comm);
 
     global.minRho = globalMins[0];
     global.minPressure = globalMins[1];
     global.minInternalEnergy = globalMins[2];
     global.initialized = (globalMins[0] < huge) || (globalMins[1] < huge) || (globalMins[2] < huge);
+    global.positivityMinThetaDensity = globalMins[3];
+    global.positivityMinThetaPressure = globalMins[4];
+    global.positivityMinThetaFinal = globalMins[5];
 
     // The minimum values themselves are globally reduced exactly.
     // Their stored index locations, however, remain conditionally valid: a
@@ -247,7 +261,12 @@ void printStateScanReport(const StateScanReport& report,
         << " badDensity=" << report.badDensityCount
         << " badPressure=" << report.badPressureCount
         << " badEint=" << report.badInternalEnergyCount
-        << " repaired=" << report.repairedCellCount;
+        << " repaired=" << report.repairedCellCount
+        << " ppLimitedFaces=" << report.positivityLimitedFaceCount
+        << " ppDensityFaces=" << report.positivityDensityLimitedFaceCount
+        << " ppPressureFaces=" << report.positivityPressureLimitedFaceCount
+        << " ppFailedFaces=" << report.positivityFailedFaceCount
+        << " ppMinTheta=" << report.positivityMinThetaFinal;
 
     if (report.initialized) {
         oss << " minRho=" << report.minRho
@@ -294,6 +313,8 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
     if (needHeader) {
         fout << "tag,step,time,hasNonFinite,hasBadDensity,hasBadPressure,hasBadInternalEnergy,"
              << "nonFiniteCount,badDensityCount,badPressureCount,badInternalEnergyCount,repairedCellCount,"
+             << "positivityLimitedFaceCount,positivityDensityLimitedFaceCount,positivityPressureLimitedFaceCount,positivityFailedFaceCount,"
+             << "positivityMinThetaDensity,positivityMinThetaPressure,positivityMinThetaFinal,"
              << "minRho,minPressure,minInternalEnergy,minRhoI,minRhoJ,minPressureI,minPressureJ,minInternalEnergyI,minInternalEnergyJ\n";
     }
 
@@ -309,6 +330,13 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
          << report.badPressureCount << ','
          << report.badInternalEnergyCount << ','
          << report.repairedCellCount << ','
+         << report.positivityLimitedFaceCount << ','
+         << report.positivityDensityLimitedFaceCount << ','
+         << report.positivityPressureLimitedFaceCount << ','
+         << report.positivityFailedFaceCount << ','
+         << report.positivityMinThetaDensity << ','
+         << report.positivityMinThetaPressure << ','
+         << report.positivityMinThetaFinal << ','
          << report.minRho << ','
          << report.minPressure << ','
          << report.minInternalEnergy << ','

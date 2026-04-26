@@ -34,6 +34,7 @@ namespace diagnostics {
 // The report records:
 // - whether invalid states were detected
 // - how many invalid states were detected by category
+// - positivity-preserving flux-limiter activity, when available
 // - minimum physically important quantities found during the scan
 // - optional index locations of those minima
 //
@@ -55,6 +56,18 @@ struct StateScanReport {
     int badPressureCount = 0;
     int badInternalEnergyCount = 0;
     int repairedCellCount = 0;
+
+    // Positivity-preserving flux-limiter statistics associated with the
+    // latest RHS evaluation or time-step stage.  Counts are summed across
+    // MPI ranks; theta values are reduced by minimum.
+    int positivityLimitedFaceCount = 0;
+    int positivityDensityLimitedFaceCount = 0;
+    int positivityPressureLimitedFaceCount = 0;
+    int positivityFailedFaceCount = 0;
+
+    double positivityMinThetaDensity = 1.0;
+    double positivityMinThetaPressure = 1.0;
+    double positivityMinThetaFinal = 1.0;
 
     // Minimum physically relevant quantities observed in the scanned region.
     double minRho = 0.0;
