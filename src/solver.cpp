@@ -17,6 +17,7 @@
 
 #include "solver.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -33,13 +34,36 @@ namespace {
 
 constexpr const char* kOutputDir2D = "solution";
 
-
 std::unordered_map<const Solver*, recon::ReconstructionStats> gLastReconstructionStats;
 
 recon::ReconstructionStats& accessLastReconstructionStats(const Solver* solver) {
     return gLastReconstructionStats[solver];
 }
 
+VTKDataOutputType parseVTKDataOutputType(const std::string& value) {
+    std::string s = value;
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if ( s == "point" ) {
+        return VTKDataOutputType::Point;
+    }
+    if ( s == "cell" ) {
+        return VTKDataOutputType::Cell;
+    }
+
+    throw std::runtime_error("Unknown output.vtkDataOutputType: " + value +
+                             " (expected point or cell)");
+}
+
+
+const char* vtkDataOutputTypeName(VTKDataOutputType outputType) {
+    switch (outputType) {
+        case VTKDataOutputType::Point: return "POINT_DATA";
+        case VTKDataOutputType::Cell:  return "CELL_DATA";
+    }
+    return "UNKNOWN";
+}
 
 void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
     namespace fs = std::filesystem;
@@ -84,19 +108,35 @@ void writeMergedVtkFile2D(const mpi_parallel::MpiParallel& mp,
                           double x1,
                           double y0,
                           double y1,
-                          double gamma) {
+                          double gamma,
+                          VTKDataOutputType dataOutputType) {
     if (mp.isRoot()) {
-        std::cout << "[2D] Writing merged " << label << " " << path << " at t=" << t << "\n";
+        std::cout << "[2D] Writing merged " << label << " " << path
+                  << " at t=" << t
+                  << " as " << vtkDataOutputTypeName(dataOutputType) << "\n";
     }
 
-    writeVTK2D_GatherMPI(path,
-                         U, nx, ny, ng,
-                         iBeg, jBeg,
-                         nxGlobal, nyGlobal,
-                         x0, x1,
-                         y0, y1,
-                         gamma,
-                         mp.cartComm());
+    switch (dataOutputType) {
+        case VTKDataOutputType::Point:
+            writeVTK2D_PointData_GatherMPI(path,
+                                           U, nx, ny, ng,
+                                           iBeg, jBeg,
+                                           nxGlobal, nyGlobal,
+                                           x0, x1,
+                                           y0, y1,
+                                           gamma,
+                                           mp.cartComm());
+            break;
+
+        case VTKDataOutputType::Cell:
+            writeVTK2D_CellData_GatherMPI(path,
+                                          U, nx, ny, ng,
+                                          iBeg, jBeg,
+                                          nxGlobal, nyGlobal,
+                                          x0, x1, y0, y1, gamma,
+                                          mp.cartComm());
+            break;
+    }
 }
 
 } // namespace
@@ -170,9 +210,10 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
 
     // Shared state-layer thresholds and optional diagnostic controls.
     stateLimits_ = recon_.options().stateLimits();
-    enableStateDiagnostics_ = cfg.getBool("stateDiagnostics.enable", true);
-    stateDiagCsvPath_ = cfg.getString("stateDiagnostics.csv",
-                                      "solution/" + outPrefix_ + "_state_diagnostics.csv");
+    stateDiagnosticsOptions_ = diagnostics::parseStateDiagnosticsOptions(cfg);
+
+    vtkDataOutputType_ = parseVTKDataOutputType(
+        cfg.getString("output.vtkDataOutputType", "point"));
 
     // Positivity-preserving flux limiter controls.  The limiter is disabled
     // by default so existing cases keep their original numerical behavior
@@ -192,9 +233,11 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     if (positivityOptions_.pressureBisectionIters < 1) {
         positivityOptions_.pressureBisectionIters = 1;
     }
+    
     if (positivityOptions_.rhoFloor <= 0.0) {
         positivityOptions_.rhoFloor = stateLimits_.rhoMin;
     }
+    
     if (positivityOptions_.pFloor <= 0.0) {
         positivityOptions_.pFloor = stateLimits_.pMin;
     }
@@ -417,7 +460,15 @@ bool Solver::shouldWriteStepOutput(const int step) const {
 }
 
 bool Solver::shouldRecordStateDiagnostics(const int step) const {
-    return enableStateDiagnostics_ && shouldWriteStepOutput(step);
+    if (!stateDiagnosticsOptions_.enable) {
+        return false;
+    }
+
+    if (!stateDiagnosticsOptions_.includePerStepSummary) {
+        return false;
+    }
+
+    return shouldWriteStepOutput(step);
 }
 
 // Record one reduced state-diagnostics snapshot for the current solver state.
@@ -425,7 +476,7 @@ bool Solver::shouldRecordStateDiagnostics(const int step) const {
 void Solver::recordStateDiagnostics(const int step,
                                     const double t,
                                     const std::string& tag) const {
-    if (!enableStateDiagnostics_) {
+    if (!stateDiagnosticsOptions_.enable) {
         return;
     }
 
@@ -449,8 +500,12 @@ void Solver::recordStateDiagnostics(const int step,
     localWithLimiterStats.positivityMinThetaFinal = positivityStats_.minThetaFinal;
 
     const auto global = diagnostics::reduceStateScanReportMPI(localWithLimiterStats, mp_);
+    
+    if (stateDiagnosticsOptions_.printToStdout && mp_.isRoot()) {
+        diagnostics::printStateScanReport(global, step, t, tag);
+    }
 
-    diagnostics::appendStateDiagnosticsCsv(stateDiagCsvPath_,
+    diagnostics::appendStateDiagnosticsCsv(stateDiagnosticsOptions_.csvFile,
                                            global,
                                            step,
                                            t,
@@ -470,13 +525,13 @@ void Solver::writeOutput(int step, double t) const {
                          U_, grid_.nx, grid_.ny, grid_.ng,
                          grid_.iBeg, grid_.jBeg,
                          grid_.nxGlobal, grid_.nyGlobal,
-                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
+                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
+                         vtkDataOutputType_);
 }
 
-// Note: solver statistics are cached in a file-local map keyed by `this` so
-// reconstruction diagnostics can be forwarded without changing solver.hpp.
-// This translation unit currently creates one long-lived Solver instance per run,
-// so explicit cache cleanup is not required for correctness during normal use.
+// Note: reconstruction statistics are cached in a file-local map keyed by `this`
+// so reconstruction diagnostics can be forwarded without expanding the public
+// solver interface. The VTK output type is stored directly as a Solver member.
 
 // Write the terminal merged snapshot independent of the regular output cadence.
 void Solver::writeFinalOutput(const double t) const {
@@ -490,21 +545,26 @@ void Solver::writeFinalOutput(const double t) const {
                          U_, grid_.nx, grid_.ny, grid_.ng,
                          grid_.iBeg, grid_.jBeg,
                          grid_.nxGlobal, grid_.nyGlobal,
-                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_);
+                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
+                         vtkDataOutputType_);
 }
 
 // Common diagnostics/output handling for the initial state and regular output
-// steps. This helper refreshes ghost cells, records state-health diagnostics on
-// the scheduled output cadence, and writes the merged step snapshot when needed.
+// steps. This helper refreshes ghost cells, records the initial diagnostics
+// whenever diagnostics are enabled, records regular diagnostics on the selected
+// output cadence, and writes the merged step snapshot when needed.
 void Solver::processRegularOutputPhase(const int step,
                                        const double t,
                                        const std::string& diagnosticsTag) {
     applyBC(U_);
 
-    if (shouldRecordStateDiagnostics(step)) {
+    const bool isInitial = (diagnosticsTag == "initial");
+
+    if (stateDiagnosticsOptions_.enable &&
+        (isInitial || shouldRecordStateDiagnostics(step))) {
         recordStateDiagnostics(step, t, diagnosticsTag);
     }
-
+    
     writeOutput(step, t);
 }
 
@@ -566,7 +626,7 @@ void Solver::run() {
         applyBC(U_);
 
         const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
-        if (enableStateDiagnostics_ && !finalAlreadyRecorded) {
+        if (stateDiagnosticsOptions_.enable && !finalAlreadyRecorded) {
             recordStateDiagnostics(step, t, "final");
         }
         

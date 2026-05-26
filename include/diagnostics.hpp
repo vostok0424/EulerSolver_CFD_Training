@@ -2,17 +2,11 @@
 
 // Diagnostics module for solution-state inspection and reporting.
 //
-// This header defines:
-// - data structures for state-scan summaries
-// - runtime options for diagnostics output
-// - interfaces for local scanning, MPI reduction, console printing,
-//   and CSV history output
-//
 // Design intent:
-// - diagnostics observes solution quality
-// - diagnostics does not repair solution states
-// - diagnostics may depend on state utilities, but state must not depend
-//   on diagnostics
+// - diagnostics observes solution quality but never repairs states;
+// - diagnostics may depend on state utilities, but state must not depend on diagnostics;
+// - runtime controls are collected in StateDiagnosticsOptions so Solver can keep
+//   diagnostics configuration in one place.
 
 #include <string>
 #include <vector>
@@ -28,37 +22,30 @@ class Cfg;
 // All diagnostics-related types and interfaces live in this namespace.
 namespace diagnostics {
 
-// Summary of a state-quality scan over the local interior cells or over a
-// globally reduced domain.
+// Compact report for local or MPI-reduced solution diagnostics.
 //
-// The report records:
-// - whether invalid states were detected
-// - how many invalid states were detected by category
-// - positivity-preserving flux-limiter activity, when available
-// - minimum physically important quantities found during the scan
-// - optional index locations of those minima
+// It combines two groups of information:
+// - state-health statistics from scanning interior conservative states;
+// - optional positivity-preserving flux-limiter statistics supplied by Solver.
 //
-// The same structure can be used for:
-// - local state-health reports
-// - MPI-reduced global reports
-// - optional step-history records
+// Diagnostics are observational only: this report records problems but does not
+// modify the numerical solution.
 struct StateScanReport {
-    // Flags indicating whether at least one problematic state of a given type
-    // was detected during the scan.
+    // Failure flags. These are equivalent to the corresponding count > 0,
+    // but are kept for quick readability in summaries.
     bool hasNonFinite = false;
     bool hasBadDensity = false;
     bool hasBadPressure = false;
     bool hasBadInternalEnergy = false;
 
-    // Counts of problematic cells by category.
+    // Problem-cell counts by category.
     int nonFiniteCount = 0;
     int badDensityCount = 0;
     int badPressureCount = 0;
     int badInternalEnergyCount = 0;
 
-    // Positivity-preserving flux-limiter statistics associated with the
-    // latest RHS evaluation or time-step stage.  Counts are summed across
-    // MPI ranks; theta values are reduced by minimum.
+    // Positivity-preserving flux-limiter statistics from the latest RHS build.
+    // Counts are summed across MPI ranks; theta values use global minima.
     int positivityLimitedFaceCount = 0;
     int positivityDensityLimitedFaceCount = 0;
     int positivityPressureLimitedFaceCount = 0;
@@ -73,9 +60,8 @@ struct StateScanReport {
     double minPressure = 0.0;
     double minInternalEnergy = 0.0;
 
-    // Optional index locations associated with the minima above.
-    // These indices are typically local interior indices unless the report has
-    // been post-processed into another coordinate convention.
+    // Optional locations of the minima above. In MPI-reduced reports these may
+    // be reset to (-1, -1) when a reliable global location is unavailable.
     int minRhoI = -1;
     int minRhoJ = -1;
     int minPressureI = -1;
@@ -87,20 +73,22 @@ struct StateScanReport {
     bool initialized = false;
 };
 
-// Runtime options controlling whether diagnostics are enabled and how they are
-// written.
+// Runtime controls for diagnostics output. Under the preferred Solver-side
+// wiring, Solver owns one instance of this structure and uses it for enable,
+// CSV path, and optional stdout/step-summary controls.
 struct StateDiagnosticsOptions {
-    // Master switch for state diagnostics.
-    bool enable = false;
-    // Output CSV file used to append step-by-step diagnostics history.
-    std::string csvFile = "state_diagnostics.csv";
-    // Whether to print a textual summary to standard output.
+    bool enable = true;
+    std::string csvFile = "solution/state_diagnostics_2d.csv";
     bool printToStdout = true;
-    // Whether to include a per-step summary entry when diagnostics are enabled.
     bool includePerStepSummary = true;
 };
 
 // Parse diagnostics-related options from the global configuration.
+// Expected keys include:
+// - stateDiagnostics.enable
+// - stateDiagnostics.csv
+// - stateDiagnostics.printToStdout
+// - stateDiagnostics.includePerStepSummary
 StateDiagnosticsOptions parseStateDiagnosticsOptions(const Cfg& cfg);
 
 // Scan the interior cells of a conservative solution field and build a local
@@ -135,10 +123,8 @@ void printStateScanReport(const StateScanReport& report,
                           double time,
                           const std::string& prefix = "[state diagnostics]");
 
-// Append one diagnostics record to a CSV history file.
-//
-// If requested, a header row is written automatically when the file is first
-// created.
+// Append one compact diagnostics record to a CSV history file. A header row is
+// written automatically when the file is first created.
 void appendStateDiagnosticsCsv(const std::string& fileName,
                                const StateScanReport& report,
                                int step,

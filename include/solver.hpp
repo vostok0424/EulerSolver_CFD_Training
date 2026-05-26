@@ -155,12 +155,16 @@ private:
     bool writeFinal_{};
     std::string outPrefix_{};
 
+    // VTK output data type selected from cfg:
+    // - Point: write POINT_DATA by averaging cell-centered values to grid points.
+    // - Cell : write CELL_DATA directly from finite-volume cell-centered values.
+    VTKDataOutputType vtkDataOutputType_{VTKDataOutputType::Point};
+
     // Shared state-layer thresholds and diagnostics controls used for interior
     // validity checks and reporting.  These checks only diagnose the conservative
     // state; they do not modify or repair the solution.
     StateLimits stateLimits_{};
-    bool enableStateDiagnostics_{true};
-    std::string stateDiagCsvPath_;
+    diagnostics::StateDiagnosticsOptions stateDiagnosticsOptions_{};
 
     // Positivity-preserving flux-limiter controls and statistics.
     // This is a flux-level safeguard used during RHS construction, not a

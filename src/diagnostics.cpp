@@ -60,16 +60,16 @@ inline bool fileExists(const std::string& fileName) {
 
 namespace diagnostics {
 
-// Parse optional state-diagnostics controls from the case configuration.
-// Missing entries fall back to conservative defaults so diagnostics can be
-// enabled incrementally without requiring all keys to be present.
+// Parse state-diagnostics controls from the case configuration.
+// Missing entries fall back to the defaults defined by StateDiagnosticsOptions.
 StateDiagnosticsOptions parseStateDiagnosticsOptions(const Cfg& cfg) {
     StateDiagnosticsOptions opts;
 
-    opts.enable = cfg.getBool("stateDiagnostics.enable", false);
-    opts.csvFile = cfg.getString("stateDiagnostics.csv", "state_diagnostics.csv");
-    opts.printToStdout = cfg.getBool("stateDiagnostics.printToStdout", true);
-    opts.includePerStepSummary = cfg.getBool("stateDiagnostics.includePerStepSummary", true);
+    opts.enable = cfg.getBool("stateDiagnostics.enable", opts.enable);
+    opts.csvFile = cfg.getString("stateDiagnostics.csv", opts.csvFile);
+    opts.printToStdout = cfg.getBool("stateDiagnostics.printToStdout", opts.printToStdout);
+    opts.includePerStepSummary = cfg.getBool("stateDiagnostics.includePerStepSummary",
+                                             opts.includePerStepSummary);
 
     return opts;
 }
@@ -244,9 +244,8 @@ bool hasStateFailure(const StateScanReport& report) {
            report.hasBadInternalEnergy;
 }
 
-// Emit one compact human-readable diagnostics summary line.
-// This is intended for console monitoring and mirrors the key fields written
-// to CSV without introducing additional formatting dependencies.
+// Emit one compact human-readable diagnostics summary line. Keep this aligned
+// with the compact CSV fields so stdout and file diagnostics tell the same story.
 void printStateScanReport(const StateScanReport& report,
                           const int step,
                           const double time,
@@ -260,8 +259,6 @@ void printStateScanReport(const StateScanReport& report,
         << " badPressure=" << report.badPressureCount
         << " badEint=" << report.badInternalEnergyCount
         << " ppLimitedFaces=" << report.positivityLimitedFaceCount
-        << " ppDensityFaces=" << report.positivityDensityLimitedFaceCount
-        << " ppPressureFaces=" << report.positivityPressureLimitedFaceCount
         << " ppFailedFaces=" << report.positivityFailedFaceCount
         << " ppMinTheta=" << report.positivityMinThetaFinal;
 
@@ -269,22 +266,12 @@ void printStateScanReport(const StateScanReport& report,
         oss << " minRho=" << report.minRho
             << " minP=" << report.minPressure
             << " minEint=" << report.minInternalEnergy;
-
-        if (report.minRhoI >= 0 && report.minRhoJ >= 0) {
-            oss << " minRho@(" << report.minRhoI << "," << report.minRhoJ << ")";
-        }
-        if (report.minPressureI >= 0 && report.minPressureJ >= 0) {
-            oss << " minP@(" << report.minPressureI << "," << report.minPressureJ << ")";
-        }
-        if (report.minInternalEnergyI >= 0 && report.minInternalEnergyJ >= 0) {
-            oss << " minEint@(" << report.minInternalEnergyI << "," << report.minInternalEnergyJ << ")";
-        }
     }
 
     std::cout << oss.str() << std::endl;
 }
 
-// Append one diagnostics record to the CSV log on the root rank.
+// Append one compact diagnostics record to the CSV log on the root rank.
 // The header row is written only when the file does not yet exist.
 void appendStateDiagnosticsCsv(const std::string& fileName,
                                const StateScanReport& report,
@@ -308,40 +295,25 @@ void appendStateDiagnosticsCsv(const std::string& fileName,
     }
 
     if (needHeader) {
-        fout << "tag,step,time,hasNonFinite,hasBadDensity,hasBadPressure,hasBadInternalEnergy,"
+        fout << "tag,step,time,"
              << "nonFiniteCount,badDensityCount,badPressureCount,badInternalEnergyCount,"
-             << "positivityLimitedFaceCount,positivityDensityLimitedFaceCount,positivityPressureLimitedFaceCount,positivityFailedFaceCount,"
-             << "positivityMinThetaDensity,positivityMinThetaPressure,positivityMinThetaFinal,"
-             << "minRho,minPressure,minInternalEnergy,minRhoI,minRhoJ,minPressureI,minPressureJ,minInternalEnergyI,minInternalEnergyJ\n";
+             << "positivityLimitedFaceCount,positivityFailedFaceCount,positivityMinThetaFinal,"
+             << "minRho,minPressure,minInternalEnergy\n";
     }
 
     fout << tag << ','
          << step << ','
          << std::setprecision(16) << time << ','
-         << (report.hasNonFinite ? 1 : 0) << ','
-         << (report.hasBadDensity ? 1 : 0) << ','
-         << (report.hasBadPressure ? 1 : 0) << ','
-         << (report.hasBadInternalEnergy ? 1 : 0) << ','
          << report.nonFiniteCount << ','
          << report.badDensityCount << ','
          << report.badPressureCount << ','
          << report.badInternalEnergyCount << ','
          << report.positivityLimitedFaceCount << ','
-         << report.positivityDensityLimitedFaceCount << ','
-         << report.positivityPressureLimitedFaceCount << ','
          << report.positivityFailedFaceCount << ','
-         << report.positivityMinThetaDensity << ','
-         << report.positivityMinThetaPressure << ','
          << report.positivityMinThetaFinal << ','
          << report.minRho << ','
          << report.minPressure << ','
-         << report.minInternalEnergy << ','
-         << report.minRhoI << ','
-         << report.minRhoJ << ','
-         << report.minPressureI << ','
-         << report.minPressureJ << ','
-         << report.minInternalEnergyI << ','
-         << report.minInternalEnergyJ << '\n';
+         << report.minInternalEnergy << '\n';
 }
 
 } // namespace diagnostics
