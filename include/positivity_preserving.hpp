@@ -1,6 +1,3 @@
-#ifndef POSITIVITY_PRESERVING_HPP
-#define POSITIVITY_PRESERVING_HPP
-
 
 #include <string>
 #include "state.hpp"
@@ -157,4 +154,4 @@ bool isAdmissibleForLimiter(
 
 } // namespace positivity_preserving
 
-#endif // POSITIVITY_PRESERVING_HPP
+

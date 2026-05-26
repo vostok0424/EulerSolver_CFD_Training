@@ -33,7 +33,6 @@
 namespace recon {
 
 
-
 // -----------------------------------------------------------------------------
 // 1) Limiter utilities
 // -----------------------------------------------------------------------------
@@ -150,7 +149,7 @@ Options readOptions(const Cfg& cfg) {
     opt.scheme   = parseScheme(cfg.getString("reconstruction.scheme", "firstOrder"));
     opt.limiter  = parseLimiter(cfg.getString("reconstruction.limiter", "vanleer"));
 
-    opt.positivityFix = cfg.getBool("reconstruction.positivityFix", true);
+    opt.positivityFix  = cfg.getBool("reconstruction.positivityFix", true);
     opt.enableFallback = cfg.getBool("reconstruction.enableFallback", true);
     opt.eps            = cfg.getDouble("reconstruction.eps", 1e-12);
     opt.rhoMin         = cfg.getDouble("reconstruction.rhoMin", 1e-12);
@@ -804,6 +803,6 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
         stats->accumulate(localStats);
     }
 }
-} // namespace recon
+} // namespace reconstruction
 
 
