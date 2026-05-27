@@ -7,7 +7,7 @@
 // High-level workflow (see solver.cpp):
 //   1) Read cfg, mesh, run-control, and boundary-condition settings.
 //   2) Create the numerical modules:
-//        - IC (initial condition) or setFields overrides
+//        - setFields background-plus-region initial-field setup
 //        - characteristic reconstruction for face states
 //        - numerical flux evaluation on x/y faces
 //        - explicit time integrator for time advancement
@@ -31,7 +31,6 @@
 #include "time_integrator.hpp"
 #include "mpi_parallel.hpp"
 #include "reconstruction.hpp"
-#include "ic.hpp"
 #include "setFields.hpp"
 #include "io.hpp"
 #include "boundary.hpp"
@@ -145,7 +144,6 @@ private:
     // Pluggable numerical modules selected from cfg.
     std::unique_ptr<FluxD<2>> flux_;
     std::unique_ptr<TimeIntegratorT<Vec4>> ti_;
-    std::unique_ptr<IC> ic_;
 
     // Gas model and run-control parameters.
     double gamma_{};

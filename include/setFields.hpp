@@ -6,50 +6,67 @@
 
 /*
   setFields.hpp
-  ------------
-  OpenFOAM-like field initialization utility.
+  -------------
+  OpenFOAM-like initial-field setup utility.
 
   Purpose
-  - This module provides a simple, cfg-driven way to overwrite parts of the initial
-    field after the base initial condition (IC) has been created.
-  - Typical workflow in the solver:
-      1) Build the base IC (e.g., Sod) into U.
-      2) If setFields.use == true, call setFields2D() to apply region overrides.
-      3) Apply boundary conditions (ghost cells) before the first time step.
+  - This module provides a cfg-driven way to construct the complete initial
+    conservative field for the 2D Euler solver.
+  - The initialization procedure is:
+      1) Fill all local interior cells with the background primitive state
+         specified by setFields.bg.*.
+      2) Apply rectangular region overrides in ascending region index.
+      3) Apply boundary conditions later in the solver to fill ghost cells.
+  - This is now the single initial-field path used by the solver; the legacy
+    built-in IC module has been removed.
 
   Data model
   - U is cell-centered and includes ghost cells.
-  - setFields only modifies interior cells; ghost cells are handled later by BCs.
-  - Variables are specified in primitive form (rho, u, v, p) and converted to
-    conservative storage in U.
+  - setFields2D() modifies interior cells only; ghost cells are handled later
+    by the boundary-condition module.
+  - Input values are specified in primitive form (rho, u, v, p) and converted
+    to conservative storage in U.
+  - If multiple regions overlap, later regions overwrite earlier ones.
 
   Config keys
 
-  Common:
-    setFields.use = true|false
-    setFields.bg.rho, setFields.bg.u, setFields.bg.v, setFields.bg.p
+  Background state:
+    setFields.bg.rho
+    setFields.bg.u
+    setFields.bg.v
+    setFields.bg.p
 
-  2D regions:
+  Region count:
     setFields.nRegions = N
-    setFields.regionK.xMin, setFields.regionK.xMax
-    setFields.regionK.yMin, setFields.regionK.yMax
-    setFields.regionK.rho,  setFields.regionK.u,  setFields.regionK.v, setFields.regionK.p
-    or shock-defined mode:
-    setFields.regionK.shockMach, setFields.regionK.rho, setFields.regionK.p
-    optional: setFields.regionK.u, setFields.regionK.v, setFields.regionK.shockDir
+
+  2D rectangular regions:
+    setFields.regionK.xMin
+    setFields.regionK.xMax
+    setFields.regionK.yMin
+    setFields.regionK.yMax
+
+  Direct primitive region state:
+    setFields.regionK.rho
+    setFields.regionK.u
+    setFields.regionK.v
+    setFields.regionK.p
+
+  Optional shock-defined region state:
+    setFields.regionK.shockMach
+    setFields.regionK.shockDir
 
   Notes
-  - Region indices K are defined by the implementation in setFields.cpp.
-  - Overlaps: if multiple regions overlap, later regions typically overwrite earlier ones.
-  - If setFields.regionK.shockMach is present, that region is interpreted in incident-shock mode.
-    In this mode, rho/p/(u,v) describe the ahead-of-shock primitive state, and the
-    region is filled with the computed post-shock state.
-  - shockDir is intended to specify the shock propagation direction (for example +x, -x,
-    +y, -y). The accepted values are defined in setFields.cpp.
+  - Region indices K start from 1.
+  - If setFields.regionK.shockMach > 1, the region is interpreted in
+    incident-shock mode. In this mode, rho/p/(u,v) describe the ahead-of-shock
+    primitive state, and the region is filled with the computed post-shock state.
+  - shockDir specifies the shock propagation direction, for example +x, -x,
+    +y, or -y. The accepted values are defined in setFields.cpp.
 */
 
-// Apply cfg-defined region overrides to a 2D field U.
-// Modifies interior cells only (ghost cells are not written here).
+// Build the 2D initial conservative field from cfg-defined background and
+// rectangular region settings. Modifies interior cells only; ghost cells are
+// filled later by boundary conditions.
 void setFields2D(std::vector<Vec4>& U,
                  int nx, int ny, int ng,
                  double x0, double x1,

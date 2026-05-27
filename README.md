@@ -26,9 +26,10 @@ The current codebase supports the following main capabilities.
 - characteristic-based reconstruction only
 - configurable numerical fluxes
 - configurable boundary conditions on all four sides
-- two initialization paths: built-in IC or setFields-style region initialization
+- setFields-style background-plus-region initialization
 - merged single-file VTK output for serial and MPI runs
-- optional CSV state-diagnostics output
+- selectable VTK `POINT_DATA` or `CELL_DATA` output
+- compact optional CSV state-diagnostics output
 
 The legacy 1D pathway has been removed from the active build and runtime path.
 
@@ -122,34 +123,11 @@ Notes:
 For inlet boundaries, primitive values must be provided.
 For outlet boundaries, outlet pressure must be provided.
 
-## Initialization Paths
+## Initialization
 
-The current code provides two initialization routes.
+Initial fields are defined through the `setFields` configuration keys.
 
-### 1. Built-in IC path
-
-Use:
-
-- `setFields.use = false`
-- `ic = sodx`
-
-The currently implemented built-in IC is:
-
-- `sodx`
-
-Relevant keys are:
-
-- `ic.sodx.xMid`
-- `ic.sodx.rhoL`, `ic.sodx.uL`, `ic.sodx.vL`, `ic.sodx.pL`
-- `ic.sodx.rhoR`, `ic.sodx.uR`, `ic.sodx.vR`, `ic.sodx.pR`
-
-### 2. setFields path
-
-Use:
-
-- `setFields.use = true`
-
-This path initializes the field by:
+The solver initializes the field by:
 
 1. filling the full domain with a background primitive state
 2. overwriting rectangular regions in sequence
@@ -161,6 +139,8 @@ Currently supported setFields features include:
 - optional shock-based region construction using `shockMach` and `shockDir`
 
 If regions overlap, later regions overwrite earlier ones.
+
+A Sod-x initial condition can be represented by using the right state as the background field and the left state as one rectangular override region.
 
 ## Output
 
@@ -179,18 +159,26 @@ Current VTK output fields are:
 - rho_v
 - E
 
-The VTK writer uses a rectilinear grid and writes point data obtained from surrounding cell averages.
+The VTK writer uses a rectilinear grid and can write either:
+
+- `POINT_DATA`, obtained by averaging surrounding cell-centered values to grid points
+- `CELL_DATA`, written directly from finite-volume cell-centered values
+
+`POINT_DATA` is useful for smoother visualization in ParaView, while `CELL_DATA` is better for exact cell-wise inspection of discontinuities, conservation behavior, and diagnostics.
 
 Typical output control keys are:
 
 - `outPrefix`
 - `outputEvery`
 - `writeFinal`
+- `output.vtkDataOutputType`
 
 Typical diagnostics keys are:
 
 - `stateDiagnostics.enable`
 - `stateDiagnostics.csv`
+- `stateDiagnostics.printToStdout`
+- `stateDiagnostics.includePerStepSummary`
 
 ## Repository Structure
 
@@ -213,8 +201,7 @@ EulerSolver_CFD_Training/
 - `src/reconstruction.cpp`    characteristic reconstruction and admissibility control
 - `src/time_integrator.cpp`   explicit time integrators
 - `src/boundary.cpp`          boundary-condition parsing and ghost-cell filling
-- `src/ic.cpp`                built-in initial conditions
-- `src/setFields.cpp`         region-based initialization
+- `src/setFields.cpp`         background-plus-region initial-field setup
 - `src/io.cpp`                VTK output and MPI gather/write
 - `src/mpi_parallel.cpp`      Cartesian MPI topology and halo exchange
 - `src/state.cpp`             state conversion, admissibility checks, diagnostics
@@ -278,33 +265,27 @@ By default, the build produces:
 The executable accepts an optional case file path.
 
 ```bash
-./solver cases/case2d_sod.cfg
+./solver cases/case2d.cfg
 ```
 
 If no configuration file is provided, the solver defaults to:
 
 ```bash
-cases/case2d_sod.cfg
+cases/case2d.cfg
 ```
 
-### Important note about the default case
+### Important note about MPI decomposition
 
-The current default case file `cases/case2d_sod.cfg` uses:
+Each case file defines its MPI decomposition through:
 
 ```text
-mpi.px = 4
-mpi.py = 2
+mpi.px = ...
+mpi.py = ...
 ```
 
-So it should be run with 8 MPI processes unless you edit the decomposition.
+The product `mpi.px * mpi.py` must match the number of MPI processes used at runtime.
 
-Example:
-
-```bash
-mpirun -np 8 ./solver cases/case2d_sod.cfg
-```
-
-If you want a serial run, change the case file to:
+For a serial run, use:
 
 ```text
 mpi.px = 1
@@ -314,7 +295,7 @@ mpi.py = 1
 and then run:
 
 ```bash
-./solver cases/case2d_sod.cfg
+./solver cases/case2d.cfg
 ```
 
 ### General MPI rule
@@ -331,17 +312,22 @@ If this condition is not satisfied, the solver will stop during MPI topology set
 
 The repository currently includes the following example case files.
 
-- `cases/case2d_sod.cfg`
-- `cases/quad_riemann.cfg`
+- `cases/case2d.cfg`
+- `cases/sod.cfg`
+- `cases/lax.cfg`
 - `cases/cfg_template.cfg`
 
-### `cases/case2d_sod.cfg`
+### `cases/case2d.cfg`
 
-A narrow-channel 2D Sod-type test configured through `setFields`.
+A 2D test case configured through `setFields` rectangular regions.
 
-### `cases/quad_riemann.cfg`
+### `cases/sod.cfg`
 
-A four-region 2D Riemann-type problem configured through rectangular regions.
+A Sod-x test represented by a background right state and one left-state rectangular override region.
+
+### `cases/lax.cfg`
+
+A Lax-type 1D-in-x Riemann test represented through the same `setFields` background-plus-region syntax.
 
 ### `cases/cfg_template.cfg`
 
@@ -373,6 +359,7 @@ mpi.py = 1
 outPrefix = solution
 outputEvery = 100
 writeFinal = true
+output.vtkDataOutputType = point
 ```
 
 ### Core keys
@@ -443,42 +430,29 @@ reconstruction.pMin = 1e-12
 reconstruction.variables = characteristic
 ```
 
-### Built-in IC example
+### setFields example: Sod-x
 
 ```text
-setFields.use = false
-ic = sodx
-ic.sodx.xMid = 0.5
-ic.sodx.rhoL = 1.0
-ic.sodx.uL   = 0.0
-ic.sodx.vL   = 0.0
-ic.sodx.pL   = 1.0
-ic.sodx.rhoR = 0.125
-ic.sodx.uR   = 0.0
-ic.sodx.vR   = 0.0
-ic.sodx.pR   = 0.1
-```
-
-### setFields example
-
-```text
-setFields.use = true
-setFields.bg.rho = 1.0
+setFields.bg.rho = 0.125
 setFields.bg.u   = 0.0
 setFields.bg.v   = 0.0
-setFields.bg.p   = 1.0
+setFields.bg.p   = 0.1
+
 setFields.nRegions = 1
+
 setFields.region1.xMin = 0.0
 setFields.region1.xMax = 0.5
 setFields.region1.yMin = 0.0
 setFields.region1.yMax = 1.0
-setFields.region1.rho  = 2.0
+setFields.region1.rho  = 1.0
 setFields.region1.u    = 0.0
 setFields.region1.v    = 0.0
-setFields.region1.p    = 2.0
+setFields.region1.p    = 1.0
 setFields.region1.shockMach = -1.0
 setFields.region1.shockDir  = +x
 ```
+
+This represents a Sod-x problem by using the right state as the background and overwriting the left half of the domain.
 
 ## Current Limitations
 
@@ -488,7 +462,6 @@ At the current stage, the code has the following practical limitations.
 - structured Cartesian grids only
 - MPI is required at build time
 - no periodic boundary support
-- built-in IC support is currently minimal
 - output format is currently legacy ASCII VTK
 - this is still an actively evolving training and research prototype
 
@@ -499,7 +472,7 @@ The current code structure is intended to support future work such as:
 - further solver-architecture refinement
 - stronger verification and benchmark coverage
 - improved diagnostics and output variables
-- additional initial-condition and boundary-condition options
+- extended setFields options for more complex initial and boundary-driven test problems
 - more advanced shock and detonation-oriented test problems
 - continued numerical-method development on the current modular framework
 

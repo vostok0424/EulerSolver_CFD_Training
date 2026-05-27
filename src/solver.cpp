@@ -146,8 +146,8 @@ static_assert(std::is_trivially_copyable_v<Vec4>, "Vec4 must be trivially copyab
 static_assert(sizeof(Vec4) == 4 * sizeof(double), "Vec4 must be exactly 4 doubles (no padding)");
 
 // Constructor: read configuration, build local subdomain, allocate fields,
-// choose numerical methods (flux/reconstruction/time integrator), and initialise
-// interior cells either via an IC (ic=...) or setFields.
+// choose numerical methods (flux/reconstruction/time integrator), and initialize
+// interior cells through setFields.
 Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     : mp_(mp), recon_(cfg)
 {
@@ -191,7 +191,7 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     const double dxG = grid_.dx();
     const double dyG = grid_.dy();
 
-    // Local physical extents for this block (so IC/VTK coordinates are correct)
+    // Local physical extents for this block, used by setFields and VTK output.
     const double x0Loc = grid_.x0 + static_cast<double>(grid_.iBeg) * dxG;
     const double x1Loc = grid_.x0 + static_cast<double>(grid_.iBeg + grid_.nx) * dxG;
     const double y0Loc = grid_.y0 + static_cast<double>(grid_.jBeg) * dyG;
@@ -272,17 +272,15 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     // 7) Initialise interior fields
     // -----------------------------
     // Only this-rank interior block is initialised here; ghosts are filled later.
-    const bool useSetFields = cfg.getBool("setFields.use", false);
-    if (!useSetFields) {
-        ic_.reset(makeIC(cfg.getString("ic", "riemannx")));
-    }
+  
 
     // Initialize only this-rank block using local physical extents.
-    if (useSetFields) {
-        setFields2D(U_, grid_.nx, grid_.ny, grid_.ng, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
-    } else {
-        ic_->apply(U_, grid_.nx, grid_.ny, grid_.ng, x0Loc, x1Loc, y0Loc, y1Loc, gamma_, cfg);
-    }
+    setFields2D(U_,
+                grid_.nx, grid_.ny, grid_.ng,
+                x0Loc, x1Loc,
+                y0Loc, y1Loc,
+                gamma_,
+                cfg);
 }
 
 // Fill ghost cells for one solver state.
