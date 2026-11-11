@@ -8,7 +8,7 @@
 //   - reconstruction.limiter        : none | minmod | vanleer
 //
 // This implementation always uses conservative-characteristic reconstruction
-// with a Roe face linearization.
+// with a face linearization at the arithmetic mean of conservative states.
 
 
 #include "reconstruction.hpp"
@@ -21,7 +21,7 @@
 // -----------------------------------------------------------------------------
 // Shared reconstruction pattern:
 //   1) Check array sizes and ghost-cell width.
-//   2) Build a Roe face eigensystem for the local 2D face orientation.
+//   2) Build an eigensystem at the conservative arithmetic-mean state for the local 2D face orientation.
 //   3) Project the local stencil to characteristic space.
 //   4) Reconstruct each scalar characteristic component.
 //   5) Map the reconstructed face states back to conservative variables.
@@ -164,53 +164,27 @@ Options readOptions(const Cfg& cfg) {
 // 4) Characteristic helpers
 // -----------------------------------------------------------------------------
 
-// Roe eigensystem used by characteristic reconstruction.
+// Eigensystem used by characteristic reconstruction.
 struct Eigen4 { double R[4][4]; double L[4][4]; };
 
 
 
-// Roe face state for 2D reconstruction.
+// Reference state Uavg = (ULc + URc)/2 for 2D characteristic reconstruction.
 static inline void faceState2D(const Vec4& ULc, const Vec4& URc, double gamma,
                                double& rho0, double& u0, double& v0, double& p0, double& H0, double& c0) {
-    const double rhoL = ULc[0];
-    const double rhoR = URc[0];
+    Vec4 Uavg{};
+    for (std::size_t k = 0; k < Uavg.size(); ++k) {
+        Uavg[k] = 0.5 * ULc[k] + 0.5 * URc[k];
+    }
 
-    const double invRhoL = 1.0 / rhoL;
-    const double invRhoR = 1.0 / rhoR;
-
-    const double rhouL = ULc[1];
-    const double rhouR = URc[1];
-    const double rhovL = ULc[2];
-    const double rhovR = URc[2];
-
-    const double uL = rhouL * invRhoL;
-    const double uR = rhouR * invRhoR;
-    const double vL = rhovL * invRhoL;
-    const double vR = rhovR * invRhoR;
-
-    const double kineticL = 0.5 * (rhouL * rhouL + rhovL * rhovL) * invRhoL;
-    const double kineticR = 0.5 * (rhouR * rhouR + rhovR * rhovR) * invRhoR;
-
-    const double pL = (gamma - 1.0) * (ULc[3] - kineticL);
-    const double pR = (gamma - 1.0) * (URc[3] - kineticR);
-
-    const double HL = (ULc[3] + pL) * invRhoL;
-    const double HR = (URc[3] + pR) * invRhoR;
-
-    const double sL = std::sqrt(std::max(rhoL, 0.0));
-    const double sR = std::sqrt(std::max(rhoR, 0.0));
-    const double s  = sL + sR;
-
-    rho0 = sL * sR;
-    u0   = (sL * uL + sR * uR) / s;
-    v0   = (sL * vL + sR * vR) / s;
-    H0   = (sL * HL + sR * HR) / s;
-
-    const double q2 = 0.5 * (u0*u0 + v0*v0);
-    const double c2 = (gamma - 1.0) * std::max(0.0, H0 - q2);
-    c0 = std::sqrt(c2);
-
-    p0 = 0.5 * (pL + pR);
+    // Recover all reference quantities from the same averaged conservative state.
+    const auto W = evalFlowVars(Uavg, gamma);
+    rho0 = W.rho;
+    u0 = W.u;
+    v0 = W.v;
+    p0 = W.p;
+    H0 = W.H;
+    c0 = W.a;
 }
 
 
@@ -430,7 +404,7 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
         }
         return;
     }
-    // High-order x-face path: build the face-local Roe eigensystem and perform
+    // High-order x-face path: build the face-local eigensystem at the conservative arithmetic mean and perform
     // characteristic reconstruction for the x-normal 2D Euler system.
     // Reconstruct one x-face with the requested scheme.
     auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
@@ -523,7 +497,7 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
         return;
     }
     // High-order y-face path: same reconstruction pattern as the x-face case,
-    // but using the y-normal Roe eigensystem and a y-directed stencil.
+    // but using the y-normal eigensystem at the conservative arithmetic mean and a y-directed stencil.
     // Reconstruct one y-face with the requested scheme.
     auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
         const int I   = ng + iFace;

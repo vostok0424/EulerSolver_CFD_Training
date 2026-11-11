@@ -11,7 +11,7 @@
 // This module provides:
 //   - A small set of reconstruction schemes (FirstOrder, MUSCL, WENO5)
 //   - Characteristic-space reconstruction only
-//   - Conservative-characteristic projection with Roe linearization
+//   - Conservative-characteristic projection at the arithmetic mean of conservative states
 //   - A reduced MUSCL limiter set (None, Minmod, VanLeer)
 //   - Option parsing from cfg
 //
@@ -91,7 +91,7 @@ struct Options {
     double eps = 1e-12;
 
     // Characteristic reconstruction is fixed to conservative variables
-    // with Roe-linearized eigenvectors.
+    // with eigenvectors evaluated at the arithmetic mean of conservative states.
 
     // Convenience: required ghost cells for the chosen scheme.
     int requiredNg() const { return recon::requiredGhostCells(scheme); }
@@ -106,14 +106,14 @@ struct Options {
 //
 //   WENO5 uses the standard Jiang–Shu nonlinear weights with exponent fixed at p = 2
 // Characteristic reconstruction is fixed to conservative variables
-// with Roe linearization; no characteristic-mode cfg keys are exposed.
+// at the arithmetic mean of conservative states; no characteristic-mode cfg keys are exposed.
 // Limiter support is intentionally restricted to the small set above.
 Options readOptions(const Cfg& cfg);
 
 // Reconstruction2D
 // ----------------
 // Characteristic-space reconstruction without positivity repair or order fallback.
-// Fixed to conservative-characteristic projection with Roe linearization.
+// Fixed to conservative-characteristic projection at the arithmetic mean of conservative states.
 // Build left/right face states in both x- and y-directions.
 //
 // X-faces (vertical): (nx+1)*ny

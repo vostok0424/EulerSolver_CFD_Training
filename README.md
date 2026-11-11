@@ -91,6 +91,7 @@ The current limiter options are:
 
 Important notes:
 - reconstruction is now characteristic-based only
+- characteristic eigenvectors are evaluated at the arithmetic mean of the adjacent conservative states
 - `reconstruction.variables` is kept only as a compatibility key
 - if `reconstruction.variables` is provided, it should be `characteristic`
 - older limiter names such as `mc` and `superbee` are not supported by the current implementation
