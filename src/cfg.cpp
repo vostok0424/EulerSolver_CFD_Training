@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <cmath>
 #include <stdexcept>
 
 // Trim leading and trailing whitespace.
@@ -90,25 +91,39 @@ std::string Cfg::getString(const std::string& key, const std::string& def) const
 int Cfg::getInt(const std::string& key, int def) const {
     auto it = kv_.find(key);
     if (it == kv_.end()) return def;
-    return std::stoi(it->second);
+    try {
+        std::size_t used = 0;
+        const int value = std::stoi(it->second, &used);
+        if (used != it->second.size()) throw std::invalid_argument("trailing characters");
+        return value;
+    } catch (const std::exception&) {
+        throw std::runtime_error("Cfg: invalid integer for " + key + ": " + it->second);
+    }
 }
 
 // Get floating-point value (or return default). Uses std::stod.
 double Cfg::getDouble(const std::string& key, double def) const {
     auto it = kv_.find(key);
     if (it == kv_.end()) return def;
-    return std::stod(it->second);
+    try {
+        std::size_t used = 0;
+        const double value = std::stod(it->second, &used);
+        if (used != it->second.size() || !std::isfinite(value)) throw std::invalid_argument("invalid number");
+        return value;
+    } catch (const std::exception&) {
+        throw std::runtime_error("Cfg: invalid finite number for " + key + ": " + it->second);
+    }
 }
 
 // Get boolean value (or return default).
 // Accepted true values:  1, true, yes, on
 // Accepted false values: 0, false, no, off
-// Any other value falls back to the provided default.
+// Any other value is an error.
 bool Cfg::getBool(const std::string& key, bool def) const {
     auto it = kv_.find(key);
     if (it == kv_.end()) return def;
     std::string v = toLower(trim(it->second));
     if (v=="1"||v=="true"||v=="yes"||v=="on") return true;
     if (v=="0"||v=="false"||v=="no"||v=="off") return false;
-    return def;
+    throw std::runtime_error("Cfg: invalid boolean for " + key + ": " + it->second);
 }

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <stdexcept>
 
 // -----------------------------------------------------------------------------
 // Internal helpers used only inside this translation unit.
@@ -10,6 +10,18 @@
 // admissibility checks for the current 2D-only solver path.
 // -----------------------------------------------------------------------------
 namespace {
+
+void requireGamma(double gamma) {
+    if (!std::isfinite(gamma) || gamma <= 1.0)
+        throw std::runtime_error("EOS: gamma must be finite and > 1");
+}
+template<typename Prim>
+void requirePrimitive(const Prim& W) {
+    if (!std::isfinite(W.rho) || W.rho <= 0.0 || !std::isfinite(W.p) || W.p <= 0.0)
+        throw std::runtime_error("EOS: density and pressure must be finite and > 0");
+    for (double u : W.u) if (!std::isfinite(u))
+        throw std::runtime_error("EOS: non-finite velocity");
+}
 
 // Shared primitive-state validation for array-based primitive containers.
 // Checks finiteness first, then density/pressure admissibility against the
@@ -67,6 +79,10 @@ StateCheckResult checkPrimitiveImpl(const Prim& W, const StateLimits& limits) {
 template<int Dim>
 typename EosIdealGas<Dim>::Prim
 EosIdealGas<Dim>::consToPrim(const Cons& U, double gamma) {
+    requireGamma(gamma);
+    for (double value : U) if (!std::isfinite(value))
+        throw std::runtime_error("EOS: non-finite conservative component");
+    if (U[0] <= 0.0) throw std::runtime_error("EOS: density must be > 0");
     Prim W{};
     W.rho = U[0];
 
@@ -81,6 +97,7 @@ EosIdealGas<Dim>::consToPrim(const Cons& U, double gamma) {
 
     const double e = E - kinetic;
     W.p = (gamma - 1.0) * e;
+    requirePrimitive(W);
     return W;
 }
 
@@ -89,6 +106,8 @@ EosIdealGas<Dim>::consToPrim(const Cons& U, double gamma) {
 template<int Dim>
 typename EosIdealGas<Dim>::Cons
 EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
+    requireGamma(gamma);
+    requirePrimitive(W);
     Cons U{};
     U[0] = W.rho;
 
@@ -100,6 +119,8 @@ EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
 
     const double e = W.p / (gamma - 1.0);
     U[Dim + 1] = e + kinetic;
+    for (double value : U) if (!std::isfinite(value))
+        throw std::runtime_error("EOS: overflow converting primitive state");
     return U;
 }
 
@@ -107,23 +128,27 @@ EosIdealGas<Dim>::primToCons(const Prim& W, double gamma) {
 // Ideal-gas sound speed.
 template<int Dim>
 double EosIdealGas<Dim>::soundSpeed(const Prim& W, double gamma) {
-    return std::sqrt(std::max(0.0, gamma * W.p / W.rho));
+    requireGamma(gamma);
+    requirePrimitive(W);
+    const double c2 = gamma * W.p / W.rho;
+    if (!std::isfinite(c2) || c2 <= 0.0)
+        throw std::runtime_error("EOS: invalid sound-speed squared");
+    return std::sqrt(c2);
 }
 
 // Cached primitive / thermodynamic quantities used in hot paths such as
 // numerical flux evaluation and CFL-related scans.
 template<>
 FlowVars2 EosIdealGas<2>::evalFlowVars(const ConsD<2>& U, double gamma) {
+    const auto primitive = consToPrim(U, gamma);
     FlowVars2 W{};
-    W.rho = U[0];
-    W.u = U[1] / W.rho;
-    W.v = U[2] / W.rho;
-
-    const double kinetic = 0.5 * W.rho * (W.u * W.u + W.v * W.v);
-    const double eInt = U[3] - kinetic;
-    W.p = (gamma - 1.0) * eInt;
-    W.a = std::sqrt(std::max(0.0, gamma * W.p / W.rho));
+    W.rho = primitive.rho;
+    W.u = primitive.u[0];
+    W.v = primitive.u[1];
+    W.p = primitive.p;
+    W.a = soundSpeed(primitive, gamma);
     W.H = (U[3] + W.p) / W.rho;
+    if (!std::isfinite(W.H)) throw std::runtime_error("EOS: non-finite total enthalpy");
     return W;
 }
 
@@ -160,59 +185,26 @@ bool isFiniteState(const Vec4& U) {
 }
 
 // Return u^2 + v^2 for a conservative state.
-// Non-finite inputs or invalid density yield +inf so callers can treat the
-// result as unreadable without duplicating local checks.
+// Invalid inputs or derived quantities throw instead of returning sentinels.
 double velocitySquared(const Vec4& U) {
-    if (!isFiniteState(U)) {
-        return std::numeric_limits<double>::infinity();
-    }
-
-    const double rho = U[0];
-    if (!(rho > 0.0) || !std::isfinite(rho)) {
-        return std::numeric_limits<double>::infinity();
-    }
-
-    const double ux = U[1] / rho;
-    const double uy = U[2] / rho;
-    if (!std::isfinite(ux) || !std::isfinite(uy)) {
-        return std::numeric_limits<double>::infinity();
-    }
-
-    return ux * ux + uy * uy;
+    if (!isFiniteState(U) || U[0] <= 0.0)
+        throw std::runtime_error("velocitySquared: invalid conservative state");
+    const double u = U[1] / U[0], v = U[2] / U[0];
+    const double speed2 = u*u + v*v;
+    if (!std::isfinite(speed2)) throw std::runtime_error("velocitySquared: non-finite result");
+    return speed2;
 }
 
-// Shared conservative-state pressure reader used by numerical modules.
-// Returns NaN when the state cannot be interpreted safely.
-double pressureFromConservative(const Vec4& U, const double gamma) {
-    if (!isFiniteState(U)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
-    const double rho = U[0];
-    if (!(rho > 0.0) || !std::isfinite(rho)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
-    const double ke = 0.5 * (U[1] * U[1] + U[2] * U[2]) / rho;
-    const double p  = (gamma - 1.0) * (U[3] - ke);
-    return std::isfinite(p) ? p : std::numeric_limits<double>::quiet_NaN();
+double pressureFromConservative(const Vec4& U, double gamma) {
+    return EosIdealGas<2>::consToPrim(U, gamma).p;
 }
 
-// Shared conservative-state specific internal-energy reader.
-// Returns NaN when rho is invalid or the derived value is non-finite.
 double specificInternalEnergyFromConservative(const Vec4& U) {
-    if (!isFiniteState(U)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
-    const double rho = U[0];
-    if (!(rho > 0.0) || !std::isfinite(rho)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
-    const double ke   = 0.5 * (U[1] * U[1] + U[2] * U[2]) / rho;
-    const double eint = (U[3] - ke) / rho;
-    return std::isfinite(eint) ? eint : std::numeric_limits<double>::quiet_NaN();
+    const double speed2 = velocitySquared(U);
+    const double e = U[3] / U[0] - 0.5 * speed2;
+    if (!std::isfinite(e) || e <= 0.0)
+        throw std::runtime_error("specificInternalEnergy: must be finite and > 0");
+    return e;
 }
 
 // Recover internal energy from a 2D conservative state.
@@ -333,12 +325,12 @@ FlowVars2 evalFlowVars(const Vec4& U, double gamma) {
 
 double safePressure(const Vec4& U, double gamma) {
     const double p = pressureFromConservative(U, gamma);
-    return std::isfinite(p) ? p : -std::numeric_limits<double>::infinity();
+    return p;
 }
 
 double safeInternalEnergy(const Vec4& U) {
     const double eint = specificInternalEnergyFromConservative(U);
-    return std::isfinite(eint) ? eint : -std::numeric_limits<double>::infinity();
+    return eint;
 }
 
 // Physical flux assembled from conservative storage plus cached primitive /

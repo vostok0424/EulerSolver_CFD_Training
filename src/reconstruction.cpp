@@ -60,7 +60,7 @@ static inline double applyLimiter(Limiter lim, double dl, double dr) {
         case Limiter::Minmod:  return minmod(dl, dr);
         case Limiter::VanLeer: return vanleer(dl, dr);
     }
-    return minmod(dl, dr);
+    throw std::runtime_error("Invalid reconstruction limiter enum");
 }
 
 // -----------------------------------------------------------------------------
@@ -153,7 +153,7 @@ Options readOptions(const Cfg& cfg) {
         throw std::runtime_error("reconstruction.variables is deprecated; only characteristic reconstruction is supported");
     }
 
-    if (opt.eps <= 0.0) {
+    if (!std::isfinite(opt.eps) || opt.eps <= 0.0) {
         throw std::runtime_error("reconstruction.eps must be > 0");
     }
     return opt;
@@ -172,6 +172,9 @@ struct Eigen4 { double R[4][4]; double L[4][4]; };
 // Reference state Uavg = (ULc + URc)/2 for 2D characteristic reconstruction.
 static inline void faceState2D(const Vec4& ULc, const Vec4& URc, double gamma,
                                double& rho0, double& u0, double& v0, double& p0, double& H0, double& c0) {
+    // Reject invalid adjacent states before averaging can conceal the failure.
+    (void)evalFlowVars(ULc, gamma);
+    (void)evalFlowVars(URc, gamma);
     Vec4 Uavg{};
     for (std::size_t k = 0; k < Uavg.size(); ++k) {
         Uavg[k] = 0.5 * ULc[k] + 0.5 * URc[k];
@@ -419,7 +422,7 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
         faceState2D(U[kL], U[kR], gamma, rho0, u0, v0, p0, H0, c0);
 
         Eigen4 eig{};
-        buildEigen2DConservativeX(u0, v0, H0, std::max(c0, opt_.eps), gamma, eig);
+        buildEigen2DConservativeX(u0, v0, H0, c0, gamma, eig);
 
         auto fillMusclCache = [&](double (&wc)[4][4]) {
             const Vec4* qBase = &U[idx2(I_L - 1, J, nxTot)];
@@ -511,7 +514,7 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
         faceState2D(U[kB], U[kT], gamma, rho0, u0, v0, p0, H0, c0);
 
         Eigen4 eig{};
-        buildEigen2DConservativeY(u0, v0, H0, std::max(c0, opt_.eps), gamma, eig);
+        buildEigen2DConservativeY(u0, v0, H0, c0, gamma, eig);
 
         auto fillMusclCache = [&](double (&wc)[4][4]) {
             const Vec4* qCache[4] = {

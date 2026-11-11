@@ -29,6 +29,7 @@
 #include "cfg.hpp"
 #include "state.hpp"
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace recon {
@@ -59,7 +60,7 @@ inline int requiredGhostCells(Scheme s) {
         case Scheme::MUSCL:      return 2;
         case Scheme::WENO5:      return 3;
     }
-    return 1;
+    throw std::runtime_error("Invalid reconstruction scheme enum");
 }
 
 inline bool isHighOrder(Scheme s) {
@@ -87,7 +88,7 @@ struct Options {
     // Limiter for MUSCL (ignored for FirstOrder/WENO5).
     Limiter limiter = Limiter::VanLeer;
 
-    // Small positive epsilon used in WENO weights and characteristic algebra.
+    // Small positive epsilon used in WENO weights.
     double eps = 1e-12;
 
     // Characteristic reconstruction is fixed to conservative variables

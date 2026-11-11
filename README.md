@@ -468,3 +468,27 @@ See `LICENSE` for details.
 ## Acknowledgment
 
 This repository is primarily intended for personal solver training, numerical-method development, and research-oriented experimentation in compressible CFD.
+
+## Failure handling
+
+Non-finite states, non-positive density or pressure, invalid sound speeds,
+invalid CFL time steps, degenerate flux calculations, and failed Godunov
+pressure iterations raise errors. The solver validates interior RK inputs,
+reconstructed face states, numerical fluxes, and the completed step before
+advancing the clock. It does not clip states, substitute wave speeds, retry
+steps, or fall back to another reconstruction or flux.
+
+The failing rank reports the error and aborts the MPI job. Numeric configuration
+values must be finite and fully parsed; malformed boolean values are rejected.
+The Godunov solver also rejects non-positive PVRS estimates or Newton iterates
+rather than clipping them; some otherwise admissible Riemann problems may
+therefore terminate with a numerical-solver error.
+
+Build and run the failure-handling regression checks with:
+
+```bash
+./make.sh debug
+python3 tests/test_fail_fast.py
+# Optional two-rank checks, including failure on one rank only:
+python3 tests/test_fail_fast.py --mpi
+```

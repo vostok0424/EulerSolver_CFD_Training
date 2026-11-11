@@ -77,7 +77,7 @@ enum class StateStatus {
 
 // StateLimits
 // -----------
-// Global thresholds used when checking or repairing states.
+// Thresholds used by explicit state checks; no state repair is performed.
 struct StateLimits {
     double eps    = 1e-12;
     double rhoMin = 1e-12;
@@ -138,11 +138,11 @@ using Vec4  = ConsD<2>;
 FlowVars2 evalFlowVars(const Vec4& U, double gamma);
 
 // Recover pressure from a 2D conservative state with a safety guard.
-// Returns negative infinity when rho is non-finite or non-positive.
+// Throws on an invalid state.
 double safePressure(const Vec4& U, double gamma);
 
 // Recover specific internal energy e = E - 0.5|u|^2 from a 2D conservative
-// state with a safety guard. Returns negative infinity when rho is non-finite or non-positive.
+// state. Throws on an invalid state.
 double safeInternalEnergy(const Vec4& U);
 
 
@@ -153,7 +153,7 @@ Vec4 physFluxFromPrim(const Prim2& W, int dir, double gamma);
 // Fast finite checks on conservative states.
 bool isFiniteState(const Vec4& U);
 
-// Return u^2 + v^2 for a conservative state. Non-finite inputs yield +inf.
+// Return u^2 + v^2 for a conservative state; throws on invalid input/result.
 double velocitySquared(const Vec4& U);
 
 // Shared conservative-state readers used by numerical modules.

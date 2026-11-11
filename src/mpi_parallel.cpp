@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <string>
 
 namespace mpi_parallel {
@@ -139,6 +140,9 @@ MpiParallel& MpiParallel::operator=(MpiParallel&& o) noexcept {
 
 // Free the Cartesian communicator (if created).
 MpiParallel::~MpiParallel() {
+    // Do not enter collective communicator cleanup while unwinding a local
+    // failure. main() will report the exception and abort MPI_COMM_WORLD.
+    if (std::uncaught_exceptions() > 0) return;
     if (cart_ != MPI_COMM_NULL) {
         MPI_Comm_free(&cart_);
         cart_ = MPI_COMM_NULL;

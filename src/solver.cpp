@@ -168,6 +168,12 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     grid_.y0 = cfg.getDouble("y0", 0.0);
     grid_.y1 = cfg.getDouble("y1", 0.2);
 
+    if (grid_.nxGlobal <= 0 || grid_.nyGlobal <= 0 ||
+        grid_.x1 <= grid_.x0 || grid_.y1 <= grid_.y0 ||
+        !std::isfinite(grid_.dx()) || !std::isfinite(grid_.dy()) ||
+        grid_.dx() <= 0.0 || grid_.dy() <= 0.0)
+        throw std::runtime_error("Invalid grid dimensions or physical extents");
+
     // -----------------------------
     // 2) Domain decomposition (MPI)
     // -----------------------------
@@ -200,6 +206,10 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     outputEvery_ = cfg.getInt   ("outputEvery", 50);
     writeFinal_  = cfg.getBool  ("writeFinal", true);
     outPrefix_   = cfg.getString("outPrefix", "run2d");
+    if (gamma_ <= 1.0 || cfl_ <= 0.0 || finalTime_ < 0.0)
+        throw std::runtime_error("Require gamma > 1, cfl > 0, finalTime >= 0");
+    if (grid_.nx < grid_.ng || grid_.ny < grid_.ng)
+        throw std::runtime_error("Local nx and ny must be >= ng for halo exchange and wall reflection");
 
     vtkDataOutputType_ = parseVTKDataOutputType(
         cfg.getString("output.vtkDataOutputType", "point"));
@@ -275,6 +285,23 @@ void Solver::applyBC(std::vector<Vec4>& U) const {
     boundary::apply2D(U, grid_.nx, grid_.ny, grid_.ng, bcApply);
 }
 
+void Solver::validateInterior(const std::vector<Vec4>& U) const {
+    for (int j = 0; j < grid_.ny; ++j) {
+        for (int i = 0; i < grid_.nx; ++i) {
+            const auto& Q = U[idx(grid_.ng + i, grid_.ng + j)];
+            try {
+                (void)evalFlowVars(Q, gamma_);
+            } catch (const std::exception& e) {
+                std::ostringstream msg;
+                msg << "cell (" << grid_.iBeg+i << "," << grid_.jBeg+j
+                    << "), U=[" << std::setprecision(17) << Q[0] << "," << Q[1]
+                    << "," << Q[2] << "," << Q[3] << "]: " << e.what();
+                throw std::runtime_error(msg.str());
+            }
+        }
+    }
+}
+
 // Compute a stable time step from the 2D CFL estimate
 //   dt = CFL / max( (|u|+a)/dx + (|v|+a)/dy )
 // and reduce the spectral-radius bound across all MPI ranks so every rank uses
@@ -282,18 +309,23 @@ void Solver::applyBC(std::vector<Vec4>& U) const {
 double Solver::computeDt(const std::vector<Vec4>& U) const {
     const double dx = grid_.dx();
     const double dy = grid_.dy();
-    double maxS = 1e-14;
+    double maxS = 0.0;
 
     for (int j = 0; j < grid_.ny; ++j) {
         for (int i = 0; i < grid_.nx; ++i) {
             const auto W = evalFlowVars(U[idx(grid_.ng + i, grid_.ng + j)], gamma_);
             const double S = (std::abs(W.u) + W.a) / dx + (std::abs(W.v) + W.a) / dy;
+            if (!std::isfinite(S) || S <= 0.0)
+                throw std::runtime_error("CFL: invalid spectral radius at cell (" +
+                    std::to_string(grid_.iBeg+i) + "," + std::to_string(grid_.jBeg+j) + ")");
             maxS = std::max(maxS, S);
         }
     }
     // Global maximum across ranks -> consistent dt for all ranks.
     const double maxSg = mp_.allreduceMax(maxS);
-    return cfl_ / maxSg;
+    const double dt = cfl_ / maxSg;
+    if (!std::isfinite(dt) || dt <= 0.0) throw std::runtime_error("CFL: invalid time step");
+    return dt;
 }
 
 // Build the semi-discrete finite-volume RHS: RHS = -dF/dx - dG/dy.
@@ -326,17 +358,31 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
+    auto faceFlux = [&](const Vec4& left, const Vec4& right, int dir, int i, int j) {
+        try {
+            (void)evalFlowVars(left, gamma_);
+            (void)evalFlowVars(right, gamma_);
+            const auto F = flux_->numericalFlux(left, right, dir, gamma_);
+            if (!isFiniteState(F)) throw std::runtime_error("non-finite numerical flux");
+            return F;
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string(dir == 0 ? "x" : "y") +
+                "-face (" + std::to_string(grid_.iBeg+i) + "," +
+                std::to_string(grid_.jBeg+j) + "): " + e.what());
+        }
+    };
+
     // Compute the configured numerical flux directly on each face.
     for (int j = 0; j < grid_.ny; ++j) {
         for (int i = 0; i < grid_.nx + 1; ++i) {
             const int f = idxFaceX(i, j);
-            faces_.x.F[f] = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
+            faces_.x.F[f] = faceFlux(faces_.x.UL[f], faces_.x.UR[f], 0, i, j);
         }
     }
     for (int j = 0; j < grid_.ny + 1; ++j) {
         for (int i = 0; i < grid_.nx; ++i) {
             const int f = idxFaceY(i, j);
-            faces_.y.F[f] = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
+            faces_.y.F[f] = faceFlux(faces_.y.UL[f], faces_.y.UR[f], 1, i, j);
         }
     }
 
@@ -353,6 +399,7 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
             for (int k = 0; k < 4; ++k) {
                 R[k] = -(FxR[k] - FxL[k]) / dx - (GyT[k] - GyB[k]) / dy;
             }
+            if (!isFiniteState(R)) throw std::runtime_error("Non-finite flux divergence");
             RHS[idx(grid_.ng + i, grid_.ng + j)] = R;
         }
     }
@@ -416,15 +463,19 @@ void Solver::run() {
               << ", local=" << grid_.nx << "x" << grid_.ny
               << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
 
+    validateInterior(U_);
     // Build the initial RHS before the initial output phase.
     applyBC(U_);
     buildRHS(U_, RHS_);
     processRegularOutputPhase(step, t);
 
     // RHS callback used by explicit multi-stage integrators.
-    auto rhsFun = [this](std::vector<Vec4>& Uin, std::vector<Vec4>& Rout){
+    int stage = 0;
+    auto rhsFun = [this, &stage](std::vector<Vec4>& Uin, std::vector<Vec4>& Rout){
         // For every stage, refresh ghost cells (MPI halos + physical BCs)
         // before characteristic reconstruction and flux evaluation.
+        ++stage;
+        validateInterior(Uin);
         applyBC(Uin);
         buildRHS(Uin, Rout);
     };
@@ -435,7 +486,16 @@ void Solver::run() {
         double dt = computeDt(U_);
         if (t + dt > finalTime_) dt = finalTime_ - t;
 
-        ti_->step(U_, dt, rhsFun);
+        if (!std::isfinite(dt) || dt <= 0.0 || t + dt <= t)
+            throw std::runtime_error("Time step does not advance the physical clock");
+        stage = 0;
+        try {
+            ti_->step(U_, dt, rhsFun);
+            validateInterior(U_);
+        } catch (const std::exception& e) {
+            throw std::runtime_error("step=" + std::to_string(step) +
+                ", t=" + std::to_string(t) + ", RHS stage=" + std::to_string(stage) + ": " + e.what());
+        }
         t += dt;
         ++step;
 

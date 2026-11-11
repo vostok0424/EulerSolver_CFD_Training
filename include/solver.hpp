@@ -167,6 +167,7 @@ private:
     // physical boundary conditions on global domain edges.
     // Must be called before reconstruction/flux evaluation.
     void applyBC(std::vector<Vec4>& U) const;
+    void validateInterior(const std::vector<Vec4>& U) const;
     // Compute a stable explicit CFL time step from the current interior state.
     double computeDt(const std::vector<Vec4>& U) const;
     // Build the spatial finite-volume RHS for the given state vector.

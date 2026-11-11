@@ -79,12 +79,16 @@ int main(int argc, char** argv) {
             solver.run();
         }
     }
-    // Any exception becomes a non-zero exit code. Print only on root to avoid spam.
+    // A local failure may leave peers in communication; abort the whole job.
     catch (const std::exception& e) {
-        if (rank == 0) {
-            std::cerr << "Fatal: " << e.what() << "\n";
-        }
-        exitCode = 1;
+        std::cerr << "Fatal [rank " << rank << "]: " << e.what() << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+        return 1;
+    }
+    catch (...) {
+        std::cerr << "Fatal [rank " << rank << "]: unknown exception" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+        return 1;
     }
 
     // Ensure all ranks exit consistently:

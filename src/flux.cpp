@@ -103,7 +103,10 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 
     const double num = pR - pL + rhoL * unL * (SL - unL) - rhoR * unR * (SR - unR);
     const double den = rhoL * (SL - unL) - rhoR * (SR - unR);
-    const double SM  = (std::abs(den) < 1e-14) ? 0.0 : num / den;
+    if (!std::isfinite(den) || den == 0.0)
+        throw std::runtime_error("HLLC: invalid contact-speed denominator");
+    const double SM = num / den;
+    if (!std::isfinite(SM)) throw std::runtime_error("HLLC: non-finite contact speed");
 
     auto star = [&](const Cons& U, const FlowVars2& W, double S, double Sstar) -> Cons {
         const double rho = W.rho;
@@ -112,6 +115,8 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
         const double p   = W.p;
         const double E   = U[3];
 
+        if (!std::isfinite(S - Sstar) || S == Sstar)
+            throw std::runtime_error("HLLC: degenerate star-state wave speed");
         const double rho_star = rho * (S - un) / (S - Sstar);
         const double p_star   = p + rho * (S - un) * (Sstar - un);
         const double E_star   = ((S - un) * E - p * un + p_star * Sstar) / (S - Sstar);
@@ -126,6 +131,9 @@ ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
             Us[2] = rho_star * Sstar;
         }
         Us[3] = E_star;
+        if (!std::isfinite(p_star) || p_star <= 0.0)
+            throw std::runtime_error("HLLC: invalid star pressure");
+        (void)evalFlowVars(Us, gamma);
         return Us;
     };
 
@@ -191,7 +199,8 @@ ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, dou
 
     const double aL = WL.a;
     const double aR = WR.a;
-    const double a  = std::max(1e-14, 0.5 * (aL + aR));
+    const double a = 0.5 * aL + 0.5 * aR;
+    if (!std::isfinite(a) || a <= 0.0) throw std::runtime_error("AUSM: invalid interface sound speed");
 
     const double unL = (dir == 0) ? WL.u : WL.v;
     const double unR = (dir == 0) ? WR.u : WR.v;
@@ -240,7 +249,7 @@ namespace {
 void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double& df) {
     const double rho = W.rho;
     const double pK  = W.p;
-    const double aK  = std::sqrt(std::max(0.0, gamma * pK / rho));
+    const double aK  = EosIdealGas<2>::soundSpeed(Prim2{rho, {W.u[0], 0.0}, pK}, gamma);
 
     if (p > pK) {
         const double A = 2.0 / ((gamma + 1.0) * rho);
@@ -258,11 +267,13 @@ void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double
 
 // PVRS initial guess for the star-region pressure.
 double guessPressurePVRSImpl(const Prim1& WL, const Prim1& WR, double gamma) {
-    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
-    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
+    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
     const double pPV = 0.5 * (WL.p + WR.p)
                      - 0.125 * (WR.u[0] - WL.u[0]) * (WL.rho + WR.rho) * (aL + aR);
-    return std::max(1e-12, pPV);
+    if (!std::isfinite(pPV) || pPV <= 0.0)
+        throw std::runtime_error("Godunov: non-positive or non-finite PVRS pressure estimate");
+    return pPV;
 }
 
 } // namespace
@@ -279,8 +290,8 @@ double FluxGodunov<2>::guessPressurePVRS(const Prim1& WL, const Prim1& WR, doubl
 // Solve the exact 1D Riemann problem for the star pressure and star velocity.
 void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
                             double& pStar, double& uStar) {
-    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
-    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
+    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
 
     if ((WR.u[0] - WL.u[0]) > (2.0 / (gamma - 1.0)) * (aL + aR)) {
         throw std::runtime_error("Exact Riemann: vacuum not handled.");
@@ -288,6 +299,7 @@ void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
 
     double p = guessPressurePVRSImpl(WL, WR, gamma);
 
+    bool converged = false;
     // Newton iteration for p*.
     for (int it = 0; it < 40; ++it) {
         double fL, dfL, fR, dfR;
@@ -297,15 +309,21 @@ void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
         const double g  = fL + fR + (WR.u[0] - WL.u[0]);
         const double dg = dfL + dfR;
 
-        double pNew = p - g / std::max(1e-14, dg);
-        pNew = std::max(1e-12, pNew);
-
-        const double rel = std::abs(pNew - p) / (0.5 * (pNew + p) + 1e-14);
-        p = pNew;
-        if (rel < 1e-10) {
+        if (!std::isfinite(g) || !std::isfinite(dg) || dg <= 0.0)
+            throw std::runtime_error("Godunov: invalid Newton residual or derivative");
+        const double residualScale = aL + aR + std::abs(WR.u[0] - WL.u[0]);
+        if (!std::isfinite(residualScale) || residualScale <= 0.0)
+            throw std::runtime_error("Godunov: invalid residual scale");
+        if (std::abs(g) <= 1e-10 * residualScale) {
+            converged = true;
             break;
         }
+        const double pNew = p - g / dg;
+        if (!std::isfinite(pNew) || pNew <= 0.0)
+            throw std::runtime_error("Godunov: Newton pressure must be finite and > 0");
+        p = pNew;
     }
+    if (!converged) throw std::runtime_error("Godunov: pressure iteration did not converge in 40 iterations");
 
     double fL, dfL, fR, dfR;
     godunovPrefunImpl(p, WL, gamma, fL, dfL);
@@ -319,8 +337,8 @@ void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
 // Sample the exact self-similar solution at S = 0.
 ExactSample1D FluxGodunov<2>::sampleAtS0(const Prim1& WL, const Prim1& WR, double gamma,
                                          double pStar, double uStar) {
-    const double aL = std::sqrt(std::max(0.0, gamma * WL.p / WL.rho));
-    const double aR = std::sqrt(std::max(0.0, gamma * WR.p / WR.rho));
+    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
+    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
 
     ExactSample1D out{};
 

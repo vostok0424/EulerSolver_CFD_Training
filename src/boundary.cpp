@@ -121,8 +121,9 @@ static Prim2 readInletPrim2(const Cfg& cfg, const std::string& side) {
 static double readOutletP(const Cfg& cfg, const std::string& side) {
     const std::string k1 = "bc." + side + ".outlet.p";
     const std::string k0 = "bc.outlet.p";
-    if (cfg.has(k1)) return readDoubleStrict(cfg, k1);
-    return readDoubleStrict(cfg, k0);
+    const double p = readDoubleStrict(cfg, cfg.has(k1) ? k1 : k0);
+    if (p <= 0.0) throw std::runtime_error("boundary: outlet pressure must be > 0");
+    return p;
 }
 
 
@@ -180,7 +181,7 @@ static inline Vec4 outletState2D(const Vec4& Uin, double pout, int normalDir,
     const Prim2 W = EosIdealGas<2>::consToPrim(Uin, gamma);
     const double a = EosIdealGas<2>::soundSpeed(W, gamma);
     const double un = W.u[normalDir];
-    const double M = (a > 0.0) ? std::abs(un) / a : 0.0;
+    const double M = std::abs(un) / a;
 
     if (M >= 1.0) {
         return Uin;
