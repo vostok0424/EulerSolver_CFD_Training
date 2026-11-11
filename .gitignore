@@ -11,3 +11,4 @@ solution/
 solutions/
 *.zip
 solver
+.clang-format

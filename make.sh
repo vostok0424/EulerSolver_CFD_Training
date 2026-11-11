@@ -125,7 +125,8 @@ shopt -s nullglob
 SRC=(
   src/main.cpp
   src/cfg.cpp
-  src/state.cpp
+  src/common_functions.cpp
+  src/thermodynamics.cpp
   src/flux.cpp
   src/reconstruction.cpp
   src/boundary.cpp

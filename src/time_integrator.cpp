@@ -1,253 +1,205 @@
-// time_integrator.cpp
-// -------------------
-// Explicit time integration schemes used by the solvers.
-//
-// General pattern in this codebase
-// -------------------------------
-// A time integrator advances the solution vector U by one time step:
-//   U^{n+1} = Advance(U^n, dt, rhs)
-//
-// The integrator does NOT know about meshes, boundary conditions, or MPI.
-// Instead, it receives a callback:
-//   rhs(U_in, R_out)
-// which must fill R_out = RHS(U_in) for the semi-discrete system:
-//   dU/dt = RHS(U)
-//
-// Important convention:
-// - The rhs callback is allowed to modify U_in in-place (typically to fill
-//   ghost cells / exchange MPI halos) before computing R_out.
-//   Therefore, each stage calls rhs(stageState, stageRHS) *after* the stage
-//   state has been constructed.
-//
-// This file implements:
-// - Forward Euler
-// - RK2 (Heun / SSPRK2 form)
-// - SSPRK3 (Shu–Osher)
-// - Classical RK4
-//
-// Adding a new explicit scheme is usually:
-//   1) Implement a new TI_XXX<T> with name() and step(...)
-//   2) Register it in makeTimeIntegratorT(...)
-//   3) Select it in cfg: timeIntegrator = xxx
-//
-// -----------------------------------------------------------------------------
-// Template code: adding a new explicit integrator (copy/paste starter)
-// -----------------------------------------------------------------------------
-// Example: a generic 2-stage Runge–Kutta method (user-specified coefficients).
-// Replace the coefficients with your desired scheme.
-//
-//   template<typename State>
-//   struct TI_MyRK2T final : public TimeIntegratorT<State> {
-//       using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
-//       std::string name() const override { return "myrk2"; }
-//
-//       void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override {
-//           const size_t N = U.size();
-//           std::vector<State> U1(U), R(N);
-//
-//           // Stage 1: k1 = RHS(U^n)
-//           rhs(U, R);
-//           for (size_t i = 0; i < N; ++i)
-//               for (size_t k = 0; k < U[i].size(); ++k)
-//                   U1[i][k] = U[i][k] + dt * R[i][k];
-//
-//           // Stage 2: k2 = RHS(U1)
-//           rhs(U1, R);
-//
-//           // Combine stages (Heun / SSPRK2 form shown)
-//           for (size_t i = 0; i < N; ++i)
-//               for (size_t k = 0; k < U[i].size(); ++k)
-//                   U[i][k] = 0.5 * U[i][k] + 0.5 * (U1[i][k] + dt * R[i][k]);
-//       }
-//   };
-//
-// Factory registration:
-//   if (name == "myrk2") return std::make_unique<TI_MyRK2T<State>>();
-//
-// Debugging tip:
-// - If you see "Undefined symbol ... TI_MyRK2T", ensure time_integrator.cpp is
-//   compiled/linked into your target (Xcode build phases / CMakeLists).
-// -----------------------------------------------------------------------------
-
 #include "time_integrator.hpp"
-#include "state.hpp"   // for Vec4 explicit instantiation
+#include "structures.hpp"
 #include <stdexcept>
 
 
-// Forward Euler:
-//U^{n+1} = U^n + dt * RHS(U^n)
-// -----------------------------------------------------------------------------
-template<typename State>
-std::string TI_EulerT<State>::name() const { return "euler"; }
+// Return the configuration name of this numerical method.
+std::string EulerIntegrator::name() const
+{
+    return "euler";
+}
 
-template<typename State>
-void TI_EulerT<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
-    TimeIntegratorT<State>::ensureSize(R_, U.size());
 
-    // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R_);
-    for (size_t i = 0; i < U.size(); ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] += dt * R_[i][k];
-        }
+// Advance the state by one time step using Forward Euler.
+// state (in/out) - ghosted conservative field advanced by dt
+// dt (in) - time-step size
+// rhs (in) - callback that refreshes stage ghosts and computes the residual
+void EulerIntegrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
+{
+    TimeIntegrator::ensure_size( r_, state.size() );
+
+    // Evaluate the residual at the current state before the explicit update.
+    rhs( state, r_ );
+
+    for ( size_t i = 0; i < state.size(); ++i )
+    {
+        state[i] += dt * r_[i];
     }
 }
 
 
-// RK2 (Heun / RK2):
-//   U1      = U^n + dt * RHS(U^n)
-//   U^{n+1} = 0.5*U^n + 0.5*(U1 + dt*RHS(U1))
-// -----------------------------------------------------------------------------
-
-template<typename State>
-std::string TI_RK2T<State>::name() const { return "rk2"; }
-
-template<typename State>
-void TI_RK2T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
-    const size_t N = U.size();
-    TimeIntegratorT<State>::ensureSize(U1_, N);
-    TimeIntegratorT<State>::ensureSize(R_, N);
-
-    for (size_t i = 0; i < N; ++i) {
-        U1_[i] = U[i];
-    }
-
-    // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U1_[i][k] = U[i][k] + dt * R_[i][k];
-        }
-    }
-
-    // Stage RHS may update U1_ ghosts in-place.
-    rhs(U1_, R_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] = 0.5 * U[i][k] + 0.5 * (U1_[i][k] + dt * R_[i][k]);
-        }
-    }
+// Return the configuration name of this numerical method.
+std::string RK2Integrator::name() const
+{
+    return "rk2";
 }
 
-// SSPRK3 (Shu–Osher / SSPRK3):
-//   U1 = U^n + dt*RHS(U^n)
-//   U2 = 0.75*U^n + 0.25*(U1 + dt*RHS(U1))
-//   U^{n+1} = (1/3)*U^n + (2/3)*(U2 + dt*RHS(U2))
-// -----------------------------------------------------------------------------
-template<typename State>
-std::string TI_SSPRK3T<State>::name() const { return "ssprk3"; }
 
-template<typename State>
-void TI_SSPRK3T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
-    const size_t N = U.size();
-    TimeIntegratorT<State>::ensureSize(U1_, N);
-    TimeIntegratorT<State>::ensureSize(U2_, N);
-    TimeIntegratorT<State>::ensureSize(R_, N);
+// Advance the state by one time step using two-stage Heun RK2.
+// state (in/out) - ghosted conservative field advanced by dt
+// dt (in) - time-step size
+// rhs (in) - callback that refreshes stage ghosts and computes the residual
+void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
+{
+    const size_t n = state.size();
+    TimeIntegrator::ensure_size( u1_, n );
+    TimeIntegrator::ensure_size( r_, n );
 
-    for (size_t i = 0; i < N; ++i) {
-        U1_[i] = U[i];
-        U2_[i] = U[i];
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u1_[i] = state[i];
     }
 
-    // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, R_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U1_[i][k] = U[i][k] + dt * R_[i][k];
-        }
+    // Evaluate the residual at the current state before the explicit update.
+    rhs( state, r_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u1_[i] = state[i] + dt * r_[i];
     }
 
-    // Stage RHS may update U1_ ghosts in-place.
-    rhs(U1_, R_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U2_[i][k] = 0.75 * U[i][k] + 0.25 * (U1_[i][k] + dt * R_[i][k]);
-        }
-    }
+    // Evaluate the next stage after its conservative state has been constructed.
+    rhs( u1_, r_ );
 
-    // Stage RHS may update U2_ ghosts in-place.
-    rhs(U2_, R_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] = (1.0 / 3.0) * U[i][k] + (2.0 / 3.0) * (U2_[i][k] + dt * R_[i][k]);
-        }
-    }
-}
-
-// Classical RK4:
-//   k1 = RHS(U)
-//   k2 = RHS(U + 0.5*dt*k1)
-//   k3 = RHS(U + 0.5*dt*k2)
-//   k4 = RHS(U + 1.0*dt*k3)
-//   U^{n+1} = U + (dt/6)*(k1 + 2k2 + 2k3 + k4)
-// -----------------------------------------------------------------------------
-template<typename State>
-std::string TI_RK4T<State>::name() const { return "rk4"; }
-
-template<typename State>
-void TI_RK4T<State>::step(std::vector<State>& U, double dt, const RHSFunc& rhs) {
-    const size_t N = U.size();
-    TimeIntegratorT<State>::ensureSize(U0_, N);
-    TimeIntegratorT<State>::ensureSize(U1_, N);
-    TimeIntegratorT<State>::ensureSize(U2_, N);
-    TimeIntegratorT<State>::ensureSize(U3_, N);
-    TimeIntegratorT<State>::ensureSize(k1_, N);
-    TimeIntegratorT<State>::ensureSize(k2_, N);
-    TimeIntegratorT<State>::ensureSize(k3_, N);
-    TimeIntegratorT<State>::ensureSize(k4_, N);
-
-    for (size_t i = 0; i < N; ++i) {
-        U0_[i] = U[i];
-    }
-
-    // RHS callback may update U in-place (e.g., fill ghost cells / MPI halo exchange) before computing R.
-    rhs(U, k1_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U1_[i][k] = U0_[i][k] + 0.5 * dt * k1_[i][k];
-        }
-    }
-
-    // Stage RHS may update U1_ ghosts in-place.
-    rhs(U1_, k2_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U2_[i][k] = U0_[i][k] + 0.5 * dt * k2_[i][k];
-        }
-    }
-
-    // Stage RHS may update U2_ ghosts in-place.
-    rhs(U2_, k3_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U3_[i][k] = U0_[i][k] + dt * k3_[i][k];
-        }
-    }
-
-    // Stage RHS may update U3_ ghosts in-place.
-    rhs(U3_, k4_);
-    for (size_t i = 0; i < N; ++i) {
-        for (size_t k = 0; k < U[i].size(); ++k) {
-            U[i][k] = U0_[i][k] + dt * (k1_[i][k] + 2.0 * k2_[i][k] + 2.0 * k3_[i][k] + k4_[i][k]) / 6.0;
-        }
+    for ( size_t i = 0; i < n; ++i )
+    {
+        state[i] = 0.5 * state[i] + 0.5 * ( u1_[i] + dt * r_[i] );
     }
 }
 
 
-template<typename State>
-std::unique_ptr<TimeIntegratorT<State>> makeTimeIntegratorT(const std::string& name) {
-    if (name == "euler")  return std::make_unique<TI_EulerT<State>>();
-    if (name == "rk2")    return std::make_unique<TI_RK2T<State>>();
-    if (name == "ssprk3") return std::make_unique<TI_SSPRK3T<State>>();
-    if (name == "rk4")    return std::make_unique<TI_RK4T<State>>();
-    throw std::runtime_error("Unknown timeIntegrator: " + name);
+// Return the configuration name of this numerical method.
+std::string SSPRK3Integrator::name() const
+{
+    return "ssprk3";
 }
 
-// ---- Explicit template instantiations ----
-// This solver currently uses Vec4 (2D conservative state).
-// Explicit instantiation keeps compile times reasonable and avoids linker surprises.
-template class TI_EulerT<Vec4>;
-template class TI_RK2T<Vec4>;
-template class TI_SSPRK3T<Vec4>;
-template class TI_RK4T<Vec4>;
-template std::unique_ptr<TimeIntegratorT<Vec4>> makeTimeIntegratorT<Vec4>(const std::string&);
+
+// Advance the state by one time step using three-stage Shu-Osher SSPRK3.
+// state (in/out) - ghosted conservative field advanced by dt
+// dt (in) - time-step size
+// rhs (in) - callback that refreshes stage ghosts and computes the residual
+void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
+{
+    const size_t n = state.size();
+    TimeIntegrator::ensure_size( u1_, n );
+    TimeIntegrator::ensure_size( u2_, n );
+    TimeIntegrator::ensure_size( r_, n );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u1_[i] = state[i];
+        u2_[i] = state[i];
+    }
+
+    // Evaluate the residual at the current state before the explicit update.
+    rhs( state, r_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u1_[i] = state[i] + dt * r_[i];
+    }
+
+    // Evaluate the next stage after its conservative state has been constructed.
+    rhs( u1_, r_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u2_[i] = 0.75 * state[i] + 0.25 * ( u1_[i] + dt * r_[i] );
+    }
+
+    // Evaluate the final SSPRK3 stage before combining it with the original state.
+    rhs( u2_, r_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        state[i] = ( 1.0 / 3.0 ) * state[i] + ( 2.0 / 3.0 ) * ( u2_[i] + dt * r_[i] );
+    }
+}
+
+
+// Return the configuration name of this numerical method.
+std::string RK4Integrator::name() const
+{
+    return "rk4";
+}
+
+
+// Advance the state by one time step using classical four-stage RK4.
+// state (in/out) - ghosted conservative field advanced by dt
+// dt (in) - time-step size
+// rhs (in) - callback that refreshes stage ghosts and computes the residual
+void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
+{
+    const size_t n = state.size();
+    TimeIntegrator::ensure_size( u0_, n );
+    TimeIntegrator::ensure_size( u1_, n );
+    TimeIntegrator::ensure_size( u2_, n );
+    TimeIntegrator::ensure_size( u3_, n );
+    TimeIntegrator::ensure_size( k1_, n );
+    TimeIntegrator::ensure_size( k2_, n );
+    TimeIntegrator::ensure_size( k3_, n );
+    TimeIntegrator::ensure_size( k4_, n );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u0_[i] = state[i];
+    }
+
+    // Evaluate k1 at the initial state; k2 and k3 use half steps, and k4 uses a full step.
+    rhs( state, k1_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u1_[i] = u0_[i] + 0.5 * dt * k1_[i];
+    }
+
+    rhs( u1_, k2_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u2_[i] = u0_[i] + 0.5 * dt * k2_[i];
+    }
+
+    rhs( u2_, k3_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        u3_[i] = u0_[i] + dt * k3_[i];
+    }
+
+    rhs( u3_, k4_ );
+
+    for ( size_t i = 0; i < n; ++i )
+    {
+        // Combine the four stage derivatives with weights 1/6, 1/3, 1/3 and 1/6.
+        state[i] = u0_[i] + dt * ( k1_[i] + 2.0 * k2_[i] + 2.0 * k3_[i] + k4_[i] ) / 6.0;
+    }
+}
+
+
+// Create the selected time integrator: euler, rk2, ssprk3 or rk4.
+std::unique_ptr<TimeIntegrator> make_time_integrator( const std::string &name )
+{
+    if ( name == "euler" )
+    {
+        return std::make_unique<EulerIntegrator>();
+    }
+
+    if ( name == "rk2" )
+    {
+        return std::make_unique<RK2Integrator>();
+    }
+
+    if ( name == "ssprk3" )
+    {
+        return std::make_unique<SSPRK3Integrator>();
+    }
+
+    if ( name == "rk4" )
+    {
+        return std::make_unique<RK4Integrator>();
+    }
+
+    throw std::runtime_error( "Unknown timeIntegrator: " + name );
+}

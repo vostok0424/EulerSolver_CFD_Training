@@ -1,148 +1,104 @@
 #pragma once
 
-// reconstruction.hpp
-// Spatial reconstruction (high-order) for finite-volume methods.
-//
-// In a cell-centered finite-volume solver, we store conservative variables U in cells.
-// To compute a numerical flux at a face, we need left/right states at that face:
-//   - UL: value extrapolated from the cell on the left of the face
-//   - UR: value extrapolated from the cell on the right of the face
-//
-// This module provides:
-//   - A small set of reconstruction schemes (FirstOrder, MUSCL, WENO5)
-//   - Characteristic-space reconstruction only
-//   - Conservative-characteristic projection at the arithmetic mean of conservative states
-//   - A reduced MUSCL limiter set (None, Minmod, VanLeer)
-//   - Option parsing from cfg
-//
-// Ghost cells:
-// High-order schemes require ghost cells so their stencils do not read out of bounds.
-// requiredGhostCells(s) returns the minimum ng per side:
-//   FirstOrder: ng >= 1
-//   MUSCL:      ng >= 2
-//   WENO5:      ng >= 3
-//
-// Design note:
-// The solver calls reconstructFacesX()/reconstructFacesY() after applyBC() so ghost cells
-// contain valid boundary/halo data.
 
 #include "cfg.hpp"
-#include "state.hpp"
+#include "structures.hpp"
 #include <string>
 #include <stdexcept>
 #include <vector>
 
-namespace recon {
 
-// All reconstruction-related types live in this namespace.
+// Default regularization in the Jiang-Shu weights; this is not a physical-state lower bound.
+inline constexpr double default_weno_epsilon = 1e-12;
 
-// Scheme: spatial reconstruction order.
-//
-// FirstOrder:
-//   piecewise-constant (robust but diffusive)
-// MUSCL:
-//   piecewise-linear with slope limiter (2nd order in smooth regions)
-// WENO5:
-//   5th-order Weighted ENO (Jiang–Shu), non-oscillatory near discontinuities
-enum class Scheme {
-    FirstOrder,  // piecewise constant
-    MUSCL,       // piecewise linear (2nd order)
-    WENO5        // 5th-order WENO (Jiang–Shu)
+
+// Select first-order constant, second-order MUSCL or fifth-order Jiang-Shu WENO reconstruction.
+enum class ReconstructionScheme
+{
+    first_order,
+    muscl,
+    weno5
 };
 
-// Ghost-cell requirement (per side) for each scheme.
-// - FirstOrder: ng >= 1
-// - MUSCL:      ng >= 2
-// - WENO5:      ng >= 3
-inline int requiredGhostCells(Scheme s) {
-    switch (s) {
-        case Scheme::FirstOrder: return 1;
-        case Scheme::MUSCL:      return 2;
-        case Scheme::WENO5:      return 3;
+
+// Select the MUSCL slope: centered (none), minmod or van Leer.
+enum class SlopeLimiter
+{
+    none,
+    minmod,
+    van_leer
+};
+
+
+// Return the required ghost width: one for first order, two for MUSCL and three for WENO5.
+inline int required_ghost_cells( ReconstructionScheme s )
+{
+    switch ( s )
+    {
+    case ReconstructionScheme::first_order:
+        return 1;
+    case ReconstructionScheme::muscl:
+        return 2;
+    case ReconstructionScheme::weno5:
+        return 3;
     }
-    throw std::runtime_error("Invalid reconstruction scheme enum");
+
+    throw std::runtime_error( "Invalid reconstruction scheme enum" );
 }
 
-inline bool isHighOrder(Scheme s) {
-    return s == Scheme::MUSCL || s == Scheme::WENO5;
+
+// Check whether the selected scheme is MUSCL or WENO5.
+inline bool is_high_order( ReconstructionScheme s )
+{
+    return s == ReconstructionScheme::muscl || s == ReconstructionScheme::weno5;
 }
 
-// Limiter: slope limiter used by MUSCL.
-//
-// None disables limiting (can overshoot near discontinuities).
-// Supported choices are intentionally kept small:
-//   Minmod  : most diffusive but robust
-//   VanLeer : less diffusive and smooth in regular regions
-enum class Limiter {
-    None,
-    Minmod,
-    VanLeer
+
+// Store the scheme, MUSCL limiter and positive WENO weight epsilon.
+struct ReconstructionOptions
+{
+    ReconstructionScheme scheme = ReconstructionScheme::first_order;
+
+    // Slope limiter used only by MUSCL.
+    SlopeLimiter limiter = SlopeLimiter::van_leer;
+
+    // Positive epsilon in the Jiang-Shu inverse-square weights; used only by WENO5.
+    double eps = default_weno_epsilon;
+
+    // Return the ghost width required by the configured scheme.
+    int required_ng() const
+    {
+        return required_ghost_cells( scheme );
+    }
 };
 
-// Options
-// -------
-// A single bundle of user-selectable reconstruction settings.
-// Populated from cfg via readOptions(cfg).
-struct Options {
-    Scheme scheme = Scheme::FirstOrder;
-    // Limiter for MUSCL (ignored for FirstOrder/WENO5).
-    Limiter limiter = Limiter::VanLeer;
 
-    // Small positive epsilon used in WENO weights.
-    double eps = 1e-12;
+// Read the reconstruction scheme, MUSCL limiter and positive WENO epsilon.
+ReconstructionOptions read_reconstruction_options( const Cfg &cfg );
 
-    // Characteristic reconstruction is fixed to conservative variables
-    // with eigenvectors evaluated at the arithmetic mean of conservative states.
 
-    // Convenience: required ghost cells for the chosen scheme.
-    int requiredNg() const { return recon::requiredGhostCells(scheme); }
+// Build conservative face states with the selected scheme; MUSCL and WENO use characteristic projection.
+class Reconstruction2D
+{
+  public:
+    explicit Reconstruction2D( const Cfg &cfg );
+
+    // Return the stored reconstruction options.
+    const ReconstructionOptions &options() const
+    {
+        return opt_;
+    }
+
+    // state (in) - row-major cell field with valid ghosts; gamma is the ideal-gas ratio.
+    // ulx, urx (out) - left/right states on (nx + 1)*ny x-faces.
+    void reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
+        std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const;
+
+    // state (in) - row-major cell field with valid ghosts; gamma is the ideal-gas ratio.
+    // uly, ury (out) - left/right states on nx*(ny + 1) y-faces.
+    void reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
+        std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const;
+
+  private:
+    ReconstructionOptions opt_;
 };
-
-// Read reconstruction options from cfg.
-//
-// Expected keys (strict strings; invalid values should trigger clear errors):
-//   reconstruction.scheme: firstOrder | muscl | weno5
-//   reconstruction.limiter: none | minmod | vanleer
-//   reconstruction.eps: small positive number (e.g. 1e-12)
-//
-//   WENO5 uses the standard Jiang–Shu nonlinear weights with exponent fixed at p = 2
-// Characteristic reconstruction is fixed to conservative variables
-// at the arithmetic mean of conservative states; no characteristic-mode cfg keys are exposed.
-// Limiter support is intentionally restricted to the small set above.
-Options readOptions(const Cfg& cfg);
-
-// Reconstruction2D
-// ----------------
-// Characteristic-space reconstruction without positivity repair or order fallback.
-// Fixed to conservative-characteristic projection at the arithmetic mean of conservative states.
-// Build left/right face states in both x- and y-directions.
-//
-// X-faces (vertical): (nx+1)*ny
-//   i = 0..nx, j = 0..ny-1
-// Y-faces (horizontal): nx*(ny+1)
-//   i = 0..nx-1, j = 0..ny
-//
-// The input U is cell-centered and includes ghosts.
-class Reconstruction2D {
-public:
-    explicit Reconstruction2D(const Cfg& cfg);
-
-    const Options& options() const { return opt_; }
-
-    void reconstructFacesX(const std::vector<Vec4>& U,
-                           int nx, int ny, int ng,
-                           double gamma,
-                           std::vector<Vec4>& ULx,
-                           std::vector<Vec4>& URx) const;
-
-    void reconstructFacesY(const std::vector<Vec4>& U,
-                           int nx, int ny, int ng,
-                           double gamma,
-                           std::vector<Vec4>& ULy,
-                           std::vector<Vec4>& URy) const;
-
-private:
-    Options opt_;
-};
-
-} // namespace recon

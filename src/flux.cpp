@@ -1,457 +1,885 @@
+#include "common_functions.hpp"
 #include "flux.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-// flux.cpp
-// --------
-// Implementations of numerical flux functions used by the solver.
-//
-// Conventions used in this file:
-//   - UL / UR : left and right conservative states at a face
-//   - dir     : face-normal direction (0 = x, 1 = y)
-//   - gamma   : ratio of specific heats
-//
-// Design notes:
-//   - Use evalFlowVars(...) to cache primitive / thermodynamic quantities
-//     needed repeatedly in hot paths.
-//   - Prefer physFluxFromFlowVars(...) or physFluxFromPrim(...) when the
-//     corresponding state form is already available, so we avoid unnecessary
-//     conservative <-> primitive reconversion.
-//
-// Fluxes currently implemented here:
-//   1. Rusanov / LLF
-//   2. HLLC
-//   3. AUSM
-//   4. Exact Godunov (directional 1D exact Riemann reduction in 2D)
-//
-// Extension pattern for a new flux:
-//   1. Derive a new class from FluxD<Dim> in flux.hpp.
-//   2. Implement numericalFlux(...) in this file.
-//   3. Register the scheme in makeFluxD(...) at the bottom of this file.
 
-// ============================================================================
-// Rusanov / Local Lax-Friedrichs
-// ============================================================================
-//
-// Template:
-//   F = 0.5 * (F_L + F_R) - 0.5 * s_max * (U_R - U_L)
-// where s_max is estimated from the largest left/right signal speed
-// |u_n| + a in the requested face-normal direction.
-template<int Dim>
-std::string FluxRusanov<Dim>::name() const { return "rusanov"; }
+// Store a normal Riemann sample; side_tag is -1 for left material and +1 for right material.
+struct ExactSample1D
+{
+    double density{};
+    double x_velocity{};
+    double pressure{};
+    int side_tag{};
+};
 
-template<int Dim>
-typename FluxRusanov<Dim>::Cons
-FluxRusanov<Dim>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
 
-    const double unL = (dir == 0) ? WL.u : WL.v;
-    const double unR = (dir == 0) ? WR.u : WR.v;
-    const double smax = std::max(std::abs(unL) + WL.a, std::abs(unR) + WR.a);
+// Compute the Rusanov flux using the largest left/right acoustic signal speed.
+ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
+    double gamma, Flux_vector &output )
+{
+    ReturnCodes code = SUCCESS;
 
-    const Cons FL = physFluxFromFlowVars(UL, WL, dir);
-    const Cons FR = physFluxFromFlowVars(UR, WR, dir);
-
-    Cons F{};
-    for (int k = 0; k < Dim + 2; ++k) {
-        F[k] = 0.5 * (FL[k] + FR[k]) - 0.5 * smax * (UR[k] - UL[k]);
+    if ( dir != x_direction && dir != y_direction )
+    {
+        return INVALID_DIRECTION;
     }
-    return F;
+    EvaluatedState wl{};
+
+    code = calc_flow_variables( left_state, gamma, wl );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    EvaluatedState wr{};
+
+    code = calc_flow_variables( right_state, gamma, wr );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    const double un_l = ( dir == x_direction ) ? wl.x_velocity : wl.y_velocity;
+    const double un_r = ( dir == x_direction ) ? wr.x_velocity : wr.y_velocity;
+    const double smax = std::max( std::abs( un_l ) + wl.sound_speed, std::abs( un_r ) + wr.sound_speed );
+
+    Flux_vector fl{};
+
+    code = calc_physical_flux( left_state, wl, dir, fl );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    Flux_vector fr{};
+
+    code = calc_physical_flux( right_state, wr, dir, fr );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    // Average the physical fluxes and subtract acoustic dissipation across the state jump.
+    Flux_vector flux{};
+
+    flux.mass_flux = 0.5 * ( fl.mass_flux + fr.mass_flux ) -
+                     ( 0.5 * smax ) * ( right_state.specific_mass - left_state.specific_mass );
+    flux.x_momentum_flux = 0.5 * ( fl.x_momentum_flux + fr.x_momentum_flux ) -
+                           ( 0.5 * smax ) * ( right_state.specific_x_momentum - left_state.specific_x_momentum );
+    flux.y_momentum_flux = 0.5 * ( fl.y_momentum_flux + fr.y_momentum_flux ) -
+                           ( 0.5 * smax ) * ( right_state.specific_y_momentum - left_state.specific_y_momentum );
+    flux.energy_flux = 0.5 * ( fl.energy_flux + fr.energy_flux ) -
+                       ( 0.5 * smax ) * ( right_state.specific_energy - left_state.specific_energy );
+    if ( !is_finite_flux( flux ) )
+    {
+        return NON_FINITE_FLUX;
+    }
+
+    output = flux;
+    return SUCCESS;
 }
 
-// Explicit instantiation for Dim = 2.
-template class FluxRusanov<2>;
 
-// ============================================================================
-// HLLC
-// ============================================================================
-//
-// Three-wave approximate Riemann solver:
-//   S_L | S_M | S_R
-//
-// Programming pattern used here:
-//   - estimate outer wave speeds S_L and S_R
-//   - compute the contact speed S_M
-//   - construct left/right star states
-//   - select the correct flux branch by wave-speed sign
-//
-// In 2D, `dir` selects the normal direction used in the reduction.
-// Tangential momentum is carried from the corresponding side state.
-ConsD<2> FluxHLLC<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
+// Compute a HLLC star state while preserving the tangential velocity.
+// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+static void calc_hllc_star_state( const Conservative_vector &state, const EvaluatedState &primitive, int dir,
+    double gamma, double s, double Sstar, Conservative_vector &output, ReturnCodes &code )
+{
+    code = SUCCESS;
 
-    const double aL = WL.a;
-    const double aR = WR.a;
+    const double rho = primitive.density;
+    const double un = ( dir == x_direction ) ? primitive.x_velocity : primitive.y_velocity;
+    const double ut = ( dir == x_direction ) ? primitive.y_velocity : primitive.x_velocity;
+    const double p = primitive.pressure;
+    const double e = state.specific_energy;
 
-    const double unL = (dir == 0) ? WL.u : WL.v;
-    const double unR = (dir == 0) ? WR.u : WR.v;
+    if ( !std::isfinite( s - Sstar ) || s == Sstar )
+    {
+        code = INVALID_WAVE_SPEED;
+        return;
+    }
+    const double rho_star = rho * ( s - un ) / ( s - Sstar );
+    const double p_star = p + rho * ( s - un ) * ( Sstar - un );
+    const double e_star = ( ( s - un ) * e - p * un + p_star * Sstar ) / ( s - Sstar );
 
-    const double SL = std::min(unL - aL, unR - aR);
-    const double SR = std::max(unL + aL, unR + aR);
+    Conservative_vector us{};
 
-    const Cons FL = physFluxFromFlowVars(UL, WL, dir);
-    const Cons FR = physFluxFromFlowVars(UR, WR, dir);
+    us.specific_mass = rho_star;
 
-    if (SL >= 0.0) return FL;
-    if (SR <= 0.0) return FR;
+    if ( dir == x_direction )
+    {
+        us.specific_x_momentum = rho_star * Sstar;
+        us.specific_y_momentum = rho_star * ut;
+    }
+    else
+    {
+        us.specific_x_momentum = rho_star * ut;
+        us.specific_y_momentum = rho_star * Sstar;
+    }
 
-    const double rhoL = WL.rho, rhoR = WR.rho;
-    const double pL   = WL.p,   pR   = WR.p;
+    us.specific_energy = e_star;
 
-    const double num = pR - pL + rhoL * unL * (SL - unL) - rhoR * unR * (SR - unR);
-    const double den = rhoL * (SL - unL) - rhoR * (SR - unR);
-    if (!std::isfinite(den) || den == 0.0)
-        throw std::runtime_error("HLLC: invalid contact-speed denominator");
-    const double SM = num / den;
-    if (!std::isfinite(SM)) throw std::runtime_error("HLLC: non-finite contact speed");
+    if ( !std::isfinite( p_star ) || p_star <= 0.0 )
+    {
+        code = INVALID_STAR_STATE;
+        return;
+    }
+    {
+        EvaluatedState checked_state{};
 
-    auto star = [&](const Cons& U, const FlowVars2& W, double S, double Sstar) -> Cons {
-        const double rho = W.rho;
-        const double un  = (dir == 0) ? W.u : W.v;
-        const double ut  = (dir == 0) ? W.v : W.u;
-        const double p   = W.p;
-        const double E   = U[3];
-
-        if (!std::isfinite(S - Sstar) || S == Sstar)
-            throw std::runtime_error("HLLC: degenerate star-state wave speed");
-        const double rho_star = rho * (S - un) / (S - Sstar);
-        const double p_star   = p + rho * (S - un) * (Sstar - un);
-        const double E_star   = ((S - un) * E - p * un + p_star * Sstar) / (S - Sstar);
-
-        Cons Us{};
-        Us[0] = rho_star;
-        if (dir == 0) {
-            Us[1] = rho_star * Sstar;
-            Us[2] = rho_star * ut;
-        } else {
-            Us[1] = rho_star * ut;
-            Us[2] = rho_star * Sstar;
+        code = calc_flow_variables( us, gamma, checked_state );
+        if ( code != SUCCESS )
+        {
+            return;
         }
-        Us[3] = E_star;
-        if (!std::isfinite(p_star) || p_star <= 0.0)
-            throw std::runtime_error("HLLC: invalid star pressure");
-        (void)evalFlowVars(Us, gamma);
-        return Us;
-    };
-
-    const Cons ULs = star(UL, WL, SL, SM);
-    const Cons URs = star(UR, WR, SR, SM);
-
-    Cons F{};
-    if (SM >= 0.0) {
-        for (int k = 0; k < 4; ++k) F[k] = FL[k] + SL * (ULs[k] - UL[k]);
-    } else {
-        for (int k = 0; k < 4; ++k) F[k] = FR[k] + SR * (URs[k] - UR[k]);
-    }
-    return F;
-}
-
-// ============================================================================
-// AUSM
-// ============================================================================
-//
-// AUSM splits the interface flux into:
-//   - a convective part based on split Mach-number polynomials
-//   - a pressure part based on split pressure polynomials
-//
-// The helper functions below implement the standard polynomial split pieces
-// M^+, M^-, P^+, and P^-.
-namespace ausm_detail {
-
-inline double Mplus(double M) {
-    const double aM = std::abs(M);
-    if (aM >= 1.0) return 0.5 * (M + aM);
-    return 0.25 * (M + 1.0) * (M + 1.0);
-}
-
-inline double Mminus(double M) {
-    const double aM = std::abs(M);
-    if (aM >= 1.0) return 0.5 * (M - aM);
-    return -0.25 * (M - 1.0) * (M - 1.0);
-}
-
-inline double Pplus(double M) {
-    const double aM = std::abs(M);
-    if (aM >= 1.0) return 0.5 * (1.0 + (M >= 0.0 ? 1.0 : -1.0));
-    return 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
-}
-
-inline double Pminus(double M) {
-    const double aM = std::abs(M);
-    if (aM >= 1.0) return 0.5 * (1.0 - (M >= 0.0 ? 1.0 : -1.0));
-    return 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
-}
-
-} // namespace ausm_detail
-
-ConsD<2> FluxAUSM<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    if (dir != 0 && dir != 1) {
-        throw std::runtime_error("AUSM flux: dir must be 0 or 1");
     }
 
-    // Use the normal velocity component for Mach splitting.
-    // Pressure contributes only to the normal momentum flux component.
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
+    output = us;
+    code = SUCCESS;
+    return;
+}
 
-    const double aL = WL.a;
-    const double aR = WR.a;
-    const double a = 0.5 * aL + 0.5 * aR;
-    if (!std::isfinite(a) || a <= 0.0) throw std::runtime_error("AUSM: invalid interface sound speed");
 
-    const double unL = (dir == 0) ? WL.u : WL.v;
-    const double unR = (dir == 0) ? WR.u : WR.v;
-    const double ML  = unL / a;
-    const double MR  = unR / a;
+// Compute the HLLC flux from the two outer waves and the contact wave.
+ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
+    double gamma, Flux_vector &output )
+{
+    ReturnCodes code = SUCCESS;
 
-    const double mDot = a * (ausm_detail::Mplus(ML) * WL.rho + ausm_detail::Mminus(MR) * WR.rho);
-    const double pInt = ausm_detail::Pplus(ML) * WL.p + ausm_detail::Pminus(MR) * WR.p;
+    if ( dir != x_direction && dir != y_direction )
+    {
+        return INVALID_DIRECTION;
+    }
+    EvaluatedState wl{};
 
-    const bool upL = (mDot >= 0.0);
-    const double uUp0 = upL ? WL.u : WR.u;
-    const double uUp1 = upL ? WL.v : WR.v;
-    const double HUp  = upL ? WL.H : WR.H;
-
-    Cons F{};
-    F[0] = mDot;
-
-    if (dir == 0) {
-        F[1] = mDot * uUp0 + pInt;
-        F[2] = mDot * uUp1;
-    } else {
-        F[1] = mDot * uUp0;
-        F[2] = mDot * uUp1 + pInt;
+    code = calc_flow_variables( left_state, gamma, wl );
+    if ( code != SUCCESS )
+    {
+        return code;
     }
 
-    F[3] = mDot * HUp;
-    return F;
-}
+    EvaluatedState wr{};
 
-// ============================================================================
-// Exact Godunov
-// ============================================================================
-//
-// This implementation performs a directional exact 1D Riemann solve inside the
-// 2D flux function:
-//   1. extract (rho, u_n, p) on the chosen face-normal direction
-//   2. solve for the star state (p*, u*)
-//   3. sample the self-similar solution at S = x / t = 0
-//   4. rebuild a 2D primitive state and evaluate the physical flux
-//
-// The tangential velocity component is upwinded from the side that provides the
-// sampled state.
-namespace {
-
-// Pressure function used in the Newton iteration for p*.
-void godunovPrefunImpl(double p, const Prim1& W, double gamma, double& f, double& df) {
-    const double rho = W.rho;
-    const double pK  = W.p;
-    const double aK  = EosIdealGas<2>::soundSpeed(Prim2{rho, {W.u[0], 0.0}, pK}, gamma);
-
-    if (p > pK) {
-        const double A = 2.0 / ((gamma + 1.0) * rho);
-        const double B = (gamma - 1.0) / (gamma + 1.0) * pK;
-        const double sqrtTerm = std::sqrt(A / (p + B));
-        f  = (p - pK) * sqrtTerm;
-        df = sqrtTerm * (1.0 - 0.5 * (p - pK) / (p + B));
-    } else {
-        const double pratio = p / pK;
-        const double expo = (gamma - 1.0) / (2.0 * gamma);
-        f  = (2.0 * aK / (gamma - 1.0)) * (std::pow(pratio, expo) - 1.0);
-        df = (1.0 / (rho * aK)) * std::pow(pratio, -(gamma + 1.0) / (2.0 * gamma));
-    }
-}
-
-// PVRS initial guess for the star-region pressure.
-double guessPressurePVRSImpl(const Prim1& WL, const Prim1& WR, double gamma) {
-    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
-    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
-    const double pPV = 0.5 * (WL.p + WR.p)
-                     - 0.125 * (WR.u[0] - WL.u[0]) * (WL.rho + WR.rho) * (aL + aR);
-    if (!std::isfinite(pPV) || pPV <= 0.0)
-        throw std::runtime_error("Godunov: non-positive or non-finite PVRS pressure estimate");
-    return pPV;
-}
-
-} // namespace
-
-// Thin wrappers kept as FluxGodunov private helpers declared in flux.hpp.
-void FluxGodunov<2>::prefun(double p, const Prim1& W, double gamma, double& f, double& df) {
-    godunovPrefunImpl(p, W, gamma, f, df);
-}
-
-double FluxGodunov<2>::guessPressurePVRS(const Prim1& WL, const Prim1& WR, double gamma) {
-    return guessPressurePVRSImpl(WL, WR, gamma);
-}
-
-// Solve the exact 1D Riemann problem for the star pressure and star velocity.
-void FluxGodunov<2>::starPU(const Prim1& WL, const Prim1& WR, double gamma,
-                            double& pStar, double& uStar) {
-    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
-    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
-
-    if ((WR.u[0] - WL.u[0]) > (2.0 / (gamma - 1.0)) * (aL + aR)) {
-        throw std::runtime_error("Exact Riemann: vacuum not handled.");
+    code = calc_flow_variables( right_state, gamma, wr );
+    if ( code != SUCCESS )
+    {
+        return code;
     }
 
-    double p = guessPressurePVRSImpl(WL, WR, gamma);
+    const double a_l = wl.sound_speed;
+    const double a_r = wr.sound_speed;
+
+    const double un_l = ( dir == x_direction ) ? wl.x_velocity : wl.y_velocity;
+    const double un_r = ( dir == x_direction ) ? wr.x_velocity : wr.y_velocity;
+
+    const double sl = std::min( un_l - a_l, un_r - a_r );
+    const double sr = std::max( un_l + a_l, un_r + a_r );
+
+    Flux_vector fl{};
+
+    code = calc_physical_flux( left_state, wl, dir, fl );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    Flux_vector fr{};
+
+    code = calc_physical_flux( right_state, wr, dir, fr );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    if ( sl >= 0.0 )
+    {
+        output = fl;
+        return SUCCESS;
+    }
+
+    if ( sr <= 0.0 )
+    {
+        output = fr;
+        return SUCCESS;
+    }
+
+    const double rho_l = wl.density, rho_r = wr.density;
+    const double p_l = wl.pressure, p_r = wr.pressure;
+
+    // Use the momentum jump conditions to compute the contact-wave speed.
+    const double num = p_r - p_l + rho_l * un_l * ( sl - un_l ) - rho_r * un_r * ( sr - un_r );
+    const double den = rho_l * ( sl - un_l ) - rho_r * ( sr - un_r );
+
+    if ( !std::isfinite( den ) || den == 0.0 )
+    {
+        return INVALID_WAVE_SPEED;
+    }
+    const double sm = num / den;
+
+    if ( !std::isfinite( sm ) )
+    {
+        return INVALID_WAVE_SPEED;
+    }
+
+    Conservative_vector uls{}, urs{};
+    calc_hllc_star_state( left_state, wl, dir, gamma, sl, sm, uls, code );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+    calc_hllc_star_state( right_state, wr, dir, gamma, sr, sm, urs, code );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    Flux_vector flux{};
+
+    if ( sm >= 0.0 )
+    {
+        const Conservative_vector correction = sl * ( uls - left_state );
+
+        flux.mass_flux = fl.mass_flux + correction.specific_mass;
+        flux.x_momentum_flux = fl.x_momentum_flux + correction.specific_x_momentum;
+        flux.y_momentum_flux = fl.y_momentum_flux + correction.specific_y_momentum;
+        flux.energy_flux = fl.energy_flux + correction.specific_energy;
+    }
+    else
+    {
+        const Conservative_vector correction = sr * ( urs - right_state );
+
+        flux.mass_flux = fr.mass_flux + correction.specific_mass;
+        flux.x_momentum_flux = fr.x_momentum_flux + correction.specific_x_momentum;
+        flux.y_momentum_flux = fr.y_momentum_flux + correction.specific_y_momentum;
+        flux.energy_flux = fr.energy_flux + correction.specific_energy;
+    }
+
+    if ( !is_finite_flux( flux ) )
+    {
+        return NON_FINITE_FLUX;
+    }
+
+    output = flux;
+    return SUCCESS;
+}
+
+
+// Compute the positive Mach-number split for AUSM.
+// output (out) - value of the split function
+static void ausm_mach_plus( double m, double &output )
+{
+    const double a_m = std::abs( m );
+
+    if ( a_m >= 1.0 )
+    {
+        output = 0.5 * ( m + a_m );
+        return;
+    }
+
+    output = 0.25 * ( m + 1.0 ) * ( m + 1.0 );
+    return;
+}
+
+
+// Compute the negative Mach-number split for AUSM.
+// output (out) - value of the split function
+static void ausm_mach_minus( double m, double &output )
+{
+    const double a_m = std::abs( m );
+
+    if ( a_m >= 1.0 )
+    {
+        output = 0.5 * ( m - a_m );
+        return;
+    }
+
+    output = -0.25 * ( m - 1.0 ) * ( m - 1.0 );
+    return;
+}
+
+
+// Compute the positive pressure weight for AUSM.
+// output (out) - value of the split function
+static void ausm_pressure_plus( double m, double &output )
+{
+    const double a_m = std::abs( m );
+
+    if ( a_m >= 1.0 )
+    {
+        output = 0.5 * ( 1.0 + ( m >= 0.0 ? 1.0 : -1.0 ) );
+        return;
+    }
+
+    output = 0.25 * ( m + 1.0 ) * ( m + 1.0 ) * ( 2.0 - m );
+    return;
+}
+
+
+// Compute the negative pressure weight for AUSM.
+// output (out) - value of the split function
+static void ausm_pressure_minus( double m, double &output )
+{
+    const double a_m = std::abs( m );
+
+    if ( a_m >= 1.0 )
+    {
+        output = 0.5 * ( 1.0 - ( m >= 0.0 ? 1.0 : -1.0 ) );
+        return;
+    }
+
+    output = 0.25 * ( m - 1.0 ) * ( m - 1.0 ) * ( 2.0 + m );
+    return;
+}
+
+
+// Compute the AUSM flux by splitting mass transport and interface pressure.
+ReturnCodes calc_ausm_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
+    double gamma, Flux_vector &output )
+{
+    ReturnCodes code = SUCCESS;
+
+    if ( dir != x_direction && dir != y_direction )
+    {
+        return INVALID_DIRECTION;
+    }
+
+    EvaluatedState wl{};
+
+    code = calc_flow_variables( left_state, gamma, wl );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    EvaluatedState wr{};
+
+    code = calc_flow_variables( right_state, gamma, wr );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    const double a_l = wl.sound_speed;
+    const double a_r = wr.sound_speed;
+    const double a = 0.5 * a_l + 0.5 * a_r;
+
+    if ( !std::isfinite( a ) || a <= 0.0 )
+    {
+        return INVALID_SOUND_VELOCITY;
+    }
+
+    const double un_l = ( dir == x_direction ) ? wl.x_velocity : wl.y_velocity;
+    const double un_r = ( dir == x_direction ) ? wr.x_velocity : wr.y_velocity;
+    const double ml = un_l / a;
+    const double mr = un_r / a;
+
+    // Split the normal Mach numbers for mass transport and pressure weights for normal momentum.
+    double mach_plus = 0.0, mach_minus = 0.0;
+    double pressure_plus = 0.0, pressure_minus = 0.0;
+
+    ausm_mach_plus( ml, mach_plus );
+    ausm_mach_minus( mr, mach_minus );
+    ausm_pressure_plus( ml, pressure_plus );
+    ausm_pressure_minus( mr, pressure_minus );
+
+    const double m_dot = a * ( mach_plus * wl.density + mach_minus * wr.density );
+    const double p_int = pressure_plus * wl.pressure + pressure_minus * wr.pressure;
+
+    // Transport velocity and total enthalpy from the side selected by the mass-flux sign.
+    const bool up_l = ( m_dot >= 0.0 );
+    const double u_up0 = up_l ? wl.x_velocity : wr.x_velocity;
+    const double u_up1 = up_l ? wl.y_velocity : wr.y_velocity;
+    const double hup = up_l ? wl.specific_total_enthalpy : wr.specific_total_enthalpy;
+
+    Flux_vector flux{};
+
+    flux.mass_flux = m_dot;
+
+    if ( dir == x_direction )
+    {
+        flux.x_momentum_flux = m_dot * u_up0 + p_int;
+        flux.y_momentum_flux = m_dot * u_up1;
+    }
+    else
+    {
+        flux.x_momentum_flux = m_dot * u_up0;
+        flux.y_momentum_flux = m_dot * u_up1 + p_int;
+    }
+
+    flux.energy_flux = m_dot * hup;
+    if ( !is_finite_flux( flux ) )
+    {
+        return NON_FINITE_FLUX;
+    }
+
+    output = flux;
+    return SUCCESS;
+}
+
+
+// Compute the shock or rarefaction pressure function and its pressure derivative.
+// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+static void godunov_prefun_impl( double p, const Primitive_vector &primitive, double gamma, double &f, double &df,
+    ReturnCodes &code )
+{
+    code = SUCCESS;
+
+    double value = 0.0, derivative = 0.0;
+
+    const double rho = primitive.density;
+    const double p_k = primitive.pressure;
+    double a_k{};
+
+    code = calc_sound_velocity( Primitive_vector{ rho, primitive.x_velocity, 0.0, p_k }, gamma, a_k );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+
+    // Use the shock relation above the side pressure and the rarefaction relation otherwise.
+    if ( p > p_k )
+    {
+        const double a = 2.0 / ( ( gamma + 1.0 ) * rho );
+        const double b = ( gamma - 1.0 ) / ( gamma + 1.0 ) * p_k;
+        const double sqrt_term = std::sqrt( a / ( p + b ) );
+
+        value = ( p - p_k ) * sqrt_term;
+        derivative = sqrt_term * ( 1.0 - 0.5 * ( p - p_k ) / ( p + b ) );
+    }
+    else
+    {
+        const double pratio = p / p_k;
+        const double expo = ( gamma - 1.0 ) / ( 2.0 * gamma );
+
+        value = ( 2.0 * a_k / ( gamma - 1.0 ) ) * ( std::pow( pratio, expo ) - 1.0 );
+        derivative = ( 1.0 / ( rho * a_k ) ) * std::pow( pratio, -( gamma + 1.0 ) / ( 2.0 * gamma ) );
+    }
+    if ( !std::isfinite( value ) || !std::isfinite( derivative ) || derivative <= 0.0 )
+    {
+        code = INVALID_NEWTON_ITERATION;
+        return;
+    }
+    f = value;
+    df = derivative;
+    code = SUCCESS;
+    return;
+}
+
+
+// Estimate the star pressure with the primitive-variable Riemann approximation.
+// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+static void guess_pressure_pvrsimpl( const Primitive_vector &wl, const Primitive_vector &wr, double gamma,
+    double &output, ReturnCodes &code )
+{
+    code = SUCCESS;
+
+    double a_l{};
+
+    code = calc_sound_velocity( Primitive_vector{ wl.density, wl.x_velocity, 0.0, wl.pressure }, gamma, a_l );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+    double a_r{};
+
+    code = calc_sound_velocity( Primitive_vector{ wr.density, wr.x_velocity, 0.0, wr.pressure }, gamma, a_r );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+    const double p_pv = 0.5 * ( wl.pressure + wr.pressure ) -
+                        0.125 * ( wr.x_velocity - wl.x_velocity ) * ( wl.density + wr.density ) * ( a_l + a_r );
+    if ( !std::isfinite( p_pv ) || p_pv <= 0.0 )
+    {
+        code = INVALID_PRESSURE_ESTIMATE;
+        return;
+    }
+    output = p_pv;
+    code = SUCCESS;
+    return;
+}
+
+
+// Numerical controls for the exact Godunov pressure solve.
+static constexpr int godunov_max_iterations = 40;
+static constexpr double godunov_residual_relative_tolerance = 1e-10;
+
+
+// Solve for the star pressure and normal velocity by Newton iteration.
+// wl, wr (in) - left/right states with normal velocity stored in x_velocity
+// gamma (in) - ideal-gas heat-capacity ratio
+// p_star, u_star (out) - star pressure and normal velocity
+// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+static void calc_godunov_star_state( const Primitive_vector &wl, const Primitive_vector &wr, double gamma,
+    double &p_star, double &u_star, ReturnCodes &code )
+{
+    code = SUCCESS;
+
+    double a_l{};
+
+    code = calc_sound_velocity( Primitive_vector{ wl.density, wl.x_velocity, 0.0, wl.pressure }, gamma, a_l );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+    double a_r{};
+
+    code = calc_sound_velocity( Primitive_vector{ wr.density, wr.x_velocity, 0.0, wr.pressure }, gamma, a_r );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+
+    if ( ( wr.x_velocity - wl.x_velocity ) > ( 2.0 / ( gamma - 1.0 ) ) * ( a_l + a_r ) )
+    {
+        code = VACUUM_STATE;
+        return;
+    }
+
+    double p = 0.0;
+    guess_pressure_pvrsimpl( wl, wr, gamma, p, code );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
 
     bool converged = false;
-    // Newton iteration for p*.
-    for (int it = 0; it < 40; ++it) {
-        double fL, dfL, fR, dfR;
-        godunovPrefunImpl(p, WL, gamma, fL, dfL);
-        godunovPrefunImpl(p, WR, gamma, fR, dfR);
 
-        const double g  = fL + fR + (WR.u[0] - WL.u[0]);
-        const double dg = dfL + dfR;
+    // Solve f_left(p) + f_right(p) + u_right - u_left = 0; reject invalid Newton steps.
+    for ( int it = 0; it < godunov_max_iterations; ++it )
+    {
+        double f_l, df_l, f_r, df_r;
 
-        if (!std::isfinite(g) || !std::isfinite(dg) || dg <= 0.0)
-            throw std::runtime_error("Godunov: invalid Newton residual or derivative");
-        const double residualScale = aL + aR + std::abs(WR.u[0] - WL.u[0]);
-        if (!std::isfinite(residualScale) || residualScale <= 0.0)
-            throw std::runtime_error("Godunov: invalid residual scale");
-        if (std::abs(g) <= 1e-10 * residualScale) {
+        godunov_prefun_impl( p, wl, gamma, f_l, df_l, code );
+        if ( code != SUCCESS )
+        {
+            return;
+        }
+        godunov_prefun_impl( p, wr, gamma, f_r, df_r, code );
+        if ( code != SUCCESS )
+        {
+            return;
+        }
+
+        const double g = f_l + f_r + ( wr.x_velocity - wl.x_velocity );
+        const double dg = df_l + df_r;
+
+        if ( !std::isfinite( g ) || !std::isfinite( dg ) || dg <= 0.0 )
+        {
+            code = INVALID_NEWTON_ITERATION;
+            return;
+        }
+        const double residual_scale = a_l + a_r + std::abs( wr.x_velocity - wl.x_velocity );
+
+        if ( !std::isfinite( residual_scale ) || residual_scale <= 0.0 )
+        {
+            code = INVALID_NEWTON_ITERATION;
+            return;
+        }
+        if ( std::abs( g ) <= godunov_residual_relative_tolerance * residual_scale )
+        {
             converged = true;
             break;
         }
-        const double pNew = p - g / dg;
-        if (!std::isfinite(pNew) || pNew <= 0.0)
-            throw std::runtime_error("Godunov: Newton pressure must be finite and > 0");
-        p = pNew;
+
+        const double p_new = p - g / dg;
+
+        if ( !std::isfinite( p_new ) || p_new <= 0.0 )
+        {
+            code = INVALID_PRESSURE_ESTIMATE;
+            return;
+        }
+        p = p_new;
     }
-    if (!converged) throw std::runtime_error("Godunov: pressure iteration did not converge in 40 iterations");
 
-    double fL, dfL, fR, dfR;
-    godunovPrefunImpl(p, WL, gamma, fL, dfL);
-    godunovPrefunImpl(p, WR, gamma, fR, dfR);
+    if ( !converged )
+    {
+        code = PRESSURE_ITERATION_NOT_CONVERGED;
+        return;
+    }
 
-    // Recover the star-region pressure and velocity after convergence.
-    pStar = p;
-    uStar = 0.5 * (WL.u[0] + WR.u[0] + fR - fL);
+    double f_l, df_l, f_r, df_r;
+
+    godunov_prefun_impl( p, wl, gamma, f_l, df_l, code );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+    godunov_prefun_impl( p, wr, gamma, f_r, df_r, code );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+
+    const double velocity = 0.5 * ( wl.x_velocity + wr.x_velocity + f_r - f_l );
+    if ( !std::isfinite( velocity ) )
+    {
+        code = INVALID_STAR_STATE;
+        return;
+    }
+    p_star = p;
+    u_star = velocity;
+    code = SUCCESS;
+    return;
 }
 
-// Sample the exact self-similar solution at S = 0.
-ExactSample1D FluxGodunov<2>::sampleAtS0(const Prim1& WL, const Prim1& WR, double gamma,
-                                         double pStar, double uStar) {
-    const double aL = EosIdealGas<2>::soundSpeed(Prim2{WL.rho, {WL.u[0], 0.0}, WL.p}, gamma);
-    const double aR = EosIdealGas<2>::soundSpeed(Prim2{WR.rho, {WR.u[0], 0.0}, WR.p}, gamma);
+
+// Sample the exact Riemann solution at the stationary face, x/t = 0.
+// wl, wr (in) - left/right states with normal velocity stored in x_velocity
+// p_star, u_star (in) - star pressure and normal velocity
+// The returned side_tag selects the upstream tangential velocity: -1 left, +1 right.
+// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+static void sample_at_s0( const Primitive_vector &wl, const Primitive_vector &wr, double gamma, double p_star,
+    double u_star, ExactSample1D &output, ReturnCodes &code )
+{
+    code = SUCCESS;
+
+    double a_l{};
+
+    code = calc_sound_velocity( Primitive_vector{ wl.density, wl.x_velocity, 0.0, wl.pressure }, gamma, a_l );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
+    double a_r{};
+
+    code = calc_sound_velocity( Primitive_vector{ wr.density, wr.x_velocity, 0.0, wr.pressure }, gamma, a_r );
+    if ( code != SUCCESS )
+    {
+        return;
+    }
 
     ExactSample1D out{};
 
-    if (0.0 <= uStar) {
-        out.sideTag = -1;
-        if (pStar > WL.p) {
-            const double qL = std::sqrt(1.0 + (gamma + 1.0) / (2.0 * gamma) * (pStar / WL.p - 1.0));
-            const double SL = WL.u[0] - aL * qL;
-            if (0.0 <= SL) {
-                out = {WL.rho, WL.u[0], WL.p, -1};
-            } else {
-                const double pr = pStar / WL.p;
-                const double rhoStar = WL.rho * (pr + (gamma - 1.0) / (gamma + 1.0)) /
-                                      ((gamma - 1.0) / (gamma + 1.0) * pr + 1.0);
-                out = {rhoStar, uStar, pStar, -1};
+    // The contact-wave sign selects the left or right wave pattern at x/t = 0.
+    if ( 0.0 <= u_star )
+    {
+        out.side_tag = -1;
+
+        if ( p_star > wl.pressure )
+        {
+            const double q_l = std::sqrt( 1.0 + ( gamma + 1.0 ) / ( 2.0 * gamma ) * ( p_star / wl.pressure - 1.0 ) );
+            const double sl = wl.x_velocity - a_l * q_l;
+
+            if ( 0.0 <= sl )
+            {
+                out = { wl.density, wl.x_velocity, wl.pressure, -1 };
             }
-        } else {
-            const double SHL = WL.u[0] - aL;
-            const double aStarL = aL * std::pow(pStar / WL.p, (gamma - 1.0) / (2.0 * gamma));
-            const double STL = uStar - aStarL;
-            if (0.0 <= SHL) {
-                out = {WL.rho, WL.u[0], WL.p, -1};
-            } else if (0.0 >= STL) {
-                const double rhoStar = WL.rho * std::pow(pStar / WL.p, 1.0 / gamma);
-                out = {rhoStar, uStar, pStar, -1};
-            } else {
-                const double S = 0.0;
-                const double u = (2.0 / (gamma + 1.0)) * (aL + 0.5 * (gamma - 1.0) * WL.u[0] + S);
-                const double a = (2.0 / (gamma + 1.0)) * (aL + 0.5 * (gamma - 1.0) * (WL.u[0] - S));
-                const double rho = WL.rho * std::pow(a / aL, 2.0 / (gamma - 1.0));
-                const double p   = WL.p   * std::pow(a / aL, 2.0 * gamma / (gamma - 1.0));
-                out = {rho, u, p, -1};
+            else
+            {
+                const double pr = p_star / wl.pressure;
+                const double rho_star = wl.density * ( pr + ( gamma - 1.0 ) / ( gamma + 1.0 ) ) /
+                                        ( ( gamma - 1.0 ) / ( gamma + 1.0 ) * pr + 1.0 );
+                out = { rho_star, u_star, p_star, -1 };
             }
         }
-    } else {
-        out.sideTag = +1;
-        if (pStar > WR.p) {
-            const double qR = std::sqrt(1.0 + (gamma + 1.0) / (2.0 * gamma) * (pStar / WR.p - 1.0));
-            const double SR = WR.u[0] + aR * qR;
-            if (0.0 >= SR) {
-                out = {WR.rho, WR.u[0], WR.p, +1};
-            } else {
-                const double pr = pStar / WR.p;
-                const double rhoStar = WR.rho * (pr + (gamma - 1.0) / (gamma + 1.0)) /
-                                      ((gamma - 1.0) / (gamma + 1.0) * pr + 1.0);
-                out = {rhoStar, uStar, pStar, +1};
+        else
+        {
+            const double shl = wl.x_velocity - a_l;
+            const double a_star_l = a_l * std::pow( p_star / wl.pressure, ( gamma - 1.0 ) / ( 2.0 * gamma ) );
+            const double stl = u_star - a_star_l;
+
+            if ( 0.0 <= shl )
+            {
+                out = { wl.density, wl.x_velocity, wl.pressure, -1 };
             }
-        } else {
-            const double SHR = WR.u[0] + aR;
-            const double aStarR = aR * std::pow(pStar / WR.p, (gamma - 1.0) / (2.0 * gamma));
-            const double STR = uStar + aStarR;
-            if (0.0 >= SHR) {
-                out = {WR.rho, WR.u[0], WR.p, +1};
-            } else if (0.0 <= STR) {
-                const double rhoStar = WR.rho * std::pow(pStar / WR.p, 1.0 / gamma);
-                out = {rhoStar, uStar, pStar, +1};
-            } else {
-                const double S = 0.0;
-                const double u = (2.0 / (gamma + 1.0)) * (-aR + 0.5 * (gamma - 1.0) * WR.u[0] + S);
-                const double a = (2.0 / (gamma + 1.0)) * ( aR - 0.5 * (gamma - 1.0) * (WR.u[0] - S));
-                const double rho = WR.rho * std::pow(a / aR, 2.0 / (gamma - 1.0));
-                const double p   = WR.p   * std::pow(a / aR, 2.0 * gamma / (gamma - 1.0));
-                out = {rho, u, p, +1};
+            else if ( 0.0 >= stl )
+            {
+                const double rho_star = wl.density * std::pow( p_star / wl.pressure, 1.0 / gamma );
+
+                out = { rho_star, u_star, p_star, -1 };
+            }
+            else
+            {
+                const double s = 0.0;
+                const double u = ( 2.0 / ( gamma + 1.0 ) ) * ( a_l + 0.5 * ( gamma - 1.0 ) * wl.x_velocity + s );
+                const double a = ( 2.0 / ( gamma + 1.0 ) ) * ( a_l + 0.5 * ( gamma - 1.0 ) * ( wl.x_velocity - s ) );
+                const double rho = wl.density * std::pow( a / a_l, 2.0 / ( gamma - 1.0 ) );
+                const double p = wl.pressure * std::pow( a / a_l, 2.0 * gamma / ( gamma - 1.0 ) );
+
+                out = { rho, u, p, -1 };
+            }
+        }
+    }
+    else
+    {
+        out.side_tag = +1;
+
+        if ( p_star > wr.pressure )
+        {
+            const double q_r = std::sqrt( 1.0 + ( gamma + 1.0 ) / ( 2.0 * gamma ) * ( p_star / wr.pressure - 1.0 ) );
+            const double sr = wr.x_velocity + a_r * q_r;
+
+            if ( 0.0 >= sr )
+            {
+                out = { wr.density, wr.x_velocity, wr.pressure, +1 };
+            }
+            else
+            {
+                const double pr = p_star / wr.pressure;
+                const double rho_star = wr.density * ( pr + ( gamma - 1.0 ) / ( gamma + 1.0 ) ) /
+                                        ( ( gamma - 1.0 ) / ( gamma + 1.0 ) * pr + 1.0 );
+                out = { rho_star, u_star, p_star, +1 };
+            }
+        }
+        else
+        {
+            const double shr = wr.x_velocity + a_r;
+            const double a_star_r = a_r * std::pow( p_star / wr.pressure, ( gamma - 1.0 ) / ( 2.0 * gamma ) );
+            const double str = u_star + a_star_r;
+
+            if ( 0.0 >= shr )
+            {
+                out = { wr.density, wr.x_velocity, wr.pressure, +1 };
+            }
+            else if ( 0.0 <= str )
+            {
+                const double rho_star = wr.density * std::pow( p_star / wr.pressure, 1.0 / gamma );
+
+                out = { rho_star, u_star, p_star, +1 };
+            }
+            else
+            {
+                const double s = 0.0;
+                const double u = ( 2.0 / ( gamma + 1.0 ) ) * ( -a_r + 0.5 * ( gamma - 1.0 ) * wr.x_velocity + s );
+                const double a = ( 2.0 / ( gamma + 1.0 ) ) * ( a_r - 0.5 * ( gamma - 1.0 ) * ( wr.x_velocity - s ) );
+                const double rho = wr.density * std::pow( a / a_r, 2.0 / ( gamma - 1.0 ) );
+                const double p = wr.pressure * std::pow( a / a_r, 2.0 * gamma / ( gamma - 1.0 ) );
+
+                out = { rho, u, p, +1 };
             }
         }
     }
 
-    return out;
+    if ( !std::isfinite( out.density ) || !std::isfinite( out.x_velocity ) || !std::isfinite( out.pressure ) ||
+         out.density <= 0.0 || out.pressure <= 0.0 )
+    {
+        code = INVALID_STAR_STATE;
+        return;
+    }
+    output = out;
+    code = SUCCESS;
+    return;
 }
 
-// Evaluate the directional exact Godunov flux in 2D.
-ConsD<2> FluxGodunov<2>::numericalFlux(const Cons& UL, const Cons& UR, int dir, double gamma) const {
-    const auto WL = evalFlowVars(UL, gamma);
-    const auto WR = evalFlowVars(UR, gamma);
 
-    Prim1 WL1{}, WR1{};
-    WL1.rho = WL.rho;
-    WL1.u[0] = (dir == 0) ? WL.u : WL.v;
-    WL1.p = WL.p;
+// Compute the Godunov flux from the exact normal Riemann solution.
+ReturnCodes calc_godunov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
+    double gamma, Flux_vector &output )
+{
+    ReturnCodes code = SUCCESS;
 
-    WR1.rho = WR.rho;
-    WR1.u[0] = (dir == 0) ? WR.u : WR.v;
-    WR1.p = WR.p;
+    if ( dir != x_direction && dir != y_direction )
+    {
+        return INVALID_DIRECTION;
+    }
+    EvaluatedState wl{};
 
-    double pStar = 0.0;
-    double uStar = 0.0;
-    starPU(WL1, WR1, gamma, pStar, uStar);
-    const auto S0 = sampleAtS0(WL1, WR1, gamma, pStar, uStar);
+    code = calc_flow_variables( left_state, gamma, wl );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
 
-    Prim2 W0{};
-    W0.rho = S0.rho;
-    W0.p = S0.p;
-    W0.u[dir] = S0.u;
+    EvaluatedState wr{};
 
-    const int tan = 1 - dir;
-    W0.u[tan] = (S0.sideTag < 0)
-        ? ((tan == 0) ? WL.u : WL.v)
-        : ((tan == 0) ? WR.u : WR.v);
+    code = calc_flow_variables( right_state, gamma, wr );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
 
-    return physFluxFromPrim(W0, dir, gamma);
+    // Solve along the face normal with normal velocity stored in the 1D x_velocity field.
+    Primitive_vector wl1{}, wr1{};
+
+    wl1.density = wl.density;
+    wl1.x_velocity = ( dir == x_direction ) ? wl.x_velocity : wl.y_velocity;
+    wl1.pressure = wl.pressure;
+
+    wr1.density = wr.density;
+    wr1.x_velocity = ( dir == x_direction ) ? wr.x_velocity : wr.y_velocity;
+    wr1.pressure = wr.pressure;
+
+    double p_star = 0.0;
+    double u_star = 0.0;
+
+    calc_godunov_star_state( wl1, wr1, gamma, p_star, u_star, code );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    ExactSample1D s0{};
+    sample_at_s0( wl1, wr1, gamma, p_star, u_star, s0, code );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    Primitive_vector w0{};
+
+    w0.density = s0.density;
+    w0.pressure = s0.pressure;
+    w0.velocity( dir ) = s0.x_velocity;
+
+    // Recover tangential velocity from the material side selected by the exact sample.
+    const int tan = ( dir == x_direction ) ? y_direction : x_direction;
+
+    w0.velocity( tan ) = ( s0.side_tag < 0 ) ? ( ( tan == x_direction ) ? wl.x_velocity : wl.y_velocity )
+                                             : ( ( tan == x_direction ) ? wr.x_velocity : wr.y_velocity );
+
+    Flux_vector checked_result{};
+
+    code = calc_physical_flux( w0, dir, gamma, checked_result );
+    if ( code != SUCCESS )
+    {
+        return code;
+    }
+
+    output = checked_result;
+    return SUCCESS;
 }
 
-// ============================================================================
-// Factory
-// ============================================================================
-// Map a string name from configuration to the corresponding flux object.
-template<int Dim>
-std::unique_ptr<FluxD<Dim>> makeFluxD(const std::string& name) {
-    if (name == "rusanov") return std::make_unique<FluxRusanov<Dim>>();
-    if (name == "hllc")    return std::make_unique<FluxHLLC<Dim>>();
-    if (name == "ausm")    return std::make_unique<FluxAUSM<Dim>>();
-    if (name == "godunov") return std::make_unique<FluxGodunov<Dim>>();
-    throw std::runtime_error("Unknown flux: " + name);
+
+// Read the case-sensitive flux selection; unknown names are configuration errors.
+FluxScheme read_flux_scheme( const std::string &name )
+{
+    if ( name == "rusanov" )
+    {
+        return FluxScheme::rusanov;
+    }
+    if ( name == "hllc" )
+    {
+        return FluxScheme::hllc;
+    }
+    if ( name == "ausm" )
+    {
+        return FluxScheme::ausm;
+    }
+    if ( name == "godunov" )
+    {
+        return FluxScheme::godunov;
+    }
+    throw std::runtime_error( "Unknown flux: " + name );
 }
 
-template std::unique_ptr<FluxD<2>> makeFluxD<2>(const std::string& name);
+
+// Dispatch the selected calculation; output is assigned only on SUCCESS.
+ReturnCodes calc_numerical_flux( FluxScheme scheme, const Conservative_vector &left_state,
+    const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output )
+{
+    switch ( scheme )
+    {
+    case FluxScheme::rusanov:
+        return calc_rusanov_flux( left_state, right_state, dir, gamma, output );
+    case FluxScheme::hllc:
+        return calc_hllc_flux( left_state, right_state, dir, gamma, output );
+    case FluxScheme::ausm:
+        return calc_ausm_flux( left_state, right_state, dir, gamma, output );
+    case FluxScheme::godunov:
+        return calc_godunov_flux( left_state, right_state, dir, gamma, output );
+    }
+    return INVALID_FLUX_SCHEME;
+}

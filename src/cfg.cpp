@@ -1,19 +1,5 @@
-// cfg.cpp
-// -------
-// Implementation of the simple key-value configuration reader.
-//
-// File format (one entry per line):
-//   key = value
-//
-// Rules:
-// - Lines may contain comments introduced by '#'. Everything after '#' is ignored.
-// - Leading/trailing whitespace around keys/values is trimmed.
-// - Empty lines are ignored.
-// - Duplicate keys are allowed; the last occurrence wins.
-//
-// The parser is intentionally minimal (training code):
-// - No nested sections, quoting, or escape sequences.
-// - Values are stored as raw strings; typed getters convert on demand.
+#include "common_functions.hpp"
+
 
 #include "cfg.hpp"
 #include <algorithm>
@@ -22,108 +8,154 @@
 #include <cmath>
 #include <stdexcept>
 
-// Trim leading and trailing whitespace.
-static inline std::string trim(std::string s) {
-    auto notSpace = [](unsigned char c){ return !std::isspace(c); };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
-    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
-    return s;
-}
 
-// Lowercase a string (ASCII). Used for tolerant boolean parsing.
-static inline std::string toLower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c){ return (char)std::tolower(c); });
-    return s;
-}
+// Read key = value entries; the last value of a repeated key is retained.
+void Cfg::load( const std::string &filename )
+{
+    std::ifstream ifs( filename );
 
-void Cfg::load(const std::string& filename) {
-    std::ifstream ifs(filename);
-    if (!ifs) throw std::runtime_error("Cfg: cannot open file: " + filename);
+    if ( !ifs )
+    {
+        throw std::runtime_error( "Cfg: cannot open file: " + filename );
+    }
 
-    // Start from a clean map for each load.
+    // Replace the previous configuration; duplicate keys in this file retain the last value.
     kv_.clear();
+
     std::string line;
     int lineno = 0;
 
-    // Read the file line-by-line and parse `key = value` entries.
-    while (std::getline(ifs, line)) {
+    while ( std::getline( ifs, line ) )
+    {
         ++lineno;
 
-        // Strip comments.
-        auto posHash = line.find('#');
-        if (posHash != std::string::npos) line = line.substr(0, posHash);
+        // Discard the # comment before splitting the key and value.
+        auto pos_hash = line.find( '#' );
 
-        // Trim whitespace and skip empty lines.
-        line = trim(line);
-        if (line.empty()) continue;
+        if ( pos_hash != std::string::npos )
+            line = line.substr( 0, pos_hash );
 
-        // Split `key = value` by the first '='.
-        auto posEq = line.find('=');
-        if (posEq == std::string::npos) {
-            throw std::runtime_error("Cfg parse error at line " + std::to_string(lineno) + ": missing '='");
+        line = trim_string( line );
+
+        if ( line.empty() )
+        {
+            continue;
         }
 
-        // Trim both key and value.
-        std::string key = trim(line.substr(0, posEq));
-        std::string val = trim(line.substr(posEq+1));
-        if (key.empty()) {
-            throw std::runtime_error("Cfg parse error at line " + std::to_string(lineno) + ": empty key");
+        auto pos_eq = line.find( '=' );
+
+        if ( pos_eq == std::string::npos )
+        {
+            throw std::runtime_error( "Cfg parse error at line " + std::to_string( lineno ) + ": missing '='" );
         }
 
-        // Store raw string value. If the key repeats, the last value wins.
+        std::string key = trim_string( line.substr( 0, pos_eq ) );
+        std::string val = trim_string( line.substr( pos_eq + 1 ) );
+
+        if ( key.empty() )
+        {
+            throw std::runtime_error( "Cfg parse error at line " + std::to_string( lineno ) + ": empty key" );
+        }
+
         kv_[key] = val;
     }
 }
 
-// Check existence of a key.
-bool Cfg::has(const std::string& key) const {
-    return kv_.find(key) != kv_.end();
+
+// Check whether a configuration key is present.
+bool Cfg::has( const std::string &key ) const
+{
+    return kv_.find( key ) != kv_.end();
 }
 
-// Get string value (or return default).
-std::string Cfg::getString(const std::string& key, const std::string& def) const {
-    auto it = kv_.find(key);
-    return (it == kv_.end()) ? def : it->second;
+
+// Read a string value, or return def when the key is absent.
+std::string Cfg::get_string( const std::string &key, const std::string &def ) const
+{
+    auto it = kv_.find( key );
+    return ( it == kv_.end() ) ? def : it->second;
 }
 
-// Get integer value (or return default). Uses std::stoi.
-int Cfg::getInt(const std::string& key, int def) const {
-    auto it = kv_.find(key);
-    if (it == kv_.end()) return def;
-    try {
+
+// Read an integer value; reject malformed or partially converted values.
+int Cfg::get_int( const std::string &key, int def ) const
+{
+    auto it = kv_.find( key );
+
+    if ( it == kv_.end() )
+    {
+        return def;
+    }
+
+    try
+    {
         std::size_t used = 0;
-        const int value = std::stoi(it->second, &used);
-        if (used != it->second.size()) throw std::invalid_argument("trailing characters");
+        const int value = std::stoi( it->second, &used );
+
+        if ( used != it->second.size() )
+        {
+            throw std::invalid_argument( "trailing characters" );
+        }
+
         return value;
-    } catch (const std::exception&) {
-        throw std::runtime_error("Cfg: invalid integer for " + key + ": " + it->second);
+    }
+    catch ( const std::exception & )
+    {
+        throw std::runtime_error( "Cfg: invalid integer for " + key + ": " + it->second );
     }
 }
 
-// Get floating-point value (or return default). Uses std::stod.
-double Cfg::getDouble(const std::string& key, double def) const {
-    auto it = kv_.find(key);
-    if (it == kv_.end()) return def;
-    try {
+
+// Read a finite floating-point value; reject malformed or partially converted values.
+double Cfg::get_double( const std::string &key, double def ) const
+{
+    auto it = kv_.find( key );
+
+    if ( it == kv_.end() )
+    {
+        return def;
+    }
+
+    try
+    {
         std::size_t used = 0;
-        const double value = std::stod(it->second, &used);
-        if (used != it->second.size() || !std::isfinite(value)) throw std::invalid_argument("invalid number");
+        const double value = std::stod( it->second, &used );
+
+        if ( used != it->second.size() || !std::isfinite( value ) )
+        {
+            throw std::invalid_argument( "invalid number" );
+        }
+
         return value;
-    } catch (const std::exception&) {
-        throw std::runtime_error("Cfg: invalid finite number for " + key + ": " + it->second);
+    }
+    catch ( const std::exception & )
+    {
+        throw std::runtime_error( "Cfg: invalid finite number for " + key + ": " + it->second );
     }
 }
 
-// Get boolean value (or return default).
-// Accepted true values:  1, true, yes, on
-// Accepted false values: 0, false, no, off
-// Any other value is an error.
-bool Cfg::getBool(const std::string& key, bool def) const {
-    auto it = kv_.find(key);
-    if (it == kv_.end()) return def;
-    std::string v = toLower(trim(it->second));
-    if (v=="1"||v=="true"||v=="yes"||v=="on") return true;
-    if (v=="0"||v=="false"||v=="no"||v=="off") return false;
-    throw std::runtime_error("Cfg: invalid boolean for " + key + ": " + it->second);
+
+// Read 1/true/yes/on or 0/false/no/off, ignoring letter case and surrounding whitespace.
+bool Cfg::get_bool( const std::string &key, bool def ) const
+{
+    auto it = kv_.find( key );
+
+    if ( it == kv_.end() )
+    {
+        return def;
+    }
+
+    std::string v = to_lowercase( trim_string( it->second ) );
+
+    if ( v == "1" || v == "true" || v == "yes" || v == "on" )
+    {
+        return true;
+    }
+
+    if ( v == "0" || v == "false" || v == "no" || v == "off" )
+    {
+        return false;
+    }
+
+    throw std::runtime_error( "Cfg: invalid boolean for " + key + ": " + it->second );
 }

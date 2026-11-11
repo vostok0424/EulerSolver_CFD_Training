@@ -1,102 +1,90 @@
-// main.cpp
-// -------
-// Program entry point.
-//
-// Responsibilities:
-// - Initialise MPI (even for serial runs).
-// - Load a case configuration file (.cfg).
-// - Create an MPI Cartesian decomposition helper (mpi_parallel::MpiParallel).
-// - Run the 2D solver only; reject legacy dim=1 configurations.
-// - Ensure all ranks return the same exit code.
-
 #include "cfg.hpp"
 #include "solver.hpp"
 #include "mpi_parallel.hpp"
 
-// MPI is used for domain decomposition and halo exchange.
+
 #include <mpi.h>
 
-// Console logging (root rank only).
+
 #include <iostream>
 
-int main(int argc, char** argv) {
-    // Always initialise MPI (even for serial runs).
-    // If you run without mpirun, MPI still creates a single-rank world.
-    MPI_Init(&argc, &argv);
+// Initialize MPI, read the case and run the solver; abort the MPI job on an exception.
+int main( int argc, char **argv )
+{
+    // Initialize MPI for both direct and mpirun execution.
+    MPI_Init( &argc, &argv );
 
-    // Discover world rank/size early so we can print errors only on root.
     int rank = 0;
     int size = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &size );
 
-    // Local exit code (per rank). We will reduce this to a single global exit code.
-    int exitCode = 0;
+    int exit_code = 0;
 
-    try {
-        // Default case file. You can override it by passing a path as argv[1].
-        std::string cfgFile = "cases/case2d_sod.cfg";
+    try
+    {
+        std::string cfg_file = "cases/case2d_sod.cfg";
 
-        // Command-line override: ./EulerSolver path/to/case.cfg
-        if (argc >= 2) cfgFile = argv[1];
+        if ( argc >= 2 )
+            cfg_file = argv[1];
 
-        // Load configuration (simple key=value file).
         Cfg cfg;
-        cfg.load(cfgFile);
 
-        // Legacy compatibility: read dim from cfg, but only dim=2 is supported now.
-        const int dim = cfg.getInt("dim", 2);
+        cfg.load( cfg_file );
 
-        // MPI decomposition parameters.
-        // Must satisfy: px * py == MPI world size.
-        // This executable now targets 2D runs only.
-        const int px = cfg.getInt("mpi.px", 1);
-        const int py = cfg.getInt("mpi.py", 1);
+        const int dim = cfg.get_int( "dim", spatial_dimension );
 
-        // Construct MPI topology (throws if px*py != world size).
-        // This object also provides neighbor ranks and halo exchange helpers.
-        mpi_parallel::MpiParallel mp(px, py, MPI_COMM_WORLD);
+        const int px = cfg.get_int( "mpi.px", 1 );
+        const int py = cfg.get_int( "mpi.py", 1 );
 
-        if (mp.isRoot()) {
-            std::cout << "[main] MPI world size=" << size
-                      << ", mpi.px=" << px << ", mpi.py=" << py << "\n";
+        MpiParallel mp( px, py, MPI_COMM_WORLD );
+
+        if ( mp.is_root() )
+        {
+            std::cout << "[main] MPI world size=" << size << ", mpi.px=" << px << ", mpi.py=" << py << "\n";
         }
 
-        // Run the 2D solver only.
-        if (dim != 2) {
-            if (mp.isRoot()) {
-                std::cerr << "Unsupported dim=" << dim
-                          << ". This executable now supports 2D only."
+        if ( dim != spatial_dimension )
+        {
+            if ( mp.is_root() )
+            {
+                std::cerr << "Unsupported dim=" << dim << ". This executable now supports 2D only."
                           << " Please use dim=2 and a 2D case file.\n";
             }
-            exitCode = 1;
-        } else {
-            if (mp.isRoot()) {
+
+            exit_code = 1;
+        }
+        else
+        {
+            if ( mp.is_root() )
+            {
                 std::cout << "[main] dim=2, 2D solver\n";
             }
-            // Solver receives the MPI helper so it can exchange halos and write merged output.
-            Solver solver(cfg, mp);
+
+            Solver solver( cfg, mp );
+
             solver.run();
         }
     }
-    // A local failure may leave peers in communication; abort the whole job.
-    catch (const std::exception& e) {
+
+    // A failed rank may leave peers in communication; report the rank and abort the entire job.
+    catch ( const std::exception &e )
+    {
         std::cerr << "Fatal [rank " << rank << "]: " << e.what() << std::endl;
-        MPI_Abort(MPI_COMM_WORLD, 1);
+        MPI_Abort( MPI_COMM_WORLD, 1 );
         return 1;
     }
-    catch (...) {
+    catch ( ... )
+    {
         std::cerr << "Fatal [rank " << rank << "]: unknown exception" << std::endl;
-        MPI_Abort(MPI_COMM_WORLD, 1);
+        MPI_Abort( MPI_COMM_WORLD, 1 );
         return 1;
     }
 
-    // Ensure all ranks exit consistently:
-    // take the maximum exitCode across ranks (0 if all succeeded, 1 if any failed).
-    int exitCodeGlobal = 0;
-    MPI_Allreduce(&exitCode, &exitCodeGlobal, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    int exit_code_global = 0;
+    // Combine normal exit statuses before finalizing MPI.
+    MPI_Allreduce( &exit_code, &exit_code_global, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD );
 
-    // Clean shutdown of MPI.
     MPI_Finalize();
-    return exitCodeGlobal;
+    return exit_code_global;
 }

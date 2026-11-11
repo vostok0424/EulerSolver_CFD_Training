@@ -1,5 +1,6 @@
+#include "common_functions.hpp"
 #include "io.hpp"
-#include "state.hpp"
+#include "structures.hpp"
 #include <fstream>
 #include <stdexcept>
 #include <type_traits>
@@ -8,583 +9,690 @@
 #include <locale>
 #include <cstdio>
 
-// io.cpp
-// --------
-// Legacy VTK output for 2D solutions.
-//
-// This file writes a single ASCII legacy VTK rectilinear-grid file (.vtk)
-// for post-processing in ParaView or other VTK-capable tools.
-//
-// Two data-location modes are supported:
-// - POINT_DATA: cell-centered finite-volume values are averaged onto grid points.
-// - CELL_DATA : cell-centered finite-volume values are written directly.
-//
-// The x- and y-coordinates written to the VTK file are the cell-edge
-// coordinates spanning the physical domain [x0, x1] x [y0, y1].
-//
-// Output fields:
-//   rho      : density
-//   velocity : vector field (u, v, 0)
-//   p        : pressure
-//   rho_u    : x-momentum
-//   rho_v    : y-momentum
-//   E        : total energy from the conservative state
-//
-// MPI:
-// - writeVTK2D_PointData_GatherMPI gathers each rank's *interior* cell data to rank 0,
-//   assembles a global field, then calls writeVTK2D_PointData to write POINT_DATA.
-// - writeVTK2D_CellData_GatherMPI gathers each rank's *interior* cell data to rank 0,
-//   assembles a global field, then calls writeVTK2D_CellData to write CELL_DATA.
 
-// MPI gather/assembly packs Vec4 into raw doubles. Ensure it is tightly-packed.
-static_assert(std::is_trivially_copyable_v<Vec4>, "Vec4 must be trivially copyable for MPI I/O packing");
-static_assert(sizeof(Vec4) == 4 * sizeof(double), "Vec4 must be exactly 4 doubles (no padding)");
-
-void writeVTK2D_PointData(const std::string& filename,
-                          const std::vector<Vec4>& U,
-                          int nx, int ny, int ng,
-                          double x0, double x1,
-                          double y0, double y1,
-                          double gamma)
+// Write interior-cell fields to a VTK rectilinear grid after averaging them onto grid points.
+void write_vtk_2d_point_data( const std::string &filename, const std::vector<Conservative_vector> &field, int nx,
+    int ny, int ng, double x0, double x1, double y0, double y1, double gamma )
 {
-    if (nx <= 0 || ny <= 0) throw std::runtime_error("writeVTK2D_PointData: nx, ny must be > 0");
-    if (ng < 0) throw std::runtime_error("writeVTK2D_PointData: ng must be >= 0");
+    if ( nx <= 0 || ny <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData: nx, ny must be > 0" );
+    }
 
-    const int nxTot = nx + 2 * ng;
-    auto idx = [&](int i, int j) { return i + nxTot * j; };
+    if ( ng < 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData: ng must be >= 0" );
+    }
 
-    const int nxPts = nx + 1;
-    const int nyPts = ny + 1;
-    auto idxP = [&](int i, int j) { return i + nxPts * j; };
-    const double dx = (x1 - x0) / static_cast<double>(nx);
-    const double dy = (y1 - y0) / static_cast<double>(ny);
+    const int nx_tot = nx + 2 * ng;
+    auto idx = [&]( int i, int j )
+    {
+        return i + nx_tot * j;
+    };
 
-    const std::string tmpFile = filename + ".tmp";
-    std::ofstream out(tmpFile);
-    if (!out) throw std::runtime_error("writeVTK2D_PointData: cannot open file: " + tmpFile);
+    const int nx_pts = nx + 1;
+    const int ny_pts = ny + 1;
+    auto idx_p = [&]( int i, int j )
+    {
+        return i + nx_pts * j;
+    };
 
-    out.imbue(std::locale::classic());
-    out.exceptions(std::ofstream::failbit | std::ofstream::badbit);
-    out.setf(std::ios::scientific);
-    out << std::setprecision(std::numeric_limits<double>::max_digits10);
+    const double dx = ( x1 - x0 ) / static_cast<double>( nx );
+    const double dy = ( y1 - y0 ) / static_cast<double>( ny );
 
-    // Legacy VTK header.
+    // Write a temporary file and rename it after the stream is successfully closed.
+    const std::string tmp_file = filename + ".tmp";
+    std::ofstream out( tmp_file );
+
+    if ( !out )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData: cannot open file: " + tmp_file );
+    }
+
+    out.imbue( std::locale::classic() );
+    out.exceptions( std::ofstream::failbit | std::ofstream::badbit );
+    out.setf( std::ios::scientific );
+    out << std::setprecision( std::numeric_limits<double>::max_digits10 );
+
     out << "# vtk DataFile Version 3.0\n";
     out << "2D Euler solution\n";
     out << "ASCII\n";
     out << "DATASET RECTILINEAR_GRID\n";
-    out << "DIMENSIONS " << nxPts << ' ' << nyPts << " 1\n";
+    out << "DIMENSIONS " << nx_pts << ' ' << ny_pts << " 1\n";
 
-    out << "X_COORDINATES " << nxPts << " double\n";
-    for (int i = 0; i < nxPts; ++i) {
-        const double x = x0 + static_cast<double>(i) * dx;
+    out << "X_COORDINATES " << nx_pts << " double\n";
+
+    for ( int i = 0; i < nx_pts; ++i )
+    {
+        const double x = x0 + static_cast<double>( i ) * dx;
+
         out << x << "\n";
     }
 
-    out << "Y_COORDINATES " << nyPts << " double\n";
-    for (int j = 0; j < nyPts; ++j) {
-        const double y = y0 + static_cast<double>(j) * dy;
+    out << "Y_COORDINATES " << ny_pts << " double\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        const double y = y0 + static_cast<double>( j ) * dy;
+
         out << y << "\n";
     }
 
     out << "Z_COORDINATES 1 double\n";
     out << 0.0 << "\n";
 
-    const int nCells = nx * ny;
-    const int nPts = nxPts * nyPts;
-    auto idxC = [&](int i, int j) { return i + nx * j; };
+    const int n_cells = nx * ny;
+    const int n_pts = nx_pts * ny_pts;
+    auto idx_c = [&]( int i, int j )
+    {
+        return i + nx * j;
+    };
 
-    std::vector<double> rhoC(static_cast<std::size_t>(nCells));
-    std::vector<double> uC(static_cast<std::size_t>(nCells));
-    std::vector<double> vC(static_cast<std::size_t>(nCells));
-    std::vector<double> pC(static_cast<std::size_t>(nCells));
-    std::vector<double> rhoUC(static_cast<std::size_t>(nCells));
-    std::vector<double> rhoVC(static_cast<std::size_t>(nCells));
-    std::vector<double> EC(static_cast<std::size_t>(nCells));
+    // Recover primitive fields at cell centers before averaging each field onto grid points.
+    std::vector<double> rho_c( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> u_c( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> v_c( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> p_c( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> rho_uc( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> rho_vc( static_cast<std::size_t>( n_cells ) );
+    std::vector<double> ec( static_cast<std::size_t>( n_cells ) );
 
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            const std::size_t kc = static_cast<std::size_t>(idxC(i, j));
-            rhoC[kc] = W.rho;
-            uC[kc] = W.u[0];
-            vC[kc] = W.u[1];
-            pC[kc] = W.p;
-            rhoUC[kc] = Q[1];
-            rhoVC[kc] = Q[2];
-            EC[kc] = Q[3];
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+            Primitive_vector primitive{};
+
+            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+
+            const std::size_t kc = static_cast<std::size_t>( idx_c( i, j ) );
+
+            rho_c[kc] = primitive.density;
+            u_c[kc] = primitive.x_velocity;
+            v_c[kc] = primitive.y_velocity;
+            p_c[kc] = primitive.pressure;
+            rho_uc[kc] = state.specific_x_momentum;
+            rho_vc[kc] = state.specific_y_momentum;
+            ec[kc] = state.specific_energy;
         }
     }
 
-    std::vector<double> rhoP(static_cast<std::size_t>(nPts));
-    std::vector<double> uP(static_cast<std::size_t>(nPts));
-    std::vector<double> vP(static_cast<std::size_t>(nPts));
-    std::vector<double> pP(static_cast<std::size_t>(nPts));
-    std::vector<double> rhoUP(static_cast<std::size_t>(nPts));
-    std::vector<double> rhoVP(static_cast<std::size_t>(nPts));
-    std::vector<double> EP(static_cast<std::size_t>(nPts));
+    // Average only adjacent interior cells: four at interior points, two at edges and one at corners.
+    std::vector<double> rho_p( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> u_p( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> v_p( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> p_p( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> rho_up( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> rho_vp( static_cast<std::size_t>( n_pts ) );
+    std::vector<double> ep( static_cast<std::size_t>( n_pts ) );
 
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            double rhoSum = 0.0;
-            double uSum = 0.0;
-            double vSum = 0.0;
-            double pSum = 0.0;
-            double rhoUSum = 0.0;
-            double rhoVSum = 0.0;
-            double ESum = 0.0;
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            double rho_sum = 0.0;
+            double u_sum = 0.0;
+            double v_sum = 0.0;
+            double p_sum = 0.0;
+            double rho_usum = 0.0;
+            double rho_vsum = 0.0;
+            double esum = 0.0;
             int cnt = 0;
 
-            for (int dj = -1; dj <= 0; ++dj) {
-                for (int di = -1; di <= 0; ++di) {
+            for ( int dj = -1; dj <= 0; ++dj )
+            {
+                for ( int di = -1; di <= 0; ++di )
+                {
                     const int ic = i + di;
                     const int jc = j + dj;
-                    if (ic >= 0 && ic < nx && jc >= 0 && jc < ny) {
-                        const std::size_t kc = static_cast<std::size_t>(idxC(ic, jc));
-                        rhoSum += rhoC[kc];
-                        uSum += uC[kc];
-                        vSum += vC[kc];
-                        pSum += pC[kc];
-                        rhoUSum += rhoUC[kc];
-                        rhoVSum += rhoVC[kc];
-                        ESum += EC[kc];
+
+                    if ( ic >= 0 && ic < nx && jc >= 0 && jc < ny )
+                    {
+                        const std::size_t kc = static_cast<std::size_t>( idx_c( ic, jc ) );
+
+                        rho_sum += rho_c[kc];
+                        u_sum += u_c[kc];
+                        v_sum += v_c[kc];
+                        p_sum += p_c[kc];
+                        rho_usum += rho_uc[kc];
+                        rho_vsum += rho_vc[kc];
+                        esum += ec[kc];
                         ++cnt;
                     }
                 }
             }
 
-            const std::size_t kp = static_cast<std::size_t>(idxP(i, j));
-            rhoP[kp] = rhoSum / static_cast<double>(cnt);
-            uP[kp] = uSum / static_cast<double>(cnt);
-            vP[kp] = vSum / static_cast<double>(cnt);
-            pP[kp] = pSum / static_cast<double>(cnt);
-            rhoUP[kp] = rhoUSum / static_cast<double>(cnt);
-            rhoVP[kp] = rhoVSum / static_cast<double>(cnt);
-            EP[kp] = ESum / static_cast<double>(cnt);
+            const std::size_t kp = static_cast<std::size_t>( idx_p( i, j ) );
+
+            rho_p[kp] = rho_sum / static_cast<double>( cnt );
+            u_p[kp] = u_sum / static_cast<double>( cnt );
+            v_p[kp] = v_sum / static_cast<double>( cnt );
+            p_p[kp] = p_sum / static_cast<double>( cnt );
+            rho_up[kp] = rho_usum / static_cast<double>( cnt );
+            rho_vp[kp] = rho_vsum / static_cast<double>( cnt );
+            ep[kp] = esum / static_cast<double>( cnt );
         }
     }
 
-    out << "POINT_DATA " << nPts << "\n";
+    out << "POINT_DATA " << n_pts << "\n";
 
     out << "SCALARS rho double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            out << rhoP[static_cast<std::size_t>(idxP(i, j))] << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            out << rho_p[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
         }
     }
 
     out << "VECTORS velocity double\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            const std::size_t kp = static_cast<std::size_t>(idxP(i, j));
-            out << uP[kp] << ' ' << vP[kp] << ' ' << 0.0 << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            const std::size_t kp = static_cast<std::size_t>( idx_p( i, j ) );
+
+            out << u_p[kp] << ' ' << v_p[kp] << ' ' << 0.0 << "\n";
         }
     }
 
     out << "SCALARS p double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            out << pP[static_cast<std::size_t>(idxP(i, j))] << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            out << p_p[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
         }
     }
 
     out << "SCALARS rho_u double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            out << rhoUP[static_cast<std::size_t>(idxP(i, j))] << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            out << rho_up[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
         }
     }
 
     out << "SCALARS rho_v double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            out << rhoVP[static_cast<std::size_t>(idxP(i, j))] << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            out << rho_vp[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
         }
     }
 
     out << "SCALARS E double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < nyPts; ++j) {
-        for (int i = 0; i < nxPts; ++i) {
-            out << EP[static_cast<std::size_t>(idxP(i, j))] << "\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        for ( int i = 0; i < nx_pts; ++i )
+        {
+            out << ep[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
         }
     }
 
     out.flush();
     out.close();
 
-    if (std::rename(tmpFile.c_str(), filename.c_str()) != 0) {
-        throw std::runtime_error("writeVTK2D_PointData: failed to rename tmp file to final output: " + filename);
+    if ( std::rename( tmp_file.c_str(), filename.c_str() ) != 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData: failed to rename tmp file to final output: " + filename );
     }
 }
 
-void writeVTK2D_CellData(const std::string& filename,
-                         const std::vector<Vec4>& U,
-                         int nx, int ny, int ng,
-                         double x0, double x1,
-                         double y0, double y1,
-                         double gamma)
+
+// Write one set of field values per interior cell to a VTK rectilinear grid.
+void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Conservative_vector> &field, int nx, int ny,
+    int ng, double x0, double x1, double y0, double y1, double gamma )
 {
-    if (nx <= 0 || ny <= 0) throw std::runtime_error("writeVTK2D_CellData: nx, ny must be > 0");
-    if (ng < 0) throw std::runtime_error("writeVTK2D_CellData: ng must be >= 0");
+    if ( nx <= 0 || ny <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData: nx, ny must be > 0" );
+    }
 
-    const int nxTot = nx + 2 * ng;
-    auto idx = [&](int i, int j) { return i + nxTot * j; };
+    if ( ng < 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData: ng must be >= 0" );
+    }
 
-    const int nxPts = nx + 1;
-    const int nyPts = ny + 1;
-    const double dx = (x1 - x0) / static_cast<double>(nx);
-    const double dy = (y1 - y0) / static_cast<double>(ny);
+    const int nx_tot = nx + 2 * ng;
+    auto idx = [&]( int i, int j )
+    {
+        return i + nx_tot * j;
+    };
 
-    const std::string tmpFile = filename + ".tmp";
-    std::ofstream out(tmpFile);
-    if (!out) throw std::runtime_error("writeVTK2D_CellData: cannot open file: " + tmpFile);
+    const int nx_pts = nx + 1;
+    const int ny_pts = ny + 1;
+    const double dx = ( x1 - x0 ) / static_cast<double>( nx );
+    const double dy = ( y1 - y0 ) / static_cast<double>( ny );
 
-    out.imbue(std::locale::classic());
-    out.exceptions(std::ofstream::failbit | std::ofstream::badbit);
-    out.setf(std::ios::scientific);
-    out << std::setprecision(std::numeric_limits<double>::max_digits10);
+    const std::string tmp_file = filename + ".tmp";
+    std::ofstream out( tmp_file );
 
-    // Legacy VTK header.
+    if ( !out )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData: cannot open file: " + tmp_file );
+    }
+
+    out.imbue( std::locale::classic() );
+    out.exceptions( std::ofstream::failbit | std::ofstream::badbit );
+    out.setf( std::ios::scientific );
+    out << std::setprecision( std::numeric_limits<double>::max_digits10 );
+
     out << "# vtk DataFile Version 3.0\n";
     out << "2D Euler solution\n";
     out << "ASCII\n";
     out << "DATASET RECTILINEAR_GRID\n";
-    out << "DIMENSIONS " << nxPts << ' ' << nyPts << " 1\n";
+    out << "DIMENSIONS " << nx_pts << ' ' << ny_pts << " 1\n";
 
-    out << "X_COORDINATES " << nxPts << " double\n";
-    for (int i = 0; i < nxPts; ++i) {
-        const double x = x0 + static_cast<double>(i) * dx;
+    out << "X_COORDINATES " << nx_pts << " double\n";
+
+    for ( int i = 0; i < nx_pts; ++i )
+    {
+        const double x = x0 + static_cast<double>( i ) * dx;
+
         out << x << "\n";
     }
 
-    out << "Y_COORDINATES " << nyPts << " double\n";
-    for (int j = 0; j < nyPts; ++j) {
-        const double y = y0 + static_cast<double>(j) * dy;
+    out << "Y_COORDINATES " << ny_pts << " double\n";
+
+    for ( int j = 0; j < ny_pts; ++j )
+    {
+        const double y = y0 + static_cast<double>( j ) * dy;
+
         out << y << "\n";
     }
 
     out << "Z_COORDINATES 1 double\n";
     out << 0.0 << "\n";
 
-    const int nCells = nx * ny;
-    out << "CELL_DATA " << nCells << "\n";
+    const int n_cells = nx * ny;
+
+    out << "CELL_DATA " << n_cells << "\n";
 
     out << "SCALARS rho double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.rho << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+            Primitive_vector primitive{};
+
+            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            out << primitive.density << "\n";
         }
     }
 
     out << "VECTORS velocity double\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.u[0] << ' ' << W.u[1] << ' ' << 0.0 << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+            Primitive_vector primitive{};
+
+            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            out << primitive.x_velocity << ' ' << primitive.y_velocity << ' ' << 0.0 << "\n";
         }
     }
 
     out << "SCALARS p double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            const auto W = EosIdealGas<2>::consToPrim(Q, gamma);
-            out << W.p << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+            Primitive_vector primitive{};
+
+            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            out << primitive.pressure << "\n";
         }
     }
 
     out << "SCALARS rho_u double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[1] << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+
+            out << state.specific_x_momentum << "\n";
         }
     }
 
     out << "SCALARS rho_v double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[2] << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+
+            out << state.specific_y_momentum << "\n";
         }
     }
 
     out << "SCALARS E double 1\n";
     out << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const Vec4& Q = U[idx(ng + i, ng + j)];
-            out << Q[3] << "\n";
+
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const Conservative_vector &state = field[idx( ng + i, ng + j )];
+
+            out << state.specific_energy << "\n";
         }
     }
 
     out.flush();
     out.close();
 
-    if (std::rename(tmpFile.c_str(), filename.c_str()) != 0) {
-        throw std::runtime_error("writeVTK2D_CellData: failed to rename tmp file to final output: " + filename);
+    if ( std::rename( tmp_file.c_str(), filename.c_str() ) != 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData: failed to rename tmp file to final output: " + filename );
     }
 }
 
-// Gather local interior cell data to rank 0 and write a single merged POINT_DATA VTK file.
-// Each rank provides ONLY its interior cells (ghost cells are excluded).
-// The merged output is converted to POINT_DATA inside writeVTK2D_PointData.
-void writeVTK2D_PointData_GatherMPI(const std::string& filename,
-                                    const std::vector<Vec4>& Ulocal,
-                                    int nxLocal, int nyLocal, int ng,
-                                    int iBeg, int jBeg,
-                                    int nxGlobal, int nyGlobal,
-                                    double x0, double x1,
-                                    double y0, double y1,
-                                    double gamma,
-                                    MPI_Comm comm)
+
+// Gather interior states on communicator rank 0 and write a single POINT_DATA file.
+void write_vtk_2d_point_data_gather_mpi( const std::string &filename, const std::vector<Conservative_vector> &ulocal,
+    int nx_local, int ny_local, int ng, int i_beg, int j_beg, int nx_global, int ny_global, double x0, double x1,
+    double y0, double y1, double gamma, MPI_Comm comm )
 {
-    if (nxLocal <= 0 || nyLocal <= 0) throw std::runtime_error("writeVTK2D_PointData_GatherMPI: nxLocal/nyLocal must be > 0");
-    if (nxGlobal <= 0 || nyGlobal <= 0) throw std::runtime_error("writeVTK2D_PointData_GatherMPI: nxGlobal/nyGlobal must be > 0");
-    if (ng < 1) throw std::runtime_error("writeVTK2D_PointData_GatherMPI: ng must be >= 1");
+    if ( nx_local <= 0 || ny_local <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData_GatherMPI: nxLocal/nyLocal must be > 0" );
+    }
 
-    // Rank information for collective operations.
+    if ( nx_global <= 0 || ny_global <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData_GatherMPI: nxGlobal/nyGlobal must be > 0" );
+    }
+
+    if ( ng < 1 )
+    {
+        throw std::runtime_error( "writeVTK2D_PointData_GatherMPI: ng must be >= 1" );
+    }
+
     int rank = 0, size = 1;
-    MPI_Comm_rank(comm, &rank);
-    MPI_Comm_size(comm, &size);
+    MPI_Comm_rank( comm, &rank );
+    MPI_Comm_size( comm, &size );
 
-    // Pack this rank's interior conservative variables (no ghosts) into a raw double buffer.
-    // This keeps MPI_Gatherv simple and portable.
-    const int nxTotLoc = nxLocal + 2 * ng;
-    const int nyTotLoc = nyLocal + 2 * ng;
-    (void)nyTotLoc;
+    const int nx_tot_loc = nx_local + 2 * ng;
+    const int ny_tot_loc = ny_local + 2 * ng;
 
-    // Local ghosted indexing for this rank.
-    auto idxLoc = [&](int i, int j) { return i + nxTotLoc * j; };
+    (void)ny_tot_loc;
 
-    // Payload size in doubles: (nxLocal*nyLocal) cells * 4 components.
-    const int ncomp = 4;
-    const int localCells = nxLocal * nyLocal;
-    const int localCount = localCells * ncomp; // in doubles
+    auto idx_loc = [&]( int i, int j )
+    {
+        return i + nx_tot_loc * j;
+    };
 
-    std::vector<double> send(localCount);
+    const int ncomp = conservative_variable_count;
+    const int local_cells = nx_local * ny_local;
+    // Pack only interior cells; MPI counts and displacements are measured in doubles.
+    const int local_count = local_cells * ncomp;
+
+    std::vector<double> send( local_count );
     int t = 0;
-    for (int j = 0; j < nyLocal; ++j) {
-        for (int i = 0; i < nxLocal; ++i) {
-            const Vec4& Q = Ulocal[idxLoc(ng + i, ng + j)];
-            send[t + 0] = Q[0];
-            send[t + 1] = Q[1];
-            send[t + 2] = Q[2];
-            send[t + 3] = Q[3];
+
+    for ( int j = 0; j < ny_local; ++j )
+    {
+        for ( int i = 0; i < nx_local; ++i )
+        {
+            const Conservative_vector &state = ulocal[idx_loc( ng + i, ng + j )];
+
+            pack_state( state, send.data() + t );
             t += ncomp;
         }
     }
 
-    // Send metadata so root knows where this rank's block sits in the global array.
-    int meta[4] = { iBeg, jBeg, nxLocal, nyLocal };
-    std::vector<int> allMeta; // size*4 on root
-    if (rank == 0) allMeta.resize(static_cast<size_t>(size) * 4u);
-    MPI_Gather(meta, 4, MPI_INT,
-               rank == 0 ? allMeta.data() : nullptr, 4, MPI_INT,
-               0, comm);
-
-    // Gather payload sizes, then gather the packed buffers using MPI_Gatherv.
-    std::vector<int> counts; // in doubles
-    std::vector<int> displs; // in doubles
-    if (rank == 0) {
-        counts.resize(size);
-        displs.resize(size);
-    }
-    MPI_Gather(&localCount, 1, MPI_INT,
-               rank == 0 ? counts.data() : nullptr, 1, MPI_INT,
-               0, comm);
-
-    std::vector<double> recv;
-    if (rank == 0) {
-        int total = 0;
-        for (int r = 0; r < size; ++r) {
-            displs[r] = total;
-            total += counts[r];
-        }
-        recv.resize(static_cast<size_t>(total));
-    }
-
-    MPI_Gatherv(send.data(), localCount, MPI_DOUBLE,
-                rank == 0 ? recv.data() : nullptr,
-                rank == 0 ? counts.data() : nullptr,
-                rank == 0 ? displs.data() : nullptr,
-                MPI_DOUBLE,
-                0, comm);
-
-    // Only rank 0 assembles and writes the merged file.
-    if (rank != 0) return;
-
-    // Assemble a global field with a single ghost layer (ngOut=1) to match writeVTK2D's interface.
-    // The ghost values themselves are not important for output; writeVTK2D reads only interior.
-    const int ngOut = 1;
-    const int nxTotG = nxGlobal + 2 * ngOut;
-    const int nyTotG = nyGlobal + 2 * ngOut;
-    auto idxG = [&](int i, int j) { return i + nxTotG * j; };
-
-    std::vector<Vec4> Uglobal(static_cast<size_t>(nxTotG) * static_cast<size_t>(nyTotG), Vec4{});
-
-    // Unpack each rank's block into its correct global location.
-    for (int r = 0; r < size; ++r) {
-        const int ib = allMeta[4 * r + 0];
-        const int jb = allMeta[4 * r + 1];
-        const int nxr = allMeta[4 * r + 2];
-        const int nyr = allMeta[4 * r + 3];
-
-        const int base = displs[r];
-        const int expected = nxr * nyr * ncomp;
-        if (counts[r] != expected) {
-            throw std::runtime_error("writeVTK2D_PointData_GatherMPI: inconsistent counts vs meta for rank " + std::to_string(r));
-        }
-
-        for (int j = 0; j < nyr; ++j) {
-            for (int i = 0; i < nxr; ++i) {
-                const int gi = ib + i;
-                const int gj = jb + j;
-                if (gi < 0 || gi >= nxGlobal || gj < 0 || gj >= nyGlobal) {
-                    throw std::runtime_error("writeVTK2D_PointData_GatherMPI: rank block out of global bounds");
-                }
-
-                const int locCell = (i + nxr * j) * ncomp;
-                Vec4 Q{};
-                Q[0] = recv[base + locCell + 0];
-                Q[1] = recv[base + locCell + 1];
-                Q[2] = recv[base + locCell + 2];
-                Q[3] = recv[base + locCell + 3];
-
-                Uglobal[idxG(ngOut + gi, ngOut + gj)] = Q;
-            }
-        }
-    }
-
-    // Write a single merged VTK as point data derived from the cell-centered solution.
-    writeVTK2D_PointData(filename, Uglobal, nxGlobal, nyGlobal, ngOut, x0, x1, y0, y1, gamma);
-}
-
-void writeVTK2D_CellData_GatherMPI(const std::string& filename,
-                                   const std::vector<Vec4>& Ulocal,
-                                   int nxLocal, int nyLocal, int ng,
-                                   int iBeg, int jBeg,
-                                   int nxGlobal, int nyGlobal,
-                                   double x0, double x1,
-                                   double y0, double y1,
-                                   double gamma,
-                                   MPI_Comm comm)
-{
-    if (nxLocal <= 0 || nyLocal <= 0) throw std::runtime_error("writeVTK2D_CellData_GatherMPI: nxLocal/nyLocal must be > 0");
-    if (nxGlobal <= 0 || nyGlobal <= 0) throw std::runtime_error("writeVTK2D_CellData_GatherMPI: nxGlobal/nyGlobal must be > 0");
-    if (ng < 1) throw std::runtime_error("writeVTK2D_CellData_GatherMPI: ng must be >= 1");
-
-    int rank = 0, size = 1;
-    MPI_Comm_rank(comm, &rank);
-    MPI_Comm_size(comm, &size);
-
-    const int nxTotLoc = nxLocal + 2 * ng;
-    auto idxLoc = [&](int i, int j) { return i + nxTotLoc * j; };
-
-    const int ncomp = 4;
-    const int localCells = nxLocal * nyLocal;
-    const int localCount = localCells * ncomp;
-
-    std::vector<double> send(localCount);
-    int t = 0;
-    for (int j = 0; j < nyLocal; ++j) {
-        for (int i = 0; i < nxLocal; ++i) {
-            const Vec4& Q = Ulocal[idxLoc(ng + i, ng + j)];
-            send[t + 0] = Q[0];
-            send[t + 1] = Q[1];
-            send[t + 2] = Q[2];
-            send[t + 3] = Q[3];
-            t += ncomp;
-        }
-    }
-
-    int meta[4] = { iBeg, jBeg, nxLocal, nyLocal };
-    std::vector<int> allMeta;
-    if (rank == 0) allMeta.resize(static_cast<size_t>(size) * 4u);
-    MPI_Gather(meta, 4, MPI_INT,
-               rank == 0 ? allMeta.data() : nullptr, 4, MPI_INT,
-               0, comm);
+    // Gather each block's global start indices and interior dimensions before gathering its state data.
+    int meta[4] = { i_beg, j_beg, nx_local, ny_local };
+    std::vector<int> all_meta;
+    if ( rank == 0 )
+        all_meta.resize( static_cast<size_t>( size ) * 4u );
+    MPI_Gather( meta, 4, MPI_INT, rank == 0 ? all_meta.data() : nullptr, 4, MPI_INT, 0, comm );
 
     std::vector<int> counts;
     std::vector<int> displs;
-    if (rank == 0) {
-        counts.resize(size);
-        displs.resize(size);
+    if ( rank == 0 )
+    {
+        counts.resize( size );
+        displs.resize( size );
     }
-    MPI_Gather(&localCount, 1, MPI_INT,
-               rank == 0 ? counts.data() : nullptr, 1, MPI_INT,
-               0, comm);
+
+    MPI_Gather( &local_count, 1, MPI_INT, rank == 0 ? counts.data() : nullptr, 1, MPI_INT, 0, comm );
 
     std::vector<double> recv;
-    if (rank == 0) {
+
+    if ( rank == 0 )
+    {
         int total = 0;
-        for (int r = 0; r < size; ++r) {
+
+        for ( int r = 0; r < size; ++r )
+        {
             displs[r] = total;
             total += counts[r];
         }
-        recv.resize(static_cast<size_t>(total));
+
+        recv.resize( static_cast<size_t>( total ) );
     }
 
-    MPI_Gatherv(send.data(), localCount, MPI_DOUBLE,
-                rank == 0 ? recv.data() : nullptr,
-                rank == 0 ? counts.data() : nullptr,
-                rank == 0 ? displs.data() : nullptr,
-                MPI_DOUBLE,
-                0, comm);
+    MPI_Gatherv( send.data(), local_count, MPI_DOUBLE, rank == 0 ? recv.data() : nullptr,
+        rank == 0 ? counts.data() : nullptr, rank == 0 ? displs.data() : nullptr, MPI_DOUBLE, 0, comm );
 
-    if (rank != 0) return;
+    if ( rank != 0 )
+        return;
 
-    const int ngOut = 1;
-    const int nxTotG = nxGlobal + 2 * ngOut;
-    const int nyTotG = nyGlobal + 2 * ngOut;
-    auto idxG = [&](int i, int j) { return i + nxTotG * j; };
+    // Use one unused ghost layer to match the serial writer interface; output reads only interior cells.
+    const int ng_out = 1;
+    const int nx_tot_g = nx_global + 2 * ng_out;
+    const int ny_tot_g = ny_global + 2 * ng_out;
+    auto idx_g = [&]( int i, int j )
+    {
+        return i + nx_tot_g * j;
+    };
 
-    std::vector<Vec4> Uglobal(static_cast<size_t>(nxTotG) * static_cast<size_t>(nyTotG), Vec4{});
+    std::vector<Conservative_vector> uglobal( static_cast<size_t>( nx_tot_g ) * static_cast<size_t>( ny_tot_g ),
+        Conservative_vector{} );
 
-    for (int r = 0; r < size; ++r) {
-        const int ib = allMeta[4 * r + 0];
-        const int jb = allMeta[4 * r + 1];
-        const int nxr = allMeta[4 * r + 2];
-        const int nyr = allMeta[4 * r + 3];
+    // Place each rank's packed interior states at their global cell indices.
+    for ( int r = 0; r < size; ++r )
+    {
+        const int ib = all_meta[4 * r + 0];
+        const int jb = all_meta[4 * r + 1];
+        const int nxr = all_meta[4 * r + 2];
+        const int nyr = all_meta[4 * r + 3];
 
         const int base = displs[r];
         const int expected = nxr * nyr * ncomp;
-        if (counts[r] != expected) {
-            throw std::runtime_error("writeVTK2D_CellData_GatherMPI: inconsistent counts vs meta for rank " + std::to_string(r));
+
+        if ( counts[r] != expected )
+        {
+            throw std::runtime_error( "writeVTK2D_PointData_GatherMPI: inconsistent counts vs meta for rank " +
+                                      std::to_string( r ) );
         }
 
-        for (int j = 0; j < nyr; ++j) {
-            for (int i = 0; i < nxr; ++i) {
+        for ( int j = 0; j < nyr; ++j )
+        {
+            for ( int i = 0; i < nxr; ++i )
+            {
                 const int gi = ib + i;
                 const int gj = jb + j;
-                if (gi < 0 || gi >= nxGlobal || gj < 0 || gj >= nyGlobal) {
-                    throw std::runtime_error("writeVTK2D_CellData_GatherMPI: rank block out of global bounds");
+
+                if ( gi < 0 || gi >= nx_global || gj < 0 || gj >= ny_global )
+                {
+                    throw std::runtime_error( "writeVTK2D_PointData_GatherMPI: rank block out of global bounds" );
                 }
 
-                const int locCell = (i + nxr * j) * ncomp;
-                Vec4 Q{};
-                Q[0] = recv[base + locCell + 0];
-                Q[1] = recv[base + locCell + 1];
-                Q[2] = recv[base + locCell + 2];
-                Q[3] = recv[base + locCell + 3];
+                const int loc_cell = ( i + nxr * j ) * ncomp;
+                const auto state = unpack_state( recv.data() + base + loc_cell );
 
-                Uglobal[idxG(ngOut + gi, ngOut + gj)] = Q;
+                uglobal[idx_g( ng_out + gi, ng_out + gj )] = state;
             }
         }
     }
 
-    writeVTK2D_CellData(filename, Uglobal, nxGlobal, nyGlobal, ngOut, x0, x1, y0, y1, gamma);
+    write_vtk_2d_point_data( filename, uglobal, nx_global, ny_global, ng_out, x0, x1, y0, y1, gamma );
+}
+
+
+// Gather interior states on communicator rank 0 and write a single CELL_DATA file.
+void write_vtk_2d_cell_data_gather_mpi( const std::string &filename, const std::vector<Conservative_vector> &ulocal,
+    int nx_local, int ny_local, int ng, int i_beg, int j_beg, int nx_global, int ny_global, double x0, double x1,
+    double y0, double y1, double gamma, MPI_Comm comm )
+{
+    if ( nx_local <= 0 || ny_local <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData_GatherMPI: nxLocal/nyLocal must be > 0" );
+    }
+
+    if ( nx_global <= 0 || ny_global <= 0 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData_GatherMPI: nxGlobal/nyGlobal must be > 0" );
+    }
+
+    if ( ng < 1 )
+    {
+        throw std::runtime_error( "writeVTK2D_CellData_GatherMPI: ng must be >= 1" );
+    }
+
+    int rank = 0, size = 1;
+    MPI_Comm_rank( comm, &rank );
+    MPI_Comm_size( comm, &size );
+
+    const int nx_tot_loc = nx_local + 2 * ng;
+    auto idx_loc = [&]( int i, int j )
+    {
+        return i + nx_tot_loc * j;
+    };
+
+    const int ncomp = conservative_variable_count;
+    const int local_cells = nx_local * ny_local;
+    const int local_count = local_cells * ncomp;
+
+    std::vector<double> send( local_count );
+    int t = 0;
+
+    for ( int j = 0; j < ny_local; ++j )
+    {
+        for ( int i = 0; i < nx_local; ++i )
+        {
+            const Conservative_vector &state = ulocal[idx_loc( ng + i, ng + j )];
+
+            pack_state( state, send.data() + t );
+            t += ncomp;
+        }
+    }
+
+    int meta[4] = { i_beg, j_beg, nx_local, ny_local };
+    std::vector<int> all_meta;
+
+    if ( rank == 0 )
+        all_meta.resize( static_cast<size_t>( size ) * 4u );
+    MPI_Gather( meta, 4, MPI_INT, rank == 0 ? all_meta.data() : nullptr, 4, MPI_INT, 0, comm );
+
+    std::vector<int> counts;
+    std::vector<int> displs;
+
+    if ( rank == 0 )
+    {
+        counts.resize( size );
+        displs.resize( size );
+    }
+
+    MPI_Gather( &local_count, 1, MPI_INT, rank == 0 ? counts.data() : nullptr, 1, MPI_INT, 0, comm );
+
+    std::vector<double> recv;
+
+    if ( rank == 0 )
+    {
+        int total = 0;
+
+        for ( int r = 0; r < size; ++r )
+        {
+            displs[r] = total;
+            total += counts[r];
+        }
+
+        recv.resize( static_cast<size_t>( total ) );
+    }
+
+    MPI_Gatherv( send.data(), local_count, MPI_DOUBLE, rank == 0 ? recv.data() : nullptr,
+        rank == 0 ? counts.data() : nullptr, rank == 0 ? displs.data() : nullptr, MPI_DOUBLE, 0, comm );
+
+    if ( rank != 0 )
+        return;
+
+    const int ng_out = 1;
+    const int nx_tot_g = nx_global + 2 * ng_out;
+    const int ny_tot_g = ny_global + 2 * ng_out;
+    auto idx_g = [&]( int i, int j )
+    {
+        return i + nx_tot_g * j;
+    };
+
+    std::vector<Conservative_vector> uglobal( static_cast<size_t>( nx_tot_g ) * static_cast<size_t>( ny_tot_g ),
+        Conservative_vector{} );
+
+    for ( int r = 0; r < size; ++r )
+    {
+        const int ib = all_meta[4 * r + 0];
+        const int jb = all_meta[4 * r + 1];
+        const int nxr = all_meta[4 * r + 2];
+        const int nyr = all_meta[4 * r + 3];
+
+        const int base = displs[r];
+        const int expected = nxr * nyr * ncomp;
+
+        if ( counts[r] != expected )
+        {
+            throw std::runtime_error( "writeVTK2D_CellData_GatherMPI: inconsistent counts vs meta for rank " +
+                                      std::to_string( r ) );
+        }
+
+        for ( int j = 0; j < nyr; ++j )
+        {
+            for ( int i = 0; i < nxr; ++i )
+            {
+                const int gi = ib + i;
+                const int gj = jb + j;
+
+                if ( gi < 0 || gi >= nx_global || gj < 0 || gj >= ny_global )
+                {
+                    throw std::runtime_error( "writeVTK2D_CellData_GatherMPI: rank block out of global bounds" );
+                }
+
+                const int loc_cell = ( i + nxr * j ) * ncomp;
+                const auto state = unpack_state( recv.data() + base + loc_cell );
+
+                uglobal[idx_g( ng_out + gi, ng_out + gj )] = state;
+            }
+        }
+    }
+
+    write_vtk_2d_cell_data( filename, uglobal, nx_global, ny_global, ng_out, x0, x1, y0, y1, gamma );
 }

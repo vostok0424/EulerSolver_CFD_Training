@@ -1,14 +1,4 @@
-// reconstruction.cpp
-// Spatial reconstruction for the 2D finite-volume Euler solver.
-// Reconstruct left/right conservative face states UL/UR from ghosted
-// cell-centered conservative states U.
-//
-// Active cfg options:
-//   - reconstruction.scheme         : firstOrder | muscl | weno5
-//   - reconstruction.limiter        : none | minmod | vanleer
-//
-// This implementation always uses conservative-characteristic reconstruction
-// with a face linearization at the arithmetic mean of conservative states.
+#include "common_functions.hpp"
 
 
 #include "reconstruction.hpp"
@@ -18,66 +8,408 @@
 #include <stdexcept>
 #include <array>
 
-// -----------------------------------------------------------------------------
-// Shared reconstruction pattern:
-//   1) Check array sizes and ghost-cell width.
-//   2) Build an eigensystem at the conservative arithmetic-mean state for the local 2D face orientation.
-//   3) Project the local stencil to characteristic space.
-//   4) Reconstruct each scalar characteristic component.
-//   5) Map the reconstructed face states back to conservative variables.
-// -----------------------------------------------------------------------------
 
-namespace recon {
+// Read reconstruction settings.
 
+// Read the reconstruction scheme: firstOrder, muscl or weno5.
+static ReconstructionScheme parse_scheme( const std::string &s )
+{
+    const std::string v = trim_string( s );
 
-// -----------------------------------------------------------------------------
-// 1) Limiter utilities
-// -----------------------------------------------------------------------------
-static inline std::string trim(const std::string& s) {
-    size_t b = 0;
-    while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
-    size_t e = s.size();
-    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return s.substr(b, e - b);
-}
-
-static inline double sgn(double x) { return (x > 0) - (x < 0); }
-
-static inline double minmod(double a, double b) {
-    if (a * b <= 0.0) return 0.0;
-    return sgn(a) * std::min(std::abs(a), std::abs(b));
-}
-
-static inline double vanleer(double a, double b) {
-    if (a * b <= 0.0) return 0.0;
-    return (2.0 * a * b) / (a + b);
-}
-
-
-static inline double applyLimiter(Limiter lim, double dl, double dr) {
-    switch (lim) {
-        case Limiter::None:    return 0.5 * (dl + dr);
-        case Limiter::Minmod:  return minmod(dl, dr);
-        case Limiter::VanLeer: return vanleer(dl, dr);
+    if ( v.empty() || v == "firstOrder" )
+    {
+        return ReconstructionScheme::first_order;
     }
-    throw std::runtime_error("Invalid reconstruction limiter enum");
+
+    if ( v == "muscl" )
+    {
+        return ReconstructionScheme::muscl;
+    }
+
+    if ( v == "weno5" )
+    {
+        return ReconstructionScheme::weno5;
+    }
+
+    throw std::runtime_error( "reconstruction.scheme unsupported: " + v );
 }
 
-// -----------------------------------------------------------------------------
-// 2) WENO5 kernels
-// -----------------------------------------------------------------------------
 
-static inline double invPowWeno(double x) {
-    return 1.0 / (x * x);
+// Read the MUSCL limiter: none, minmod or vanleer.
+static SlopeLimiter parse_limiter( const std::string &s )
+{
+    const std::string v = trim_string( s );
+
+    if ( v.empty() || v == "vanleer" )
+    {
+        return SlopeLimiter::van_leer;
+    }
+
+    if ( v == "none" )
+    {
+        return SlopeLimiter::none;
+    }
+
+    if ( v == "minmod" )
+    {
+        return SlopeLimiter::minmod;
+    }
+
+    throw std::runtime_error( "reconstruction.limiter unsupported: " + v + " (supported: none|minmod|vanleer)" );
 }
 
-static inline void weno5_weights(double b0, double b1, double b2,
-                                 double eps,
-                                 double g0, double g1, double g2,
-                                 double& w0, double& w1, double& w2) {
-    const double a0 = g0 * invPowWeno(eps + b0);
-    const double a1 = g1 * invPowWeno(eps + b1);
-    const double a2 = g2 * invPowWeno(eps + b2);
+
+// Read the reconstruction scheme, MUSCL limiter and positive WENO epsilon.
+ReconstructionOptions read_reconstruction_options( const Cfg &cfg )
+{
+    ReconstructionOptions opt;
+
+    opt.scheme = parse_scheme( cfg.get_string( "reconstruction.scheme", "firstOrder" ) );
+    opt.limiter = parse_limiter( cfg.get_string( "reconstruction.limiter", "vanleer" ) );
+
+    opt.eps = cfg.get_double( "reconstruction.eps", default_weno_epsilon );
+
+    const std::string legacy_vars = trim_string( cfg.get_string( "reconstruction.variables", "" ) );
+
+    if ( !legacy_vars.empty() && legacy_vars != "characteristic" )
+    {
+        throw std::runtime_error(
+            "reconstruction.variables is deprecated; only characteristic reconstruction is supported" );
+    }
+
+    if ( !std::isfinite( opt.eps ) || opt.eps <= 0.0 )
+    {
+        throw std::runtime_error( "reconstruction.eps must be > 0" );
+    }
+
+    return opt;
+}
+
+
+// Shared characteristic projection.
+
+// Store the right and left eigenvector matrices of the 2D conservative Euler system.
+struct Eigen4
+{
+    double right_matrix[conservative_variable_count][conservative_variable_count];
+    double left_matrix[conservative_variable_count][conservative_variable_count];
+};
+
+
+// Recover the characteristic reference state from the arithmetic mean of adjacent conserved states.
+// ulc, urc (in) - valid adjacent conservative states
+// gamma (in) - ideal-gas heat-capacity ratio
+// rho0, u0, v0, p0, h0, c0 (out) - reference density, velocities, pressure, enthalpy and sound speed
+static inline void face_state_2d( const Conservative_vector &ulc, const Conservative_vector &urc, double gamma,
+    double &rho0, double &u0, double &v0, double &p0, double &h0, double &c0 )
+{
+    {
+        EvaluatedState checked_state{};
+
+        require_success( calc_flow_variables( ulc, gamma, checked_state ), "calc_flow_variables" );
+    }
+
+    {
+        EvaluatedState checked_state{};
+
+        require_success( calc_flow_variables( urc, gamma, checked_state ), "calc_flow_variables" );
+    }
+
+    // Check both adjacent states before averaging; an average must not hide an invalid input.
+    const Conservative_vector uavg = 0.5 * ulc + 0.5 * urc;
+
+    EvaluatedState primitive{};
+
+    require_success( calc_flow_variables( uavg, gamma, primitive ), "calc_flow_variables" );
+    rho0 = primitive.density;
+    u0 = primitive.x_velocity;
+    v0 = primitive.y_velocity;
+    p0 = primitive.pressure;
+    h0 = primitive.specific_total_enthalpy;
+    c0 = primitive.sound_speed;
+}
+
+
+// Compute the left and right conservative eigenvector matrices for an x-normal face.
+static inline void build_eigen2_dconservative_x( double u, double v, double specific_total_enthalpy, double c,
+    double gamma, Eigen4 &e )
+{
+    const double beta = ( gamma - 1.0 ) / ( c * c );
+    const double q2 = 0.5 * ( u * u + v * v );
+    const double alpha = beta * q2;
+
+    // Right-matrix columns: negative acoustic wave, entropy wave, shear wave, positive acoustic wave.
+    e.right_matrix[density_component][0] = 1.0;
+    e.right_matrix[x_momentum_component][0] = u - c;
+    e.right_matrix[y_momentum_component][0] = v;
+    e.right_matrix[total_energy_component][0] = specific_total_enthalpy - u * c;
+
+    e.right_matrix[density_component][1] = 1.0;
+    e.right_matrix[x_momentum_component][1] = u;
+    e.right_matrix[y_momentum_component][1] = v;
+    e.right_matrix[total_energy_component][1] = q2;
+
+    e.right_matrix[density_component][2] = 0.0;
+    e.right_matrix[x_momentum_component][2] = 0.0;
+    e.right_matrix[y_momentum_component][2] = 1.0;
+    e.right_matrix[total_energy_component][2] = v;
+
+    e.right_matrix[density_component][3] = 1.0;
+    e.right_matrix[x_momentum_component][3] = u + c;
+    e.right_matrix[y_momentum_component][3] = v;
+    e.right_matrix[total_energy_component][3] = specific_total_enthalpy + u * c;
+
+    // Left-matrix rows project conserved variables onto the same four characteristic waves.
+    e.left_matrix[0][density_component] = 0.5 * ( alpha + u / c );
+    e.left_matrix[0][x_momentum_component] = -0.5 * ( beta * u + 1.0 / c );
+    e.left_matrix[0][y_momentum_component] = -0.5 * beta * v;
+    e.left_matrix[0][total_energy_component] = 0.5 * beta;
+
+    e.left_matrix[1][density_component] = 1.0 - alpha;
+    e.left_matrix[1][x_momentum_component] = beta * u;
+    e.left_matrix[1][y_momentum_component] = beta * v;
+    e.left_matrix[1][total_energy_component] = -beta;
+
+    e.left_matrix[2][density_component] = -v;
+    e.left_matrix[2][x_momentum_component] = 0.0;
+    e.left_matrix[2][y_momentum_component] = 1.0;
+    e.left_matrix[2][total_energy_component] = 0.0;
+
+    e.left_matrix[3][density_component] = 0.5 * ( alpha - u / c );
+    e.left_matrix[3][x_momentum_component] = -0.5 * ( beta * u - 1.0 / c );
+    e.left_matrix[3][y_momentum_component] = -0.5 * beta * v;
+    e.left_matrix[3][total_energy_component] = 0.5 * beta;
+}
+
+
+// Compute the left and right conservative eigenvector matrices for a y-normal face.
+static inline void build_eigen2_dconservative_y( double u, double v, double specific_total_enthalpy, double c,
+    double gamma, Eigen4 &e )
+{
+    const double beta = ( gamma - 1.0 ) / ( c * c );
+    const double q2 = 0.5 * ( u * u + v * v );
+    const double alpha = beta * q2;
+
+    // Right-matrix columns: negative acoustic wave, entropy wave, shear wave, positive acoustic wave.
+    e.right_matrix[density_component][0] = 1.0;
+    e.right_matrix[x_momentum_component][0] = u;
+    e.right_matrix[y_momentum_component][0] = v - c;
+    e.right_matrix[total_energy_component][0] = specific_total_enthalpy - v * c;
+
+    e.right_matrix[density_component][1] = 1.0;
+    e.right_matrix[x_momentum_component][1] = u;
+    e.right_matrix[y_momentum_component][1] = v;
+    e.right_matrix[total_energy_component][1] = q2;
+
+    e.right_matrix[density_component][2] = 0.0;
+    e.right_matrix[x_momentum_component][2] = 1.0;
+    e.right_matrix[y_momentum_component][2] = 0.0;
+    e.right_matrix[total_energy_component][2] = u;
+
+    e.right_matrix[density_component][3] = 1.0;
+    e.right_matrix[x_momentum_component][3] = u;
+    e.right_matrix[y_momentum_component][3] = v + c;
+    e.right_matrix[total_energy_component][3] = specific_total_enthalpy + v * c;
+
+    // Left-matrix rows project conserved variables onto the same four characteristic waves.
+    e.left_matrix[0][density_component] = 0.5 * ( alpha + v / c );
+    e.left_matrix[0][x_momentum_component] = -0.5 * beta * u;
+    e.left_matrix[0][y_momentum_component] = -0.5 * ( beta * v + 1.0 / c );
+    e.left_matrix[0][total_energy_component] = 0.5 * beta;
+
+    e.left_matrix[1][density_component] = 1.0 - alpha;
+    e.left_matrix[1][x_momentum_component] = beta * u;
+    e.left_matrix[1][y_momentum_component] = beta * v;
+    e.left_matrix[1][total_energy_component] = -beta;
+
+    e.left_matrix[2][density_component] = -u;
+    e.left_matrix[2][x_momentum_component] = 1.0;
+    e.left_matrix[2][y_momentum_component] = 0.0;
+    e.left_matrix[2][total_energy_component] = 0.0;
+
+    e.left_matrix[3][density_component] = 0.5 * ( alpha - v / c );
+    e.left_matrix[3][x_momentum_component] = -0.5 * beta * u;
+    e.left_matrix[3][y_momentum_component] = -0.5 * ( beta * v - 1.0 / c );
+    e.left_matrix[3][total_energy_component] = 0.5 * beta;
+}
+
+
+// Map characteristic components back to conserved variables with the right eigenvector matrix.
+static inline void reconstruct_conservative_from_char_2d( const Eigen4 &e, const double *w, Conservative_vector &q )
+{
+    std::array<double, conservative_variable_count> components{};
+
+    for ( std::size_t m = 0; m < conservative_variable_count; ++m )
+    {
+        components[m] = e.right_matrix[m][0] * w[0] + e.right_matrix[m][1] * w[1] + e.right_matrix[m][2] * w[2] +
+                        e.right_matrix[m][3] * w[3];
+    }
+
+    q = unpack_state( components.data() );
+}
+
+
+// Project a conservative state onto the four characteristic components.
+static inline void project_char4( const Eigen4 &e, const Conservative_vector &q, double w[conservative_variable_count] )
+{
+    for ( std::size_t s = 0; s < conservative_variable_count; ++s )
+    {
+        w[s] = e.left_matrix[s][density_component] * q.specific_mass +
+               e.left_matrix[s][x_momentum_component] * q.specific_x_momentum +
+               e.left_matrix[s][y_momentum_component] * q.specific_y_momentum +
+               e.left_matrix[s][total_energy_component] * q.specific_energy;
+    }
+}
+
+
+// Compute the row-major index of a cell in the ghosted array.
+static inline int idx2( int i, int j, int nx_tot )
+{
+    return i + nx_tot * j;
+}
+
+
+// 1. First-order reconstruction.
+
+// Copy adjacent cell states to the left and right sides of each x-face.
+static void reconstruct_first_order_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    int nx_tot, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx )
+{
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx + 1; ++i )
+        {
+            const int face = i + ( nx + 1 ) * j;
+
+            ulx[face] = state[idx2( ng + i - 1, ng + j, nx_tot )];
+            urx[face] = state[idx2( ng + i, ng + j, nx_tot )];
+        }
+    }
+}
+
+
+// Copy adjacent cell states to the left and right sides of each y-face.
+static void reconstruct_first_order_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    int nx_tot, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury )
+{
+    for ( int j = 0; j < ny + 1; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            const int face = i + nx * j;
+
+            uly[face] = state[idx2( ng + i, ng + j - 1, nx_tot )];
+            ury[face] = state[idx2( ng + i, ng + j, nx_tot )];
+        }
+    }
+}
+
+
+// 2. Second-order MUSCL reconstruction.
+
+// Return the sign of x: -1, 0 or 1.
+static inline double sgn( double x )
+{
+    return ( x > 0 ) - ( x < 0 );
+}
+
+
+// Return the smaller same-sign slope, or zero when the slopes have opposite signs or include zero.
+static inline double minmod( double a, double b )
+{
+    if ( a * b <= 0.0 )
+    {
+        return 0.0;
+    }
+
+    return sgn( a ) * std::min( std::abs( a ), std::abs( b ) );
+}
+
+
+// Compute the van Leer limited slope; return zero when the slopes have opposite signs or include zero.
+static inline double vanleer( double a, double b )
+{
+    if ( a * b <= 0.0 )
+    {
+        return 0.0;
+    }
+
+    return ( 2.0 * a * b ) / ( a + b );
+}
+
+
+// Compute the MUSCL slope using the selected limiter.
+static inline double apply_limiter( SlopeLimiter lim, double dl, double dr )
+{
+    switch ( lim )
+    {
+    case SlopeLimiter::none:
+        return 0.5 * ( dl + dr );
+    case SlopeLimiter::minmod:
+        return minmod( dl, dr );
+    case SlopeLimiter::van_leer:
+        return vanleer( dl, dr );
+    }
+
+    throw std::runtime_error( "Invalid reconstruction limiter enum" );
+}
+
+
+// Reconstruct both face states with second-order MUSCL slopes in characteristic space.
+// eig (in) - eigensystem at the conservative arithmetic-mean state
+// limiter (in) - slope limiter
+// wc (in) - four cells of characteristic components, ordered along the face normal
+// ulf, urf (out) - left and right conservative face states
+static inline void reconstruct_face_musclfrom_char_cache( const Eigen4 &eig, SlopeLimiter limiter,
+    const double ( &wc )[4][conservative_variable_count], Conservative_vector &ulf, Conservative_vector &urf )
+{
+    double w_lf[conservative_variable_count]{};
+    double w_rf[conservative_variable_count]{};
+
+    for ( std::size_t s = 0; s < conservative_variable_count; ++s )
+    {
+        const double wm_l = wc[0][s];
+        const double w0_l = wc[1][s];
+        const double wp_l = wc[2][s];
+        const double s_l = apply_limiter( limiter, w0_l - wm_l, wp_l - w0_l );
+
+        w_lf[s] = w0_l + 0.5 * s_l;
+
+        const double wm_r = wc[1][s];
+        const double w0_r = wc[2][s];
+        const double wp_r = wc[3][s];
+        const double s_r = apply_limiter( limiter, w0_r - wm_r, wp_r - w0_r );
+
+        w_rf[s] = w0_r - 0.5 * s_r;
+    }
+
+    reconstruct_conservative_from_char_2d( eig, w_lf, ulf );
+    reconstruct_conservative_from_char_2d( eig, w_rf, urf );
+}
+
+
+// 3. Fifth-order WENO reconstruction.
+
+// Compute the inverse-square factor used in Jiang-Shu WENO weights.
+static inline double inv_pow_weno( double x )
+{
+    return 1.0 / ( x * x );
+}
+
+
+// Compute and normalize the three Jiang-Shu nonlinear weights.
+// b0, b1, b2 (in) - smoothness indicators
+// eps (in) - positive epsilon in the inverse-square weights
+// g0, g1, g2 (in) - linear weights
+// w0, w1, w2 (out) - normalized nonlinear weights
+static inline void weno5_weights( double b0, double b1, double b2, double eps, double g0, double g1, double g2,
+    double &w0, double &w1, double &w2 )
+{
+    // Each unnormalized weight is its linear weight divided by (epsilon + beta) squared.
+    const double a0 = g0 * inv_pow_weno( eps + b0 );
+    const double a1 = g1 * inv_pow_weno( eps + b1 );
+    const double a2 = g2 * inv_pow_weno( eps + b2 );
+    // Normalize the weights so their sum is one.
     const double asum = a0 + a1 + a2;
 
     w0 = a0 / asum;
@@ -85,487 +417,264 @@ static inline void weno5_weights(double b0, double b1, double b2,
     w2 = a2 / asum;
 }
 
-// Left state at interface (i+1/2) from cell i using stencil {i-2,i-1,i,i+1,i+2}
-static inline double weno5_left(double qim2, double qim1, double qi, double qip1, double qip2,
-                                double eps) {
-    // Candidate polynomials
-    const double p0 = (1.0/3.0)*qim2 - (7.0/6.0)*qim1 + (11.0/6.0)*qi;
-    const double p1 = (-1.0/6.0)*qim1 + (5.0/6.0)*qi + (1.0/3.0)*qip1;
-    const double p2 = (1.0/3.0)*qi + (5.0/6.0)*qip1 - (1.0/6.0)*qip2;
 
-    // Smoothness indicators (beta)
-    const double d0 = qim2 - 2.0*qim1 + qi;
-    const double d1 = qim1 - 2.0*qi   + qip1;
-    const double d2 = qi   - 2.0*qip1 + qip2;
+// Compute the left face value from the five-cell stencil centered on the left cell.
+static inline double weno5_left( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
+{
+    // Evaluate the three third-order candidate polynomials at the face.
+    const double p0 = ( 1.0 / 3.0 ) * qim2 - ( 7.0 / 6.0 ) * qim1 + ( 11.0 / 6.0 ) * qi;
+    const double p1 = ( -1.0 / 6.0 ) * qim1 + ( 5.0 / 6.0 ) * qi + ( 1.0 / 3.0 ) * qip1;
+    const double p2 = ( 1.0 / 3.0 ) * qi + ( 5.0 / 6.0 ) * qip1 - ( 1.0 / 6.0 ) * qip2;
 
-    const double b0 = (13.0/12.0)*d0*d0 + 0.25*(qim2 - 4.0*qim1 + 3.0*qi)*(qim2 - 4.0*qim1 + 3.0*qi);
-    const double b1 = (13.0/12.0)*d1*d1 + 0.25*(qim1 - qip1)*(qim1 - qip1);
-    const double b2 = (13.0/12.0)*d2*d2 + 0.25*(3.0*qi - 4.0*qip1 + qip2)*(3.0*qi - 4.0*qip1 + qip2);
+    // Compute the Jiang-Shu smoothness indicators for the three substencils.
+    const double d0 = qim2 - 2.0 * qim1 + qi;
+    const double d1 = qim1 - 2.0 * qi + qip1;
+    const double d2 = qi - 2.0 * qip1 + qip2;
 
-    // Linear weights
+    const double b0 =
+        ( 13.0 / 12.0 ) * d0 * d0 + 0.25 * ( qim2 - 4.0 * qim1 + 3.0 * qi ) * ( qim2 - 4.0 * qim1 + 3.0 * qi );
+    const double b1 = ( 13.0 / 12.0 ) * d1 * d1 + 0.25 * ( qim1 - qip1 ) * ( qim1 - qip1 );
+    const double b2 =
+        ( 13.0 / 12.0 ) * d2 * d2 + 0.25 * ( 3.0 * qi - 4.0 * qip1 + qip2 ) * ( 3.0 * qi - 4.0 * qip1 + qip2 );
+
+    // Use the fifth-order linear weights before applying smoothness-dependent weighting.
     const double g0 = 0.1;
     const double g1 = 0.6;
     const double g2 = 0.3;
 
-    // Nonlinear weights
     double w0 = 0.0, w1 = 0.0, w2 = 0.0;
-    weno5_weights(b0, b1, b2, eps, g0, g1, g2, w0, w1, w2);
 
-    return w0*p0 + w1*p1 + w2*p2;
+    weno5_weights( b0, b1, b2, eps, g0, g1, g2, w0, w1, w2 );
+
+    return w0 * p0 + w1 * p1 + w2 * p2;
 }
 
-// Right-biased interface state from cell i.
-// Implemented by symmetry: reverse the stencil and reuse the left kernel.
-static inline double weno5_right(double qim2, double qim1, double qi, double qip1, double qip2,
-                                 double eps) {
-    return weno5_left(qip2, qip1, qi, qim1, qim2, eps);
+
+// Compute the right face value by reversing the five-cell stencil.
+static inline double weno5_right( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
+{
+    return weno5_left( qip2, qip1, qi, qim1, qim2, eps );
 }
 
-// -----------------------------------------------------------------------------
-// 3) Option parsing
-// -----------------------------------------------------------------------------
-static Scheme parseScheme(const std::string& s) {
-    const std::string v = trim(s);
-    if (v.empty() || v == "firstOrder") return Scheme::FirstOrder;
-    if (v == "muscl") return Scheme::MUSCL;
-    if (v == "weno5") return Scheme::WENO5;
-    throw std::runtime_error("reconstruction.scheme unsupported: " + v);
-}
 
-static Limiter parseLimiter(const std::string& s) {
-    const std::string v = trim(s);
-    if (v.empty() || v == "vanleer") return Limiter::VanLeer;
-    if (v == "none") return Limiter::None;
-    if (v == "minmod") return Limiter::Minmod;
-    throw std::runtime_error("reconstruction.limiter unsupported: " + v + " (supported: none|minmod|vanleer)");
-}
+// Reconstruct both face states from a six-cell characteristic stencil using WENO5.
+// eig (in) - eigensystem at the conservative arithmetic-mean state
+// eps (in) - positive epsilon for the Jiang-Shu weights
+// wc (in) - six cells of characteristic components, ordered along the face normal
+// ulf, urf (out) - left and right conservative face states
+static inline void reconstruct_face_weno5_from_char_cache( const Eigen4 &eig, double eps,
+    const double ( &wc )[6][conservative_variable_count], Conservative_vector &ulf, Conservative_vector &urf )
+{
+    double w_lf[conservative_variable_count]{};
+    double w_rf[conservative_variable_count]{};
 
-// Read the active reconstruction options.
-Options readOptions(const Cfg& cfg) {
-    Options opt;
-    opt.scheme   = parseScheme(cfg.getString("reconstruction.scheme", "firstOrder"));
-    opt.limiter  = parseLimiter(cfg.getString("reconstruction.limiter", "vanleer"));
-
-    opt.eps            = cfg.getDouble("reconstruction.eps", 1e-12);
-
-    const std::string legacyVars = trim(cfg.getString("reconstruction.variables", ""));
-    if (!legacyVars.empty() && legacyVars != "characteristic") {
-        throw std::runtime_error("reconstruction.variables is deprecated; only characteristic reconstruction is supported");
+    for ( std::size_t s = 0; s < conservative_variable_count; ++s )
+    {
+        w_lf[s] = weno5_left( wc[0][s], wc[1][s], wc[2][s], wc[3][s], wc[4][s], eps );
+        w_rf[s] = weno5_right( wc[1][s], wc[2][s], wc[3][s], wc[4][s], wc[5][s], eps );
     }
 
-    if (!std::isfinite(opt.eps) || opt.eps <= 0.0) {
-        throw std::runtime_error("reconstruction.eps must be > 0");
-    }
-    return opt;
+    reconstruct_conservative_from_char_2d( eig, w_lf, ulf );
+    reconstruct_conservative_from_char_2d( eig, w_rf, urf );
 }
 
 
-// -----------------------------------------------------------------------------
-// 4) Characteristic helpers
-// -----------------------------------------------------------------------------
-
-// Eigensystem used by characteristic reconstruction.
-struct Eigen4 { double R[4][4]; double L[4][4]; };
-
-
-
-// Reference state Uavg = (ULc + URc)/2 for 2D characteristic reconstruction.
-static inline void faceState2D(const Vec4& ULc, const Vec4& URc, double gamma,
-                               double& rho0, double& u0, double& v0, double& p0, double& H0, double& c0) {
-    // Reject invalid adjacent states before averaging can conceal the failure.
-    (void)evalFlowVars(ULc, gamma);
-    (void)evalFlowVars(URc, gamma);
-    Vec4 Uavg{};
-    for (std::size_t k = 0; k < Uavg.size(); ++k) {
-        Uavg[k] = 0.5 * ULc[k] + 0.5 * URc[k];
-    }
-
-    // Recover all reference quantities from the same averaged conservative state.
-    const auto W = evalFlowVars(Uavg, gamma);
-    rho0 = W.rho;
-    u0 = W.u;
-    v0 = W.v;
-    p0 = W.p;
-    H0 = W.H;
-    c0 = W.a;
+// Store the configured reconstruction scheme and its parameters.
+Reconstruction2D::Reconstruction2D( const Cfg &cfg ) : opt_( read_reconstruction_options( cfg ) )
+{
 }
 
 
-// 2D conservative eigensystem for x-faces.
-static inline void buildEigen2DConservativeX(double u, double v, double H, double c, double gamma, Eigen4& e) {
-    const double beta  = (gamma - 1.0) / (c * c);
-    const double q2    = 0.5 * (u*u + v*v);
-    const double alpha = beta * q2;
+// Compute left and right conservative states on all (nx + 1) * ny x-faces.
+// state (in) - local row-major conservative field with valid ghost cells
+// nx, ny, ng (in) - interior cell counts and ghost width
+// gamma (in) - ideal-gas heat-capacity ratio
+// ulx, urx (out) - left and right conservative face states
+void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const
+{
+    const int nx_tot = nx + 2 * ng;
+    const int ny_tot = ny + 2 * ng;
 
-    // R columns: [wave-, entropy, shear(v), wave+]
-    e.R[0][0] = 1.0; e.R[1][0] = u - c; e.R[2][0] = v;     e.R[3][0] = H - u*c;
-    e.R[0][1] = 1.0; e.R[1][1] = u;     e.R[2][1] = v;     e.R[3][1] = q2;
-    e.R[0][2] = 0.0; e.R[1][2] = 0.0;   e.R[2][2] = 1.0;   e.R[3][2] = v;
-    e.R[0][3] = 1.0; e.R[1][3] = u + c; e.R[2][3] = v;     e.R[3][3] = H + u*c;
-
-    // L rows
-    e.L[0][0] = 0.5 * (alpha + u / c);
-    e.L[0][1] = -0.5 * (beta * u + 1.0 / c);
-    e.L[0][2] = -0.5 * beta * v;
-    e.L[0][3] = 0.5 * beta;
-
-    e.L[1][0] = 1.0 - alpha;
-    e.L[1][1] = beta * u;
-    e.L[1][2] = beta * v;
-    e.L[1][3] = -beta;
-
-    e.L[2][0] = -v;
-    e.L[2][1] = 0.0;
-    e.L[2][2] = 1.0;
-    e.L[2][3] = 0.0;
-
-    e.L[3][0] = 0.5 * (alpha - u / c);
-    e.L[3][1] = -0.5 * (beta * u - 1.0 / c);
-    e.L[3][2] = -0.5 * beta * v;
-    e.L[3][3] = 0.5 * beta;
-}
-
-// 2D conservative eigensystem for y-faces.
-static inline void buildEigen2DConservativeY(double u, double v, double H, double c, double gamma, Eigen4& e) {
-    const double beta  = (gamma - 1.0) / (c * c);
-    const double q2    = 0.5 * (u*u + v*v);
-    const double alpha = beta * q2;
-
-    // R columns: [wave-, entropy, shear(u), waves+]
-    e.R[0][0] = 1.0; e.R[1][0] = u;     e.R[2][0] = v - c; e.R[3][0] = H - v*c;
-    e.R[0][1] = 1.0; e.R[1][1] = u;     e.R[2][1] = v;     e.R[3][1] = q2;
-    e.R[0][2] = 0.0; e.R[1][2] = 1.0;   e.R[2][2] = 0.0;   e.R[3][2] = u;
-    e.R[0][3] = 1.0; e.R[1][3] = u;     e.R[2][3] = v + c; e.R[3][3] = H + v*c;
-
-    // L rows
-    e.L[0][0] = 0.5 * (alpha + v / c);
-    e.L[0][1] = -0.5 * beta * u;
-    e.L[0][2] = -0.5 * (beta * v + 1.0 / c);
-    e.L[0][3] = 0.5 * beta;
-
-    e.L[1][0] = 1.0 - alpha;
-    e.L[1][1] = beta * u;
-    e.L[1][2] = beta * v;
-    e.L[1][3] = -beta;
-
-    e.L[2][0] = -u;
-    e.L[2][1] = 1.0;
-    e.L[2][2] = 0.0;
-    e.L[2][3] = 0.0;
-
-    e.L[3][0] = 0.5 * (alpha - v / c);
-    e.L[3][1] = -0.5 * beta * u;
-    e.L[3][2] = -0.5 * (beta * v - 1.0 / c);
-    e.L[3][3] = 0.5 * beta;
-}
-
-
-
-static inline void reconstructConservativeFromChar2D(const Eigen4& e, const double* w, Vec4& q) {
-    for (int m = 0; m < 4; ++m) {
-        q[m] = e.R[m][0] * w[0] + e.R[m][1] * w[1] + e.R[m][2] * w[2] + e.R[m][3] * w[3];
-    }
-}
-
-
-
-static inline void projectChar4(const Eigen4& e, const Vec4& q, double w[4]) {
-    for (int s = 0; s < 4; ++s) {
-        w[s] = e.L[s][0] * q[0] + e.L[s][1] * q[1] + e.L[s][2] * q[2] + e.L[s][3] * q[3];
-    }
-}
-
-template <typename VecT, typename EigenT, int NVAR>
-static inline void reconstructFaceMUSCLFromCharCache(const EigenT& eig,
-                                                     Limiter limiter,
-                                                     const double (&wc)[4][NVAR],
-                                                     void (*mulR)(const EigenT&, const double*, VecT&),
-                                                     VecT& ULf,
-                                                     VecT& URf) {
-    double wLf[NVAR]{};
-    double wRf[NVAR]{};
-
-    for (int s = 0; s < NVAR; ++s) {
-        const double wmL = wc[0][s];
-        const double w0L = wc[1][s];
-        const double wpL = wc[2][s];
-        const double sL  = applyLimiter(limiter, w0L - wmL, wpL - w0L);
-        wLf[s] = w0L + 0.5 * sL;
-
-        const double wmR = wc[1][s];
-        const double w0R = wc[2][s];
-        const double wpR = wc[3][s];
-        const double sR  = applyLimiter(limiter, w0R - wmR, wpR - w0R);
-        wRf[s] = w0R - 0.5 * sR;
+    if ( (int)state.size() != nx_tot * ny_tot )
+    {
+        throw std::runtime_error( "Reconstruction2D::reconstructFacesX: U size mismatch" );
     }
 
-    mulR(eig, wLf, ULf);
-    mulR(eig, wRf, URf);
-}
-
-
-template <typename VecT, typename EigenT, int NVAR>
-static inline void reconstructFaceWENO5FromCharCache(const EigenT& eig,
-                                                     double eps,
-                                                     const double (&wc)[6][NVAR],
-                                                     void (*mulR)(const EigenT&, const double*, VecT&),
-                                                     VecT& ULf,
-                                                     VecT& URf) {
-    double wLf[NVAR]{};
-    double wRf[NVAR]{};
-
-    for (int s = 0; s < NVAR; ++s) {
-        wLf[s] = weno5_left(wc[0][s], wc[1][s], wc[2][s], wc[3][s], wc[4][s], eps);
-        wRf[s] = weno5_right(wc[1][s], wc[2][s], wc[3][s], wc[4][s], wc[5][s], eps);
+    if ( ng < required_ghost_cells( opt_.scheme ) )
+    {
+        throw std::runtime_error(
+            "Reconstruction2D::reconstructFacesX: ng too small for selected reconstruction.scheme" );
     }
 
-    mulR(eig, wLf, ULf);
-    mulR(eig, wRf, URf);
-}
+    const size_t n_face_x = static_cast<size_t>( nx + 1 ) * static_cast<size_t>( ny );
 
-// Shared high-order characteristic reconstruction dispatcher. The caller only
-// provides cache-filling lambdas for the MUSCL and WENO5 stencil layouts.
-template <typename VecT, typename EigenT, int NVAR,
-          typename FillMusclCacheFn, typename FillWenoCacheFn>
-static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
-                                                    const EigenT& eig,
-                                                    Limiter limiter,
-                                                    double eps,
-                                                    FillMusclCacheFn&& fillMusclCache,
-                                                    FillWenoCacheFn&& fillWenoCache,
-                                                    void (*mulR)(const EigenT&, const double*, VecT&),
-                                                    VecT& ULf,
-                                                    VecT& URf) {
-    if (scheme == Scheme::MUSCL) {
-        double wc[4][NVAR];
-        fillMusclCache(wc);
-        reconstructFaceMUSCLFromCharCache<VecT, EigenT, NVAR>(eig,
-                                                               limiter,
-                                                               wc,
-                                                               mulR,
-                                                               ULf,
-                                                               URf);
+    if ( ulx.size() != n_face_x )
+        ulx.resize( n_face_x );
+    if ( urx.size() != n_face_x )
+        urx.resize( n_face_x );
+
+    // First order uses adjacent cell averages without characteristic projection.
+    if ( opt_.scheme == ReconstructionScheme::first_order )
+    {
+        reconstruct_first_order_x( state, nx, ny, ng, nx_tot, ulx, urx );
         return;
     }
 
-    if (scheme == Scheme::WENO5) {
-        double wc[6][NVAR];
-        fillWenoCache(wc);
-        reconstructFaceWENO5FromCharCache<VecT, EigenT, NVAR>(eig,
-                                                               eps,
-                                                               wc,
-                                                               mulR,
-                                                               ULf,
-                                                               URf);
-        return;
-    }
+    // Build one eigensystem per face, then project the selected MUSCL or WENO stencil.
+    auto reconstruct_face =
+        [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
+    {
+        const int i_r = ng + i_face;
+        const int i_l = i_r - 1;
+        const int j = ng + j_face;
 
-    throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
-}
+        const int k_l = idx2( i_l, j, nx_tot );
+        const int k_r = idx2( i_r, j, nx_tot );
 
-// -------------------------
-// Reconstruction2D
-// -------------------------
-recon::Reconstruction2D::Reconstruction2D(const Cfg& cfg) : opt_(readOptions(cfg)) {}
+        double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, h0 = 0.0, c0 = 0.0;
 
-// Flatten a ghosted row-major 2D index.
-static inline int idx2(int i, int j, int nxTot) { return i + nxTot * j; }
-
-// Reconstruct conservative states on all x-faces.
-void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
-                                         int nx, int ny, int ng,
-                                         double gamma,
-                                         std::vector<Vec4>& ULx,
-                                         std::vector<Vec4>& URx) const {
-    const int nxTot = nx + 2 * ng;
-    const int nyTot = ny + 2 * ng;
-    if ((int)U.size() != nxTot * nyTot) {
-        throw std::runtime_error("Reconstruction2D::reconstructFacesX: U size mismatch");
-    }
-    if (ng < requiredGhostCells(opt_.scheme)) {
-        throw std::runtime_error("Reconstruction2D::reconstructFacesX: ng too small for selected reconstruction.scheme");
-    }
-
-    const size_t nFaceX = static_cast<size_t>(nx + 1) * static_cast<size_t>(ny);
-    if (ULx.size() != nFaceX) ULx.resize(nFaceX);
-    if (URx.size() != nFaceX) URx.resize(nFaceX);
-
-
-    if (opt_.scheme == Scheme::FirstOrder) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx + 1; ++i) {
-                const int I_R = ng + i;
-                const int J   = ng + j;
-                const int I_L = I_R - 1;
-                const int f   = i + (nx + 1) * j;
-                auto loadFace = [&](Vec4& ULf, Vec4& URf) {
-                    ULf = U[idx2(I_L, J, nxTot)];
-                    URf = U[idx2(I_R, J, nxTot)];
-                };
-                loadFace(ULx[f], URx[f]);
-            }
-        }
-        return;
-    }
-    // High-order x-face path: build the face-local eigensystem at the conservative arithmetic mean and perform
-    // characteristic reconstruction for the x-normal 2D Euler system.
-    // Reconstruct one x-face with the requested scheme.
-    auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
-        const int I_R = ng + iFace;
-        const int I_L = I_R - 1;
-        const int J   = ng + jFace;
-
-        const int kL = idx2(I_L, J, nxTot);
-        const int kR = idx2(I_R, J, nxTot);
-
-        double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, H0 = 0.0, c0 = 0.0;
-        faceState2D(U[kL], U[kR], gamma, rho0, u0, v0, p0, H0, c0);
+        face_state_2d( state[k_l], state[k_r], gamma, rho0, u0, v0, p0, h0, c0 );
 
         Eigen4 eig{};
-        buildEigen2DConservativeX(u0, v0, H0, c0, gamma, eig);
 
-        auto fillMusclCache = [&](double (&wc)[4][4]) {
-            const Vec4* qBase = &U[idx2(I_L - 1, J, nxTot)];
-            projectChar4(eig, qBase[0], wc[0]);
-            projectChar4(eig, qBase[1], wc[1]);
-            projectChar4(eig, qBase[2], wc[2]);
-            projectChar4(eig, qBase[3], wc[3]);
-        };
+        build_eigen2_dconservative_x( u0, v0, h0, c0, gamma, eig );
 
-        auto fillWenoCache = [&](double (&wc)[6][4]) {
-            const Vec4* qBase = &U[idx2(I_L - 2, J, nxTot)];
-            projectChar4(eig, qBase[0], wc[0]);
-            projectChar4(eig, qBase[1], wc[1]);
-            projectChar4(eig, qBase[2], wc[2]);
-            projectChar4(eig, qBase[3], wc[3]);
-            projectChar4(eig, qBase[4], wc[4]);
-            projectChar4(eig, qBase[5], wc[5]);
-        };
+        if ( scheme == ReconstructionScheme::muscl )
+        {
+            double wc[4][conservative_variable_count];
+            const Conservative_vector *q_base = &state[idx2( i_l - 1, j, nx_tot )];
 
-        reconstructHighOrderFaceFromChar<Vec4, Eigen4, 4>(scheme,
-                                                           eig,
-                                                           opt_.limiter,
-                                                           opt_.eps,
-                                                           fillMusclCache,
-                                                           fillWenoCache,
-                                                           reconstructConservativeFromChar2D,
-                                                           ULf,
-                                                           URf);
+            project_char4( eig, q_base[0], wc[0] );
+            project_char4( eig, q_base[1], wc[1] );
+            project_char4( eig, q_base[2], wc[2] );
+            project_char4( eig, q_base[3], wc[3] );
+            reconstruct_face_musclfrom_char_cache( eig, opt_.limiter, wc, ulf, urf );
+        }
+        else if ( scheme == ReconstructionScheme::weno5 )
+        {
+            double wc[6][conservative_variable_count];
+            const Conservative_vector *q_base = &state[idx2( i_l - 2, j, nx_tot )];
+
+            project_char4( eig, q_base[0], wc[0] );
+            project_char4( eig, q_base[1], wc[1] );
+            project_char4( eig, q_base[2], wc[2] );
+            project_char4( eig, q_base[3], wc[3] );
+            project_char4( eig, q_base[4], wc[4] );
+            project_char4( eig, q_base[5], wc[5] );
+            reconstruct_face_weno5_from_char_cache( eig, opt_.eps, wc, ulf, urf );
+        }
+        else
+        {
+            throw std::runtime_error( "Characteristic reconstruction: unsupported scheme" );
+        }
     };
 
-    // Reconstruct each x-face using the selected scheme.
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx + 1; ++i) {
-            const int f = i + (nx + 1) * j;
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx + 1; ++i )
+        {
+            const int f = i + ( nx + 1 ) * j;
 
-            reconstructFace(i, j, opt_.scheme, ULx[f], URx[f]);
+            reconstruct_face( i, j, opt_.scheme, ulx[f], urx[f] );
         }
     }
 }
 
-// Reconstruct conservative states on all y-faces.
-void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
-                                         int nx, int ny, int ng,
-                                         double gamma,
-                                         std::vector<Vec4>& ULy,
-                                         std::vector<Vec4>& URy) const {
-    const int nxTot = nx + 2 * ng;
-    const int nyTot = ny + 2 * ng;
-    if ((int)U.size() != nxTot * nyTot) {
-        throw std::runtime_error("Reconstruction2D::reconstructFacesY: U size mismatch");
+
+// Compute left and right conservative states on all nx * (ny + 1) y-faces.
+// state (in) - local row-major conservative field with valid ghost cells
+// nx, ny, ng (in) - interior cell counts and ghost width
+// gamma (in) - ideal-gas heat-capacity ratio
+// uly, ury (out) - left and right conservative face states
+void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const
+{
+    const int nx_tot = nx + 2 * ng;
+    const int ny_tot = ny + 2 * ng;
+
+    if ( (int)state.size() != nx_tot * ny_tot )
+    {
+        throw std::runtime_error( "Reconstruction2D::reconstructFacesY: U size mismatch" );
     }
-    if (ng < requiredGhostCells(opt_.scheme)) {
-        throw std::runtime_error("Reconstruction2D::reconstructFacesY: ng too small for selected reconstruction.scheme");
+
+    if ( ng < required_ghost_cells( opt_.scheme ) )
+    {
+        throw std::runtime_error(
+            "Reconstruction2D::reconstructFacesY: ng too small for selected reconstruction.scheme" );
     }
 
-    const size_t nFaceY = static_cast<size_t>(nx) * static_cast<size_t>(ny + 1);
-    if (ULy.size() != nFaceY) ULy.resize(nFaceY);
-    if (URy.size() != nFaceY) URy.resize(nFaceY);
+    const size_t n_face_y = static_cast<size_t>( nx ) * static_cast<size_t>( ny + 1 );
 
+    if ( uly.size() != n_face_y )
+        uly.resize( n_face_y );
+    if ( ury.size() != n_face_y )
+        ury.resize( n_face_y );
 
-    if (opt_.scheme == Scheme::FirstOrder) {
-        for (int j = 0; j < ny + 1; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                const int I = ng + i;
-                const int J_T = ng + j;
-                const int J_B = J_T - 1;
-                const int f = i + nx * j;
-                auto loadFace = [&](Vec4& ULf, Vec4& URf) {
-                    ULf = U[idx2(I, J_B, nxTot)];
-                    URf = U[idx2(I, J_T, nxTot)];
-                };
-                loadFace(ULy[f], URy[f]);
-            }
-        }
+    if ( opt_.scheme == ReconstructionScheme::first_order )
+    {
+        reconstruct_first_order_y( state, nx, ny, ng, nx_tot, uly, ury );
         return;
     }
-    // High-order y-face path: same reconstruction pattern as the x-face case,
-    // but using the y-normal eigensystem at the conservative arithmetic mean and a y-directed stencil.
-    // Reconstruct one y-face with the requested scheme.
-    auto reconstructFace = [&](int iFace, int jFace, Scheme scheme, Vec4& ULf, Vec4& URf) {
-        const int I   = ng + iFace;
-        const int J_T = ng + jFace;
-        const int J_B = J_T - 1;
 
-        const int kB = idx2(I, J_B, nxTot);
-        const int kT = idx2(I, J_T, nxTot);
+    auto reconstruct_face =
+        [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
+    {
+        const int i = ng + i_face;
+        const int j_t = ng + j_face;
+        const int j_b = j_t - 1;
 
-        double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, H0 = 0.0, c0 = 0.0;
-        faceState2D(U[kB], U[kT], gamma, rho0, u0, v0, p0, H0, c0);
+        const int k_b = idx2( i, j_b, nx_tot );
+        const int k_t = idx2( i, j_t, nx_tot );
+
+        double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, h0 = 0.0, c0 = 0.0;
+
+        face_state_2d( state[k_b], state[k_t], gamma, rho0, u0, v0, p0, h0, c0 );
 
         Eigen4 eig{};
-        buildEigen2DConservativeY(u0, v0, H0, c0, gamma, eig);
 
-        auto fillMusclCache = [&](double (&wc)[4][4]) {
-            const Vec4* qCache[4] = {
-                &U[idx2(I, J_B - 1, nxTot)],
-                &U[idx2(I, J_B,     nxTot)],
-                &U[idx2(I, J_T,     nxTot)],
-                &U[idx2(I, J_T + 1, nxTot)]
-            };
-            projectChar4(eig, *qCache[0], wc[0]);
-            projectChar4(eig, *qCache[1], wc[1]);
-            projectChar4(eig, *qCache[2], wc[2]);
-            projectChar4(eig, *qCache[3], wc[3]);
-        };
+        build_eigen2_dconservative_y( u0, v0, h0, c0, gamma, eig );
 
-        auto fillWenoCache = [&](double (&wc)[6][4]) {
-            const Vec4* qCache[6] = {
-                &U[idx2(I, J_B - 2, nxTot)],
-                &U[idx2(I, J_B - 1, nxTot)],
-                &U[idx2(I, J_B,     nxTot)],
-                &U[idx2(I, J_T,     nxTot)],
-                &U[idx2(I, J_T + 1, nxTot)],
-                &U[idx2(I, J_T + 2, nxTot)]
-            };
-            projectChar4(eig, *qCache[0], wc[0]);
-            projectChar4(eig, *qCache[1], wc[1]);
-            projectChar4(eig, *qCache[2], wc[2]);
-            projectChar4(eig, *qCache[3], wc[3]);
-            projectChar4(eig, *qCache[4], wc[4]);
-            projectChar4(eig, *qCache[5], wc[5]);
-        };
+        if ( scheme == ReconstructionScheme::muscl )
+        {
+            double wc[4][conservative_variable_count];
+            const Conservative_vector *q_cache[4] = { &state[idx2( i, j_b - 1, nx_tot )],
+                &state[idx2( i, j_b, nx_tot )], &state[idx2( i, j_t, nx_tot )], &state[idx2( i, j_t + 1, nx_tot )] };
 
-        reconstructHighOrderFaceFromChar<Vec4, Eigen4, 4>(scheme,
-                                                           eig,
-                                                           opt_.limiter,
-                                                           opt_.eps,
-                                                           fillMusclCache,
-                                                           fillWenoCache,
-                                                           reconstructConservativeFromChar2D,
-                                                           ULf,
-                                                           URf);
+            project_char4( eig, *q_cache[0], wc[0] );
+            project_char4( eig, *q_cache[1], wc[1] );
+            project_char4( eig, *q_cache[2], wc[2] );
+            project_char4( eig, *q_cache[3], wc[3] );
+            reconstruct_face_musclfrom_char_cache( eig, opt_.limiter, wc, ulf, urf );
+        }
+        else if ( scheme == ReconstructionScheme::weno5 )
+        {
+            double wc[6][conservative_variable_count];
+            const Conservative_vector *q_cache[6] = { &state[idx2( i, j_b - 2, nx_tot )],
+                &state[idx2( i, j_b - 1, nx_tot )], &state[idx2( i, j_b, nx_tot )], &state[idx2( i, j_t, nx_tot )],
+                &state[idx2( i, j_t + 1, nx_tot )], &state[idx2( i, j_t + 2, nx_tot )] };
+
+            project_char4( eig, *q_cache[0], wc[0] );
+            project_char4( eig, *q_cache[1], wc[1] );
+            project_char4( eig, *q_cache[2], wc[2] );
+            project_char4( eig, *q_cache[3], wc[3] );
+            project_char4( eig, *q_cache[4], wc[4] );
+            project_char4( eig, *q_cache[5], wc[5] );
+            reconstruct_face_weno5_from_char_cache( eig, opt_.eps, wc, ulf, urf );
+        }
+        else
+        {
+            throw std::runtime_error( "Characteristic reconstruction: unsupported scheme" );
+        }
     };
 
-    // Reconstruct each y-face using the selected scheme.
-    for (int j = 0; j < ny + 1; ++j) {
-        for (int i = 0; i < nx; ++i) {
+    for ( int j = 0; j < ny + 1; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
             const int f = i + nx * j;
 
-            reconstructFace(i, j, opt_.scheme, ULy[f], URy[f]);
+            reconstruct_face( i, j, opt_.scheme, uly[f], ury[f] );
         }
     }
 }
-} // namespace reconstruction
-
-

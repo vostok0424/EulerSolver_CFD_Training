@@ -1,16 +1,3 @@
-// mpi_parallel.hpp
-// MPI helper utilities for simple Cartesian domain decomposition.
-//
-// This module is intentionally small: it does NOT implement a full parallel mesh.
-// Instead, it provides:
-//   - A 2D Cartesian communicator (px-by-py rank layout)
-//   - Convenience functions to compute each rank's global index range
-//   - Halo exchange for cell-centered arrays with ghost layers
-//   - A few common collectives (barrier, allreduce)
-//
-// The solver keeps its own arrays (including ghosts) and calls exchangeHalos2D()
-// before reconstruction/flux evaluation so that stencils see consistent neighbor data.
-
 #pragma once
 
 #include <mpi.h>
@@ -19,130 +6,151 @@
 #include <stdexcept>
 #include <cstddef>
 
-namespace mpi_parallel {
 
-// Range1D
-// -------
-// A contiguous 0-based index range on one axis: [begin, begin+count).
-// Used to describe the global ownership of interior cells for each MPI rank.
-struct Range1D {
+// Store a global interior-cell range [begin, begin + count).
+struct Range1D
+{
     int begin = 0;
     int count = 0;
 };
 
-// Subdomain2D
-// -----------
-// This-rank 2D subdomain (interior only, no ghosts).
-// x and y ranges describe the global ownership of interior cells.
-struct Subdomain2D {
+
+// Store this rank's global x/y interior-cell ranges; ghost cells are excluded.
+struct Subdomain2D
+{
     Range1D x;
     Range1D y;
 
-    int nx() const { return x.count; }
-    int ny() const { return y.count; }
-    int iBeg() const { return x.begin; }
-    int jBeg() const { return y.begin; }
+    int nx() const
+    {
+        return x.count;
+    }
+
+    int ny() const
+    {
+        return y.count;
+    }
+
+    int i_beg() const
+    {
+        return x.begin;
+    }
+
+    int j_beg() const
+    {
+        return y.begin;
+    }
 };
 
-// MpiParallel
-// -----------
-// Lightweight wrapper around an MPI Cartesian communicator.
-//
-// Typical workflow:
-//   1) Create MpiParallel(px, py)
-//   2) Ask for this rank's subdomain: decompose(...)
-//   3) During time stepping, call exchangeHalos2D() to update ghost layers
-//
-// Important:
-// - The runtime uses a 2D Cartesian decomposition.
-class MpiParallel {
-public:
-    struct Neighbors {
-        int west  = MPI_PROC_NULL; // -x
-        int east  = MPI_PROC_NULL; // +x
-        int south = MPI_PROC_NULL; // -y
-        int north = MPI_PROC_NULL; // +y
+
+// Own the Cartesian communicator and reusable buffers for decomposition, halo exchange and reductions.
+class MpiParallel
+{
+  public:
+    // Store Cartesian neighbor ranks; MPI_PROC_NULL marks a non-periodic domain edge.
+    struct Neighbors
+    {
+        int west = MPI_PROC_NULL;
+        int east = MPI_PROC_NULL;
+        int south = MPI_PROC_NULL;
+        int north = MPI_PROC_NULL;
     };
 
-    // Construct a px-by-py Cartesian communicator on top of `parent`.
-    // The communicator is freed in the destructor.
-    // Manual 2D block decomposition:
-    // - px blocks along x, py blocks along y
-    // - requires px*py == MPI_Comm_size(parent)
-    // - default: non-periodic, no reorder
-    MpiParallel(int px, int py,
-                MPI_Comm parent = MPI_COMM_WORLD,
-                bool periodicX = false,
-                bool periodicY = false,
-                bool reorder   = false);
+    // px, py (in) - process-grid dimensions; px*py must equal the parent communicator size.
+    // parent (in) - communicator used to create the Cartesian topology.
+    MpiParallel( int px, int py, MPI_Comm parent = MPI_COMM_WORLD, bool periodic_x = false, bool periodic_y = false,
+        bool reorder = false );
 
-    MpiParallel(const MpiParallel&) = delete;
-    MpiParallel& operator=(const MpiParallel&) = delete;
+    MpiParallel( const MpiParallel & ) = delete;
 
-    MpiParallel(MpiParallel&&) noexcept;
-    MpiParallel& operator=(MpiParallel&&) noexcept;
+    MpiParallel &operator=( const MpiParallel & ) = delete;
+
+    MpiParallel( MpiParallel && ) noexcept;
+
+    MpiParallel &operator=( MpiParallel && ) noexcept;
 
     ~MpiParallel();
 
-    // The communicator passed in at construction (usually MPI_COMM_WORLD).
-    MPI_Comm parentComm() const { return parent_; }
-    // The created 2D Cartesian communicator used for neighbor exchanges/collectives.
-    MPI_Comm cartComm()   const { return cart_;   }
+    MPI_Comm parent_comm() const
+    {
+        return parent_;
+    }
 
-    int rank() const { return rank_; }
-    int size() const { return size_; }
+    // Return the Cartesian communicator used by exchanges and reductions.
+    MPI_Comm cart_comm() const
+    {
+        return cart_;
+    }
 
-    int px() const { return px_; }
-    int py() const { return py_; }
+    int rank() const
+    {
+        return rank_;
+    }
 
-    // Cartesian coords (0..px-1, 0..py-1)
-    int coordX() const { return cx_; }
-    int coordY() const { return cy_; }
+    int size() const
+    {
+        return size_;
+    }
 
-    // Neighbor ranks in the Cartesian grid (MPI_PROC_NULL at physical boundaries).
-    Neighbors neighbors() const { return nbr_; }
+    int px() const
+    {
+        return px_;
+    }
 
-    bool isRoot() const { return rank_ == 0; }
+    int py() const
+    {
+        return py_;
+    }
 
-    // Compute this-rank subdomain for global grid (globalNx, globalNy).
-    // (interior only; ghosts are managed by solver arrays, not by this struct)
-    Subdomain2D decompose(int globalNx, int globalNy) const;
+    int coord_x() const
+    {
+        return cx_;
+    }
 
-    // Collectives on cart communicator
+    int coord_y() const
+    {
+        return cy_;
+    }
+
+    Neighbors neighbors() const
+    {
+        return nbr_;
+    }
+
+    bool is_root() const
+    {
+        return rank_ == 0;
+    }
+
+    // Return this rank's global interior-cell ranges.
+    Subdomain2D decompose( int global_nx, int global_ny ) const;
+
+    // Synchronize all Cartesian ranks.
     void barrier() const;
 
-    double allreduceMax(double localVal) const;
-    double allreduceMin(double localVal) const;
-    double allreduceSum(double localVal) const;
+    // Return the maximum local_val over all Cartesian ranks.
+    double allreduce_max( double local_val ) const;
 
-    // Halo exchange for cell-centered arrays stored as contiguous doubles.
-    //
-    // Required memory layout:
-    // - local interior: nxLocal * nyLocal cells
-    // - array storage includes ghosts: nxTot = nxLocal + 2*ng, nyTot = nyLocal + 2*ng
-    // - row-major cells: cellIndex = i + nxTot*j, where i in [0..nxTot-1], j in [0..nyTot-1]
-    // - AoS components: each cell has ncomp doubles contiguous:
-    //   (e.g., ncomp=4 for 2D conservative variables)
-    //      cellPtr = data + (cellIndex * ncomp)
-    //
-    // What it does:
-    // - exchanges ng columns with west/east and ng rows with south/north
-    // - fills ghost layers (i<ng, i>=ng+nxLocal, j<ng, j>=ng+nyLocal)
-    //
-    void exchangeHalos2D(double* data,
-                         int nxLocal, int nyLocal,
-                         int ng, int ncomp) const;
+    // Return the minimum local_val over all Cartesian ranks.
+    double allreduce_min( double local_val ) const;
 
-private:
-    // Split a global index range into P blocks and return the block for a given coord.
-    // The first (globalN % P) blocks get one extra cell.
-    static Range1D split1D(int globalN, int P, int coord);
+    // Return the sum of local_val over all Cartesian ranks.
+    double allreduce_sum( double local_val ) const;
 
-    void initCart_(bool periodicX, bool periodicY, bool reorder);
+    // Exchange packed cell components with Cartesian neighbors and fill ghost strips.
+    // data (in/out) - packed cell components; cell (i,j) begins at (i + (nx_local + 2*ng)*j)*ncomp.
+    // Interior values are sent to neighbors; received values replace ghost strips.
+    void exchange_halos_2d( double *data, int nx_local, int ny_local, int ng, int ncomp ) const;
 
-private:
+  private:
+    // Split a global axis into contiguous blocks; distribute remainder cells to the first blocks.
+    static Range1D split1_d( int global_n, int p, int coord );
+
+    void init_cart_( bool periodic_x, bool periodic_y, bool reorder );
+
+  private:
     MPI_Comm parent_ = MPI_COMM_NULL;
-    MPI_Comm cart_   = MPI_COMM_NULL;
+    MPI_Comm cart_ = MPI_COMM_NULL;
 
     int rank_ = 0;
     int size_ = 1;
@@ -155,11 +163,9 @@ private:
 
     Neighbors nbr_{};
 
-    // Internal reusable buffers (separated per direction to avoid aliasing)
-    mutable std::vector<double> sendW_, recvW_;
-    mutable std::vector<double> sendE_, recvE_;
-    mutable std::vector<double> sendS_, recvS_;
-    mutable std::vector<double> sendN_, recvN_;
+    // Reuse separate send/receive buffers for each coordinate direction.
+    mutable std::vector<double> send_w_, recv_w_;
+    mutable std::vector<double> send_e_, recv_e_;
+    mutable std::vector<double> send_s_, recv_s_;
+    mutable std::vector<double> send_n_, recv_n_;
 };
-
-} // namespace mpi_parallel

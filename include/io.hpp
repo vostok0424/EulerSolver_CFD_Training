@@ -1,87 +1,39 @@
 #pragma once
-#include "state.hpp"
+#include "structures.hpp"
 #include <mpi.h>
 #include <string>
 #include <vector>
 
-// VTK data writting mode for legacy rectilinear-grid output.
-//
-// - point: convert cell-centered data to POINT_DATA by averaging neighbouring
-//          cell values onto grid points. This is convenient for smooth-looking
-//          visualization in ParaView.
-// - cell : write the conservative cell-centered solution directly as CELL_DATA.
-//          This preserves the finite-volume storage location and is better for
-//          debugging discontinuities, conservation, and cell-wise diagnostics.
-enum class VTKDataOutputType {
-    Point,
-    Cell
+
+// Select grid-point averages (point) or direct interior-cell values (cell).
+// Output fields are rho, velocity, p, rho_u, rho_v and E; E is energy per unit volume.
+enum class VTKDataOutputType
+{
+    point,
+    cell
 };
 
-// Write a 2D solution as a legacy VTK rectilinear-grid file (.vtk).
-//
-// The solver state U is cell-centered and includes ghost cells. This default
-// point-data writer keeps the current behaviour: it writes POINT_DATA by averaging
-// interior cell-centered values onto grid points.
-//
-// Output fields:
-//   - rho      : density
-//   - velocity : vector field (u, v, 0)
-//   - p        : pressure
-//   - rho_u    : x-momentum
-//   - rho_v    : y-momentum
-//   - E        : total energy from the conservative state
-//
-// Notes:
-// - Only interior cells [ng .. ng+nx-1] x [ng .. ng+ny-1] are used.
-// - Grid dimensions in VTK are (nx+1, ny+1, 1).
-// - (x0, x1) and (y0, y1) define the physical domain bounds of the interior mesh.
-void writeVTK2D_PointData(const std::string& filename,
-                          const std::vector<Vec4>& U,
-                          int nx, int ny, int ng,
-                          double x0, double x1,
-                          double y0, double y1,
-                          double gamma);
 
-// Write a 2D solution as CELL_DATA on a legacy VTK rectilinear grid (.vtk).
-//
-// This function writes one value per finite-volume cell without point averaging.
-// It is intended for exact cell-wise inspection of the numerical solution.
-void writeVTK2D_CellData(const std::string& filename,
-                         const std::vector<Vec4>& U,
-                         int nx, int ny, int ng,
-                         double x0, double x1,
-                         double y0, double y1,
-                         double gamma);
+// Write interior-cell fields to a VTK rectilinear grid after averaging them onto grid points.
+// state (in) - row-major field including ng ghost cells; only the nx-by-ny interior is written.
+// x0, x1, y0, y1 (in) - physical bounds of the interior domain; gamma closes the gas state.
+void write_vtk_2d_point_data( const std::string &filename, const std::vector<Conservative_vector> &state, int nx,
+    int ny, int ng, double x0, double x1, double y0, double y1, double gamma );
 
-// MPI (Plan A): gather all ranks' interior cell data on rank 0, assemble the
-// global 2D field, and write a single legacy VTK rectilinear-grid file (.vtk).
-//
-// This point-data MPI writer keeps the current behaviour: rank 0 writes POINT_DATA
-// after converting gathered cell-centered values onto grid points.
-//
-// - `Ulocal` is this-rank solution including ghosts; only interior
-//   [ng .. ng+nxLocal-1] x [ng .. ng+nyLocal-1] is gathered.
-// - (iBeg, jBeg) are this-rank interior block global start indices (0-based).
-// - `nxGlobal`, `nyGlobal` are the full global cell counts.
-// - Only rank 0 writes `filename`; other ranks participate in gathers and return.
-void writeVTK2D_PointData_GatherMPI(const std::string& filename,
-                                    const std::vector<Vec4>& Ulocal,
-                                    int nxLocal, int nyLocal, int ng,
-                                    int iBeg, int jBeg,
-                                    int nxGlobal, int nyGlobal,
-                                    double x0, double x1,
-                                    double y0, double y1,
-                                    double gamma,
-                                    MPI_Comm comm);
 
-// MPI version of CELL_DATA VTK output. All ranks gather interior cell data on
-// rank 0, then rank 0 writes one value per global finite-volume cell.
-void writeVTK2D_CellData_GatherMPI(const std::string& filename,
-                                   const std::vector<Vec4>& Ulocal,
-                                   int nxLocal, int nyLocal, int ng,
-                                   int iBeg, int jBeg,
-                                   int nxGlobal, int nyGlobal,
-                                   double x0, double x1,
-                                   double y0, double y1,
-                                   double gamma,
-                                   MPI_Comm comm);
+// Write one set of field values per interior cell to a VTK rectilinear grid.
+void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Conservative_vector> &state, int nx, int ny,
+    int ng, double x0, double x1, double y0, double y1, double gamma );
+
+
+// Gather interior states on communicator rank 0 and write a single POINT_DATA file.
+// All ranks in comm must participate; i_beg and j_beg locate each local interior in the global mesh.
+void write_vtk_2d_point_data_gather_mpi( const std::string &filename, const std::vector<Conservative_vector> &ulocal,
+    int nx_local, int ny_local, int ng, int i_beg, int j_beg, int nx_global, int ny_global, double x0, double x1,
+    double y0, double y1, double gamma, MPI_Comm comm );
+
+
+// Gather interior states on communicator rank 0 and write a single CELL_DATA file.
+void write_vtk_2d_cell_data_gather_mpi( const std::string &filename, const std::vector<Conservative_vector> &ulocal,
+    int nx_local, int ny_local, int ng, int i_beg, int j_beg, int nx_global, int ny_global, double x0, double x1,
+    double y0, double y1, double gamma, MPI_Comm comm );

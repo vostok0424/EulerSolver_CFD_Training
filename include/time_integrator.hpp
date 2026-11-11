@@ -1,144 +1,107 @@
 #pragma once
 
-// time_integrator.hpp
-// -------------------
-// Explicit time integration schemes for advancing the semi-discrete system:
-//
-//   dU/dt = RHS(U)
-//
-// In a finite-volume solver, RHS(U) is produced by spatial operators:
-// reconstruction -> numerical flux -> divergence.
-//
-// This header provides:
-// - A small interface TimeIntegratorT<State>
-// - Several explicit schemes: Euler, RK2 (SSPRK2/Heun), SSPRK3, RK4
-// - A factory makeTimeIntegratorT<State>(name) to select by cfg string
-//
-// Design notes:
-// - The integrator is templated on State (currently used with Vec4 in the 2D solver).
-// - The RHS callback receives (U, R) and is allowed to modify U in-place before
-//   computing R. This is intentional: solvers often need to fill ghost cells or
-//   exchange MPI halos at each stage.
-// - All methods are declared here; implementations live in time_integrator.cpp
 
+#include "structures.hpp"
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
-// TimeIntegratorT<State>
-// ----------------------
-// Abstract interface for an explicit time integrator.
-//
-// step(U, dt, rhs): advance U by one time step of size dt.
-//
-// The integrator calls rhs(Ustage, R) one or more times per step.
-// rhs must fill R with the spatial RHS evaluated at the current stage state.
-template<typename State>
-class TimeIntegratorT {
-public:
-    // RHS callback:
-    //   rhs(Ustage, R)
-    //
-    // - Ustage: current stage state (modifiable). The solver may update ghost cells
-    //           or perform MPI halo exchange here.
-    // - R:      output vector for RHS(Ustage) with the same size/layout as Ustage.
-    using RHSFunc = std::function<void(std::vector<State>&, std::vector<State>&)>;
 
-    virtual ~TimeIntegratorT() = default;
+// Advance dU/dt = RHS(U); the RHS callback may refresh stage ghost cells.
+class TimeIntegrator
+{
+  public:
+    // RHS callback: first argument (in/out) is the stage state, second argument (out) is its residual.
+    // Both arrays have the same ghosted layout; the callback may update stage ghost cells.
+    using RHSFunc = std::function<void( std::vector<Conservative_vector> &, std::vector<Conservative_vector> & )>;
+
+    virtual ~TimeIntegrator() = default;
     virtual std::string name() const = 0;
-    virtual void step(std::vector<State>& U, double dt, const RHSFunc& rhs) = 0;
 
-protected:
-    // Ensure a workspace vector has the same size as U.
-    static void ensureSize(std::vector<State>& buf, size_t n) {
-        if (buf.size() != n) buf.resize(n);
+    // state (in/out) - solution advanced by dt; rhs (in) - stage residual callback.
+    virtual void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) = 0;
+
+  protected:
+    static void ensure_size( std::vector<Conservative_vector> &buf, size_t n )
+    {
+        if ( buf.size() != n )
+        {
+            buf.resize( n );
+        }
     }
 };
 
-// ------------------------------------------------------------
-// Forward Euler (1st order)
-// ------------------------------------------------------------
-// U^{n+1} = U^n + dt * RHS(U^n)
-// Simple and cheap, but least stable/accurate.
-template<typename State>
-class TI_EulerT final : public TimeIntegratorT<State> {
-public:
-    using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
+
+// First-order forward Euler integration.
+class EulerIntegrator final : public TimeIntegrator
+{
+  public:
+    using RHSFunc = TimeIntegrator::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
 
-private:
-    std::vector<State> R_;
-};
+    void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) override;
 
-// ------------------------------------------------------------
-// Explicit RK2 (SSPRK2 / Heun, 2nd order)
-// ------------------------------------------------------------
-// Two-stage method. Often used as a robust default for hyperbolic problems.
-template<typename State>
-class TI_RK2T final : public TimeIntegratorT<State> {
-public:
-    using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
-
-    std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
-
-private:
-    std::vector<State> U1_;
-    std::vector<State> R_;
+  private:
+    std::vector<Conservative_vector> r_;
 };
 
 
-// ------------------------------------------------------------
-// Explicit SSPRK3 (Shu–Osher, 3rd order strong-stability-preserving)
-// ------------------------------------------------------------
-// Three-stage SSP scheme; maintains TVD-like stability properties under a CFL limit.
-template<typename State>
-class TI_SSPRK3T final : public TimeIntegratorT<State> {
-public:
-    using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
+// Second-order two-stage Heun integration.
+class RK2Integrator final : public TimeIntegrator
+{
+  public:
+    using RHSFunc = TimeIntegrator::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
 
-private:
-    std::vector<State> U1_;
-    std::vector<State> U2_;
-    std::vector<State> R_;
+    void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) override;
+
+  private:
+    std::vector<Conservative_vector> u1_;
+    std::vector<Conservative_vector> r_;
 };
 
-// ------------------------------------------------------------
-// Classic Explicit RK4 (4th order)
-// ------------------------------------------------------------
-// Four-stage classical Runge–Kutta. Accurate for smooth problems, more expensive.
-template<typename State>
-class TI_RK4T final : public TimeIntegratorT<State> {
-public:
-    using RHSFunc = typename TimeIntegratorT<State>::RHSFunc;
+
+// Third-order three-stage Shu-Osher SSP integration.
+class SSPRK3Integrator final : public TimeIntegrator
+{
+  public:
+    using RHSFunc = TimeIntegrator::RHSFunc;
 
     std::string name() const override;
-    void step(std::vector<State>& U, double dt, const RHSFunc& rhs) override;
 
-private:
-    std::vector<State> U0_;
-    std::vector<State> U1_;
-    std::vector<State> U2_;
-    std::vector<State> U3_;
-    std::vector<State> k1_;
-    std::vector<State> k2_;
-    std::vector<State> k3_;
-    std::vector<State> k4_;
+    void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) override;
+
+  private:
+    std::vector<Conservative_vector> u1_;
+    std::vector<Conservative_vector> u2_;
+    std::vector<Conservative_vector> r_;
 };
 
-// ------------------------------------------------------------
-// Factory
-// ------------------------------------------------------------
-// Supported names (case-sensitive):
-//   euler, rk2, ssprk3, rk4
-//
-// The factory is explicitly instantiated for Vec4 in time_integrator.cpp.
-// This keeps the header lightweight and avoids multiple-definition issues.
-template<typename State>
-std::unique_ptr<TimeIntegratorT<State>> makeTimeIntegratorT(const std::string& name);
+
+// Fourth-order classical four-stage Runge-Kutta integration.
+class RK4Integrator final : public TimeIntegrator
+{
+  public:
+    using RHSFunc = TimeIntegrator::RHSFunc;
+
+    std::string name() const override;
+
+    void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) override;
+
+  private:
+    std::vector<Conservative_vector> u0_;
+    std::vector<Conservative_vector> u1_;
+    std::vector<Conservative_vector> u2_;
+    std::vector<Conservative_vector> u3_;
+    std::vector<Conservative_vector> k1_;
+    std::vector<Conservative_vector> k2_;
+    std::vector<Conservative_vector> k3_;
+    std::vector<Conservative_vector> k4_;
+};
+
+
+// Create the selected time integrator: euler, rk2, ssprk3 or rk4.
+std::unique_ptr<TimeIntegrator> make_time_integrator( const std::string &name );

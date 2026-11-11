@@ -1,19 +1,5 @@
-// solver.cpp
-// -----------
-// 2D finite-volume Euler solver (MPI-capable).
-//
-// High-level algorithm per time step:
-//   1) Fill ghost cells (MPI halo exchange + physical BCs at global edges)
-//   2) Reconstruct conservative face states UL/UR on x- and y-faces (characteristic reconstruction module)
-//   3) Compute numerical fluxes on faces via a Riemann solver (flux module)
-//   4) Build RHS = -dF/dx - dG/dy
-//   5) Advance in time with an explicit time integrator (Euler/RK2/SSPRK3/RK4)
-//   6) Periodically gather and write a single merged legacy VTK file (.vtk)
-//
-// Data layout (2D):
-// - U_ is a flattened ghosted array of size (nx+2*ng)*(ny+2*ng)
-// - idx(i,j) = i + (nx+2*ng)*j (row-major)
-// - Interior cells are (i,j) = (ng..ng+nx-1, ng..ng+ny-1)
+#include "common_functions.hpp"
+
 
 #include "solver.hpp"
 #include <algorithm>
@@ -29,482 +15,517 @@
 
 #include <type_traits>
 
-namespace {
+constexpr const char *k_output_dir_2d = "solution";
 
-constexpr const char* kOutputDir2D = "solution";
+// Read the VTK data location: point or cell, ignoring letter case.
+static VTKDataOutputType parse_vtkdata_output_type( const std::string &value )
+{
+    std::string s = to_lowercase( value );
 
-VTKDataOutputType parseVTKDataOutputType(const std::string& value) {
-    std::string s = value;
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    if ( s == "point" ) {
-        return VTKDataOutputType::Point;
-    }
-    if ( s == "cell" ) {
-        return VTKDataOutputType::Cell;
+    if ( s == "point" )
+    {
+        return VTKDataOutputType::point;
     }
 
-    throw std::runtime_error("Unknown output.vtkDataOutputType: " + value +
-                             " (expected point or cell)");
+    if ( s == "cell" )
+    {
+        return VTKDataOutputType::cell;
+    }
+
+    throw std::runtime_error( "Unknown output.vtkDataOutputType: " + value + " (expected point or cell)" );
 }
 
 
-const char* vtkDataOutputTypeName(VTKDataOutputType outputType) {
-    switch (outputType) {
-        case VTKDataOutputType::Point: return "POINT_DATA";
-        case VTKDataOutputType::Cell:  return "CELL_DATA";
+// Return the VTK label for the selected data location.
+static const char *vtk_data_output_type_name( VTKDataOutputType output_type )
+{
+    switch ( output_type )
+    {
+    case VTKDataOutputType::point:
+        return "POINT_DATA";
+    case VTKDataOutputType::cell:
+        return "CELL_DATA";
     }
+
     return "UNKNOWN";
 }
 
-void ensureOutputDirectoryExists(const mpi_parallel::MpiParallel& mp) {
-    namespace fs = std::filesystem;
-    if (mp.isRoot()) {
-        fs::create_directories(kOutputDir2D);
+
+// Create the solution directory on root, then synchronize all ranks.
+static void ensure_output_directory_exists( const MpiParallel &mp )
+{
+    if ( mp.is_root() )
+    {
+        std::filesystem::create_directories( k_output_dir_2d );
     }
+
     mp.barrier();
 }
 
-std::string makeStepOutputPath(const std::string& outPrefix, int step, double t) {
-    std::ostringstream stepSS;
-    stepSS << std::setw(4) << std::setfill('0') << step;
 
-    std::ostringstream tSS;
-    tSS << std::fixed << std::setprecision(6) << t;
-
-    const std::filesystem::path outDir = kOutputDir2D;
-    return (outDir / (outPrefix + "_step" + stepSS.str() + "_t=" + tSS.str() + ".vtk")).string();
-}
-
-std::string makeFinalOutputPath(const std::string& outPrefix, double t) {
-    std::ostringstream tSS;
-    tSS << std::fixed << std::setprecision(6) << t;
-
-    const std::filesystem::path outDir = kOutputDir2D;
-    return (outDir / (outPrefix + "_final_t=" + tSS.str() + ".vtk")).string();
-}
-
-void writeMergedVtkFile2D(const mpi_parallel::MpiParallel& mp,
-                          const std::string& path,
-                          const std::string& label,
-                          double t,
-                          const std::vector<Vec4>& U,
-                          int nx,
-                          int ny,
-                          int ng,
-                          int iBeg,
-                          int jBeg,
-                          int nxGlobal,
-                          int nyGlobal,
-                          double x0,
-                          double x1,
-                          double y0,
-                          double y1,
-                          double gamma,
-                          VTKDataOutputType dataOutputType) {
-    if (mp.isRoot()) {
-        std::cout << "[2D] Writing merged " << label << " " << path
-                  << " at t=" << t
-                  << " as " << vtkDataOutputTypeName(dataOutputType) << "\n";
-    }
-
-    switch (dataOutputType) {
-        case VTKDataOutputType::Point:
-            writeVTK2D_PointData_GatherMPI(path,
-                                           U, nx, ny, ng,
-                                           iBeg, jBeg,
-                                           nxGlobal, nyGlobal,
-                                           x0, x1,
-                                           y0, y1,
-                                           gamma,
-                                           mp.cartComm());
-            break;
-
-        case VTKDataOutputType::Cell:
-            writeVTK2D_CellData_GatherMPI(path,
-                                          U, nx, ny, ng,
-                                          iBeg, jBeg,
-                                          nxGlobal, nyGlobal,
-                                          x0, x1, y0, y1, gamma,
-                                          mp.cartComm());
-            break;
-    }
-}
-
-} // namespace
-
-// MPI halo exchange and MPI gather output pack Vec4 into raw doubles. Ensure it is tightly-packed.
-static_assert(std::is_trivially_copyable_v<Vec4>, "Vec4 must be trivially copyable for MPI halo exchange");
-static_assert(sizeof(Vec4) == 4 * sizeof(double), "Vec4 must be exactly 4 doubles (no padding)");
-
-// Constructor: read configuration, build local subdomain, allocate fields,
-// choose numerical methods (flux/reconstruction/time integrator), and initialize
-// interior cells through setFields.
-Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
-    : mp_(mp), recon_(cfg)
+// Build the scheduled output path from the prefix, step and time.
+static std::string make_step_output_path( const std::string &out_prefix, int step, double t )
 {
-    // --------------------
-    // 1) Read case settings
-    // --------------------
-    // Global mesh sizes (cfg)
-    grid_.nxGlobal = cfg.getInt("nx", 200);
-    grid_.nyGlobal = cfg.getInt("ny", 50);
+    std::ostringstream step_ss;
 
-    // Number of ghost layers. High-order reconstruction requires wider stencils.
-    // Ghost layers
-    grid_.ng = cfg.getInt("ng", 2);
-    if (grid_.ng < 1) throw std::runtime_error("ng must be >=1 for 2D solver");
+    step_ss << std::setw( 4 ) << std::setfill( '0' ) << step;
 
-    // Enforce the minimum ghost width required by the selected reconstruction scheme.
-    const int ngReq = recon::requiredGhostCells(recon_.options().scheme);
-    if (grid_.ng < ngReq) {
-        throw std::runtime_error("ng is too small for the selected reconstruction.scheme");
-    }
+    std::ostringstream t_ss;
 
-    // Global physical extents
-    grid_.x0 = cfg.getDouble("x0", 0.0);
-    grid_.x1 = cfg.getDouble("x1", 1.0);
-    grid_.y0 = cfg.getDouble("y0", 0.0);
-    grid_.y1 = cfg.getDouble("y1", 0.2);
+    t_ss << std::fixed << std::setprecision( 6 ) << t;
 
-    if (grid_.nxGlobal <= 0 || grid_.nyGlobal <= 0 ||
-        grid_.x1 <= grid_.x0 || grid_.y1 <= grid_.y0 ||
-        !std::isfinite(grid_.dx()) || !std::isfinite(grid_.dy()) ||
-        grid_.dx() <= 0.0 || grid_.dy() <= 0.0)
-        throw std::runtime_error("Invalid grid dimensions or physical extents");
-
-    // -----------------------------
-    // 2) Domain decomposition (MPI)
-    // -----------------------------
-    // Decompose the global interior grid into a px-by-py Cartesian process grid.
-    // This-rank subdomain (interior indices are global 0-based)
-    sub_  = mp_.decompose(grid_.nxGlobal, grid_.nyGlobal);
-    grid_.iBeg = sub_.iBeg();
-    grid_.jBeg = sub_.jBeg();
-    grid_.nx   = sub_.nx();
-    grid_.ny   = sub_.ny();
-
-    // Global spacing is defined by the global mesh and used consistently on all ranks.
-    // Global uniform spacing
-    const double dxG = grid_.dx();
-    const double dyG = grid_.dy();
-
-    // Local physical extents for this block, used by setFields and VTK output.
-    const double x0Loc = grid_.x0 + static_cast<double>(grid_.iBeg) * dxG;
-    const double x1Loc = grid_.x0 + static_cast<double>(grid_.iBeg + grid_.nx) * dxG;
-    const double y0Loc = grid_.y0 + static_cast<double>(grid_.jBeg) * dyG;
-    const double y1Loc = grid_.y0 + static_cast<double>(grid_.jBeg + grid_.ny) * dyG;
-
-    // -----------------------------
-    // 3) Numerics and run control
-    // -----------------------------
-    // Numerics / control
-    gamma_       = cfg.getDouble("gamma", 1.4);
-    cfl_         = cfg.getDouble("cfl", 0.5);
-    finalTime_   = cfg.getDouble("finalTime", 0.2);
-    outputEvery_ = cfg.getInt   ("outputEvery", 50);
-    writeFinal_  = cfg.getBool  ("writeFinal", true);
-    outPrefix_   = cfg.getString("outPrefix", "run2d");
-    if (gamma_ <= 1.0 || cfl_ <= 0.0 || finalTime_ < 0.0)
-        throw std::runtime_error("Require gamma > 1, cfl > 0, finalTime >= 0");
-    if (grid_.nx < grid_.ng || grid_.ny < grid_.ng)
-        throw std::runtime_error("Local nx and ny must be >= ng for halo exchange and wall reflection");
-
-    vtkDataOutputType_ = parseVTKDataOutputType(
-        cfg.getString("output.vtkDataOutputType", "point"));
-
-    // -----------------------------
-    // 4) Boundary conditions
-    // -----------------------------
-    // Read the parsed 2D boundary-condition object, including per-side
-    // types and any required inlet/outlet parameters.
-    bc_ = boundary::read2D(cfg);
-
-    // --------------------
-    // 5) Allocate fields
-    // --------------------
-    // Allocate local arrays including ghost cells.
-    // Allocate local fields (including ghosts)
-    grid_.nxTot = grid_.nx + 2 * grid_.ng;
-    grid_.nyTot = grid_.ny + 2 * grid_.ng;
-    U_.assign(static_cast<size_t>(grid_.nxTot) * static_cast<size_t>(grid_.nyTot), Vec4{});
-    RHS_.assign(static_cast<size_t>(grid_.nxTot) * static_cast<size_t>(grid_.nyTot), Vec4{});
-    faces_.resize(grid_.nx, grid_.ny);
-
-    // -----------------------------
-    // 6) Choose numerical methods
-    // -----------------------------
-    flux_ = makeFluxD<2>(cfg.getString("flux", "hllc"));
-    ti_   = makeTimeIntegratorT<Vec4>(cfg.getString("timeIntegrator", "ssprk3"));
-
-    // -----------------------------
-    // 7) Initialise interior fields
-    // -----------------------------
-    // Only this-rank interior block is initialised here; ghosts are filled later.
-  
-
-    // Initialize only this-rank block using local physical extents.
-    setFields2D(U_,
-                grid_.nx, grid_.ny, grid_.ng,
-                x0Loc, x1Loc,
-                y0Loc, y1Loc,
-                gamma_,
-                cfg);
+    const std::filesystem::path out_dir = k_output_dir_2d;
+    return ( out_dir / ( out_prefix + "_step" + step_ss.str() + "_t=" + t_ss.str() + ".vtk" ) ).string();
 }
 
-// Fill ghost cells for one solver state.
-//
-// Step 1: exchange MPI halos across subdomain interfaces.
-// Step 2: apply physical boundary conditions only on ranks that touch the
-// global domain boundary. Interior MPI interfaces are marked as Internal so
-// boundary::apply2D(...) leaves them untouched.
-void Solver::applyBC(std::vector<Vec4>& U) const {
-    // 1) Exchange halos across MPI subdomain interfaces
-    //    NOTE: This assumes Vec4 is a tightly-packed POD of 4 doubles.
-    mp_.exchangeHalos2D(reinterpret_cast<double*>(U.data()), grid_.nx, grid_.ny, grid_.ng, 4);
 
-    // Determine whether this rank touches each global boundary.
-    // MPI_PROC_NULL means there is no neighbor in that direction.
+// Build the final output path from the prefix and time.
+static std::string make_final_output_path( const std::string &out_prefix, double t )
+{
+    std::ostringstream t_ss;
+
+    t_ss << std::fixed << std::setprecision( 6 ) << t;
+
+    const std::filesystem::path out_dir = k_output_dir_2d;
+    return ( out_dir / ( out_prefix + "_final_t=" + t_ss.str() + ".vtk" ) ).string();
+}
+
+
+// Write a merged MPI snapshot using the selected point or cell data location.
+static void write_merged_vtk_file_2d( const MpiParallel &mp, const std::string &path, const std::string &label,
+    double t, const std::vector<Conservative_vector> &state, int nx, int ny, int ng, int i_beg, int j_beg,
+    int nx_global, int ny_global, double x0, double x1, double y0, double y1, double gamma,
+    VTKDataOutputType data_output_type )
+{
+    if ( mp.is_root() )
+    {
+        std::cout << "[2D] Writing merged " << label << " " << path << " at t=" << t << " as "
+                  << vtk_data_output_type_name( data_output_type ) << "\n";
+    }
+
+    switch ( data_output_type )
+    {
+    case VTKDataOutputType::point:
+        write_vtk_2d_point_data_gather_mpi( path, state, nx, ny, ng, i_beg, j_beg, nx_global, ny_global, x0, x1, y0, y1,
+            gamma, mp.cart_comm() );
+        break;
+
+    case VTKDataOutputType::cell:
+        write_vtk_2d_cell_data_gather_mpi( path, state, nx, ny, ng, i_beg, j_beg, nx_global, ny_global, x0, x1, y0, y1,
+            gamma, mp.cart_comm() );
+        break;
+    }
+}
+
+
+// Read the case, decompose the mesh, allocate fields and initialize the interior state.
+// cfg (in) - case configuration
+// mp (in) - MPI helper; must outlive the solver
+Solver::Solver( const Cfg &cfg, const MpiParallel &mp ) : mp_( mp ), recon_( cfg )
+{
+    // 1. Read the global mesh and verify the selected reconstruction stencil fits the ghost width.
+    grid_.nx_global = cfg.get_int( "nx", 200 );
+    grid_.ny_global = cfg.get_int( "ny", 50 );
+
+    grid_.ng = cfg.get_int( "ng", 2 );
+
+    if ( grid_.ng < 1 )
+    {
+        throw std::runtime_error( "ng must be >=1 for 2D solver" );
+    }
+
+    const int ng_req = required_ghost_cells( recon_.options().scheme );
+
+    if ( grid_.ng < ng_req )
+    {
+        throw std::runtime_error( "ng is too small for the selected reconstruction.scheme" );
+    }
+
+    grid_.x0 = cfg.get_double( "x0", 0.0 );
+    grid_.x1 = cfg.get_double( "x1", 1.0 );
+    grid_.y0 = cfg.get_double( "y0", 0.0 );
+    grid_.y1 = cfg.get_double( "y1", 0.2 );
+
+    if ( grid_.nx_global <= 0 || grid_.ny_global <= 0 || grid_.x1 <= grid_.x0 || grid_.y1 <= grid_.y0 ||
+         !std::isfinite( grid_.dx() ) || !std::isfinite( grid_.dy() ) || grid_.dx() <= 0.0 || grid_.dy() <= 0.0 )
+        throw std::runtime_error( "Invalid grid dimensions or physical extents" );
+
+    // 2. Find this rank's global cell range and local physical bounds.
+    sub_ = mp_.decompose( grid_.nx_global, grid_.ny_global );
+    grid_.i_beg = sub_.i_beg();
+    grid_.j_beg = sub_.j_beg();
+    grid_.nx = sub_.nx();
+    grid_.ny = sub_.ny();
+
+    const double dx_g = grid_.dx();
+    const double dy_g = grid_.dy();
+
+    const double x0_loc = grid_.x0 + static_cast<double>( grid_.i_beg ) * dx_g;
+    const double x1_loc = grid_.x0 + static_cast<double>( grid_.i_beg + grid_.nx ) * dx_g;
+    const double y0_loc = grid_.y0 + static_cast<double>( grid_.j_beg ) * dy_g;
+    const double y1_loc = grid_.y0 + static_cast<double>( grid_.j_beg + grid_.ny ) * dy_g;
+
+    // 3. Read the gas model, time controls and output settings.
+    gamma_ = cfg.get_double( "gamma", 1.4 );
+    cfl_ = cfg.get_double( "cfl", 0.5 );
+    final_time_ = cfg.get_double( "finalTime", 0.2 );
+    output_every_ = cfg.get_int( "outputEvery", 50 );
+    write_final_ = cfg.get_bool( "writeFinal", true );
+    out_prefix_ = cfg.get_string( "outPrefix", "run2d" );
+
+    if ( gamma_ <= 1.0 || cfl_ <= 0.0 || final_time_ < 0.0 )
+        throw std::runtime_error( "Require gamma > 1, cfl > 0, finalTime >= 0" );
+    if ( grid_.nx < grid_.ng || grid_.ny < grid_.ng )
+        throw std::runtime_error( "Local nx and ny must be >= ng for halo exchange and wall reflection" );
+
+    vtk_data_output_type_ = parse_vtkdata_output_type( cfg.get_string( "output.vtkDataOutputType", "point" ) );
+
+    // 4. Read the physical boundary conditions.
+    bc_ = read_boundary_conditions( cfg );
+
+    // 5. Allocate the ghosted cell fields and reusable face arrays.
+    grid_.nx_tot = grid_.nx + 2 * grid_.ng;
+    grid_.ny_tot = grid_.ny + 2 * grid_.ng;
+    conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ),
+        Conservative_vector{} );
+    rhs_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
+    faces_.resize( grid_.nx, grid_.ny );
+
+    // 6. Select the numerical flux and explicit time integrator.
+    flux_name_ = cfg.get_string( "flux", "hllc" );
+    flux_scheme_ = read_flux_scheme( flux_name_ );
+    ti_ = make_time_integrator( cfg.get_string( "timeIntegrator", "ssprk3" ) );
+
+    // 7. Initialize this rank's interior cells; ghost cells are filled before the first residual.
+    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, cfg );
+}
+
+
+// Exchange MPI halos, then fill physical-boundary ghost cells.
+// state (in/out) - local conservative field including ghost cells
+void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
+{
+    // Pack named state members explicitly; MPI does not depend on the structure memory layout.
+    halo_buffer_.resize( state.size() * conservative_variable_count );
+
+    for ( std::size_t cell = 0; cell < state.size(); ++cell )
+        pack_state( state[cell], halo_buffer_.data() + cell * conservative_variable_count );
+    mp_.exchange_halos_2d( halo_buffer_.data(), grid_.nx, grid_.ny, grid_.ng, conservative_variable_count );
+
+    for ( std::size_t cell = 0; cell < state.size(); ++cell )
+        state[cell] = unpack_state( halo_buffer_.data() + cell * conservative_variable_count );
+
+    // Keep exchanged ghost values at MPI interfaces; apply physical conditions only at global edges.
     const auto nbr = mp_.neighbors();
 
-    boundary::Bc2D bcApply = bc_;
-    if (nbr.west != MPI_PROC_NULL) {
-        bcApply.left.type = boundary::BcType::Internal;
-    }
-    if (nbr.east != MPI_PROC_NULL) {
-        bcApply.right.type = boundary::BcType::Internal;
-    }
-    if (nbr.south != MPI_PROC_NULL) {
-        bcApply.bottom.type = boundary::BcType::Internal;
-    }
-    if (nbr.north != MPI_PROC_NULL) {
-        bcApply.top.type = boundary::BcType::Internal;
+    BoundaryConditions2D bc_apply = bc_;
+
+    if ( nbr.west != MPI_PROC_NULL )
+    {
+        bc_apply.left.type = BoundaryType::internal;
     }
 
-    boundary::apply2D(U, grid_.nx, grid_.ny, grid_.ng, bcApply);
+    if ( nbr.east != MPI_PROC_NULL )
+    {
+        bc_apply.right.type = BoundaryType::internal;
+    }
+
+    if ( nbr.south != MPI_PROC_NULL )
+    {
+        bc_apply.bottom.type = BoundaryType::internal;
+    }
+
+    if ( nbr.north != MPI_PROC_NULL )
+    {
+        bc_apply.top.type = BoundaryType::internal;
+    }
+
+    apply_boundary_conditions( state, grid_.nx, grid_.ny, grid_.ng, bc_apply );
 }
 
-void Solver::validateInterior(const std::vector<Vec4>& U) const {
-    for (int j = 0; j < grid_.ny; ++j) {
-        for (int i = 0; i < grid_.nx; ++i) {
-            const auto& Q = U[idx(grid_.ng + i, grid_.ng + j)];
-            try {
-                (void)evalFlowVars(Q, gamma_);
-            } catch (const std::exception& e) {
+
+// Check every interior state; report global cell indices and conserved values on failure.
+void Solver::validate_interior( const std::vector<Conservative_vector> &field ) const
+{
+    for ( int j = 0; j < grid_.ny; ++j )
+    {
+        for ( int i = 0; i < grid_.nx; ++i )
+        {
+            const auto &state = field[idx( grid_.ng + i, grid_.ng + j )];
+
+            try
+            {
+                {
+                    EvaluatedState checked_state{};
+
+                    require_success( calc_flow_variables( state, gamma_, checked_state ), "calc_flow_variables" );
+                }
+            }
+            catch ( const std::exception &e )
+            {
                 std::ostringstream msg;
-                msg << "cell (" << grid_.iBeg+i << "," << grid_.jBeg+j
-                    << "), U=[" << std::setprecision(17) << Q[0] << "," << Q[1]
-                    << "," << Q[2] << "," << Q[3] << "]: " << e.what();
-                throw std::runtime_error(msg.str());
+
+                msg << "cell (" << grid_.i_beg + i << "," << grid_.j_beg + j << "), U=[" << std::setprecision( 17 )
+                    << state.specific_mass << "," << state.specific_x_momentum << "," << state.specific_y_momentum
+                    << "," << state.specific_energy << "]: " << e.what();
+                throw std::runtime_error( msg.str() );
             }
         }
     }
 }
 
-// Compute a stable time step from the 2D CFL estimate
-//   dt = CFL / max( (|u|+a)/dx + (|v|+a)/dy )
-// and reduce the spectral-radius bound across all MPI ranks so every rank uses
-// the same accepted time step.
-double Solver::computeDt(const std::vector<Vec4>& U) const {
+
+// Compute a common MPI time step: dt = CFL / max((abs(u) + c)/dx + (abs(v) + c)/dy).
+double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
+{
     const double dx = grid_.dx();
     const double dy = grid_.dy();
-    double maxS = 0.0;
+    double max_s = 0.0;
 
-    for (int j = 0; j < grid_.ny; ++j) {
-        for (int i = 0; i < grid_.nx; ++i) {
-            const auto W = evalFlowVars(U[idx(grid_.ng + i, grid_.ng + j)], gamma_);
-            const double S = (std::abs(W.u) + W.a) / dx + (std::abs(W.v) + W.a) / dy;
-            if (!std::isfinite(S) || S <= 0.0)
-                throw std::runtime_error("CFL: invalid spectral radius at cell (" +
-                    std::to_string(grid_.iBeg+i) + "," + std::to_string(grid_.jBeg+j) + ")");
-            maxS = std::max(maxS, S);
+    for ( int j = 0; j < grid_.ny; ++j )
+    {
+        for ( int i = 0; i < grid_.nx; ++i )
+        {
+            EvaluatedState primitive{};
+
+            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ),
+                "calc_flow_variables" );
+            const double s = ( std::abs( primitive.x_velocity ) + primitive.sound_speed ) / dx +
+                             ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
+            if ( !std::isfinite( s ) || s <= 0.0 )
+                throw std::runtime_error( "CFL: invalid spectral radius at cell (" + std::to_string( grid_.i_beg + i ) +
+                                          "," + std::to_string( grid_.j_beg + j ) + ")" );
+            max_s = std::max( max_s, s );
         }
     }
-    // Global maximum across ranks -> consistent dt for all ranks.
-    const double maxSg = mp_.allreduceMax(maxS);
-    const double dt = cfl_ / maxSg;
-    if (!std::isfinite(dt) || dt <= 0.0) throw std::runtime_error("CFL: invalid time step");
+
+    // Use the global maximum so every rank advances with the same time step.
+    const double max_sg = mp_.allreduce_max( max_s );
+    const double dt = cfl_ / max_sg;
+
+    if ( !std::isfinite( dt ) || dt <= 0.0 )
+    {
+        throw std::runtime_error( "CFL: invalid time step" );
+    }
+
     return dt;
 }
 
-// Build the semi-discrete finite-volume RHS: RHS = -dF/dx - dG/dy.
-//
-// Pipeline:
-//   - characteristic reconstruction produces conservative UL/UR on x-faces and y-faces
-//   - the flux module computes numerical fluxes by a Riemann solver
-//   - flux differences produce the cell-centered RHS on the local interior block
-void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
-    std::fill(RHS.begin(), RHS.end(), Vec4{});
 
+// Compute the finite-volume residual: RHS = -(F_right - F_left)/dx - (G_top - G_bottom)/dy.
+// state (in) - local conservative field with valid ghost cells
+// output_rhs (out) - preallocated residual array; ghost entries are set to zero
+void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &output_rhs )
+{
+    std::fill( output_rhs.begin(), output_rhs.end(), Conservative_vector{} );
 
-    // Characteristic reconstruction returns conservative face states on x- and y-faces.
-    // U must already have valid ghost cells when calling buildRHS.
-    recon_.reconstructFacesX(U,
-                             grid_.nx,
-                             grid_.ny,
-                             grid_.ng,
-                             gamma_,
-                             faces_.x.UL,
-                             faces_.x.UR);
-    recon_.reconstructFacesY(U,
-                             grid_.nx,
-                             grid_.ny,
-                             grid_.ng,
-                             gamma_,
-                             faces_.y.UL,
-                             faces_.y.UR);
+    // 1. Reconstruct face states from the field with valid ghost cells.
+    recon_.reconstruct_faces_x( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.left_state,
+        faces_.x.right_state );
+    recon_.reconstruct_faces_y( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.left_state,
+        faces_.y.right_state );
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
-    auto faceFlux = [&](const Vec4& left, const Vec4& right, int dir, int i, int j) {
-        try {
-            (void)evalFlowVars(left, gamma_);
-            (void)evalFlowVars(right, gamma_);
-            const auto F = flux_->numericalFlux(left, right, dir, gamma_);
-            if (!isFiniteState(F)) throw std::runtime_error("non-finite numerical flux");
-            return F;
-        } catch (const std::exception& e) {
-            throw std::runtime_error(std::string(dir == 0 ? "x" : "y") +
-                "-face (" + std::to_string(grid_.iBeg+i) + "," +
-                std::to_string(grid_.jBeg+j) + "): " + e.what());
+    // 2. Check face states and attach global face coordinates to any flux failure.
+    auto face_flux = [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j )
+    {
+        try
+        {
+            {
+                EvaluatedState checked_state{};
+
+                require_success( calc_flow_variables( left, gamma_, checked_state ), "calc_flow_variables" );
+            }
+
+            {
+                EvaluatedState checked_state{};
+
+                require_success( calc_flow_variables( right, gamma_, checked_state ), "calc_flow_variables" );
+            }
+
+            Flux_vector flux{};
+            const ReturnCodes code = calc_numerical_flux( flux_scheme_, left, right, dir, gamma_, flux );
+            if ( code != SUCCESS )
+            {
+                throw std::runtime_error( "numerical flux: error code " + std::to_string( static_cast<int>( code ) ) );
+            }
+
+            if ( !is_finite_flux( flux ) )
+            {
+                throw std::runtime_error( "non-finite numerical flux" );
+            }
+
+            return flux;
+        }
+        catch ( const std::exception &e )
+        {
+            throw std::runtime_error( flux_name_ + " " + std::string( dir == x_direction ? "x" : "y" ) + "-face (" +
+                                      std::to_string( grid_.i_beg + i ) + "," + std::to_string( grid_.j_beg + j ) +
+                                      "): " + e.what() );
         }
     };
 
-    // Compute the configured numerical flux directly on each face.
-    for (int j = 0; j < grid_.ny; ++j) {
-        for (int i = 0; i < grid_.nx + 1; ++i) {
-            const int f = idxFaceX(i, j);
-            faces_.x.F[f] = faceFlux(faces_.x.UL[f], faces_.x.UR[f], 0, i, j);
-        }
-    }
-    for (int j = 0; j < grid_.ny + 1; ++j) {
-        for (int i = 0; i < grid_.nx; ++i) {
-            const int f = idxFaceY(i, j);
-            faces_.y.F[f] = faceFlux(faces_.y.UL[f], faces_.y.UR[f], 1, i, j);
+    for ( int j = 0; j < grid_.ny; ++j )
+    {
+        for ( int i = 0; i < grid_.nx + 1; ++i )
+        {
+            const int f = idx_face_x( i, j );
+
+            faces_.x.flux[f] = face_flux( faces_.x.left_state[f], faces_.x.right_state[f], x_direction, i, j );
         }
     }
 
-    // Divergence of fluxes -> RHS (cell-centered):
-    //   RHS = -(FxR-FxL)/dx - (GyT-GyB)/dy
-    for (int j = 0; j < grid_.ny; ++j) {
-        for (int i = 0; i < grid_.nx; ++i) {
-            const Vec4& FxL = faces_.x.F[idxFaceX(i,     j)];
-            const Vec4& FxR = faces_.x.F[idxFaceX(i + 1, j)];
-            const Vec4& GyB = faces_.y.F[idxFaceY(i, j)];
-            const Vec4& GyT = faces_.y.F[idxFaceY(i, j + 1)];
+    for ( int j = 0; j < grid_.ny + 1; ++j )
+    {
+        for ( int i = 0; i < grid_.nx; ++i )
+        {
+            const int f = idx_face_y( i, j );
 
-            Vec4 R{};
-            for (int k = 0; k < 4; ++k) {
-                R[k] = -(FxR[k] - FxL[k]) / dx - (GyT[k] - GyB[k]) / dy;
+            faces_.y.flux[f] = face_flux( faces_.y.left_state[f], faces_.y.right_state[f], y_direction, i, j );
+        }
+    }
+
+    for ( int j = 0; j < grid_.ny; ++j )
+    {
+        for ( int i = 0; i < grid_.nx; ++i )
+        {
+            const Flux_vector &fx_l = faces_.x.flux[idx_face_x( i, j )];
+            const Flux_vector &fx_r = faces_.x.flux[idx_face_x( i + 1, j )];
+            const Flux_vector &gy_b = faces_.y.flux[idx_face_y( i, j )];
+            const Flux_vector &gy_t = faces_.y.flux[idx_face_y( i, j + 1 )];
+
+            // 3. Subtract outgoing fluxes from incoming fluxes to form the cell residual.
+            Conservative_vector rhs{};
+
+            rhs.specific_mass =
+                ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
+            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx -
+                                      ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
+            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx -
+                                      ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
+            rhs.specific_energy =
+                ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
+
+            if ( !is_finite_state( rhs ) )
+            {
+                throw std::runtime_error( "Non-finite flux divergence" );
             }
-            if (!isFiniteState(R)) throw std::runtime_error("Non-finite flux divergence");
-            RHS[idx(grid_.ng + i, grid_.ng + j)] = R;
+
+            output_rhs[idx( grid_.ng + i, grid_.ng + j )] = rhs;
         }
     }
 }
 
-bool Solver::shouldWriteStepOutput(const int step) const {
-    return outputEvery_ > 0 && (step % outputEvery_ == 0);
+
+// Check the step against the configured output interval; non-positive intervals disable step output.
+bool Solver::should_write_step_output( const int step ) const
+{
+    return output_every_ > 0 && ( step % output_every_ == 0 );
 }
 
-// Write one scheduled merged step snapshot when this step hits the configured
-// output cadence. All ranks contribute interior-cell data and rank 0 writes
-// the merged legacy VTK file.
-void Solver::writeOutput(int step, double t) const {
-    if (!shouldWriteStepOutput(step)) return;
 
-    ensureOutputDirectoryExists(mp_);
-    const std::string fname = makeStepOutputPath(outPrefix_, step, t);
-    writeMergedVtkFile2D(mp_, fname, "step", t,
-                         U_, grid_.nx, grid_.ny, grid_.ng,
-                         grid_.iBeg, grid_.jBeg,
-                         grid_.nxGlobal, grid_.nyGlobal,
-                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
-                         vtkDataOutputType_);
+// Write a merged snapshot when the step meets the output interval.
+void Solver::write_output( int step, double t ) const
+{
+    if ( !should_write_step_output( step ) )
+        return;
+
+    ensure_output_directory_exists( mp_ );
+
+    const std::string fname = make_step_output_path( out_prefix_, step, t );
+
+    write_merged_vtk_file_2d( mp_, fname, "step", t, conservative_field_, grid_.nx, grid_.ny, grid_.ng, grid_.i_beg,
+        grid_.j_beg, grid_.nx_global, grid_.ny_global, grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
+        vtk_data_output_type_ );
 }
 
-// Write the terminal merged snapshot independent of the regular output cadence.
-void Solver::writeFinalOutput(const double t) const {
-    if (!writeFinal_) {
+
+// Write the final merged snapshot when final output is enabled.
+void Solver::write_final_output( const double t ) const
+{
+    if ( !write_final_ )
+    {
         return;
     }
 
-    ensureOutputDirectoryExists(mp_);
-    const std::string fname = makeFinalOutputPath(outPrefix_, t);
-    writeMergedVtkFile2D(mp_, fname, "final", t,
-                         U_, grid_.nx, grid_.ny, grid_.ng,
-                         grid_.iBeg, grid_.jBeg,
-                         grid_.nxGlobal, grid_.nyGlobal,
-                         grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
-                         vtkDataOutputType_);
+    ensure_output_directory_exists( mp_ );
+
+    const std::string fname = make_final_output_path( out_prefix_, t );
+
+    write_merged_vtk_file_2d( mp_, fname, "final", t, conservative_field_, grid_.nx, grid_.ny, grid_.ng, grid_.i_beg,
+        grid_.j_beg, grid_.nx_global, grid_.ny_global, grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
+        vtk_data_output_type_ );
 }
 
-// Refresh ghost cells and write any scheduled snapshot.
-void Solver::processRegularOutputPhase(const int step, const double t) {
-    applyBC(U_);
-    writeOutput(step, t);
+
+// Refresh ghost cells and process scheduled output for the current step.
+void Solver::process_regular_output_phase( const int step, const double t )
+{
+    apply_bc( conservative_field_ );
+    write_output( step, t );
 }
 
-// Main time-marching loop.
-// - Build an initial RHS and process the initial output phase.
-// - Advance in time with the selected explicit integrator.
-// - After each accepted step, process the regular output phase.
-// - Optionally emit one terminal output phase at the final time.
-//
-// The time integrator calls rhsFun(...) multiple times per time step; rhsFun
-// refreshes ghost cells before reconstruction and flux evaluation.
-void Solver::run() {
+
+// Advance the solution to final_time_, checking each stage and completed step.
+void Solver::run()
+{
     double t = 0.0;
     int step = 0;
-    std::cout << "[2D][r" << mp_.rank() << "] Starting run, finalTime=" << finalTime_
-              << ", global=" << grid_.nxGlobal << "x" << grid_.nyGlobal
-              << ", local=" << grid_.nx << "x" << grid_.ny
-              << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
+    std::cout << "[2D][r" << mp_.rank() << "] Starting run, finalTime=" << final_time_ << ", global=" << grid_.nx_global
+              << "x" << grid_.ny_global << ", local=" << grid_.nx << "x" << grid_.ny << ", begin=(" << grid_.i_beg
+              << "," << grid_.j_beg << ")\n";
 
-    validateInterior(U_);
-    // Build the initial RHS before the initial output phase.
-    applyBC(U_);
-    buildRHS(U_, RHS_);
-    processRegularOutputPhase(step, t);
+    validate_interior( conservative_field_ );
 
-    // RHS callback used by explicit multi-stage integrators.
+    apply_bc( conservative_field_ );
+    build_rhs( conservative_field_, rhs_ );
+    process_regular_output_phase( step, t );
+
     int stage = 0;
-    auto rhsFun = [this, &stage](std::vector<Vec4>& Uin, std::vector<Vec4>& Rout){
-        // For every stage, refresh ghost cells (MPI halos + physical BCs)
-        // before characteristic reconstruction and flux evaluation.
+    // Each integrator stage must validate its interior and refresh ghosts before reconstruction.
+    auto rhs_fun = [this, &stage]( std::vector<Conservative_vector> &uin, std::vector<Conservative_vector> &rout )
+    {
         ++stage;
-        validateInterior(Uin);
-        applyBC(Uin);
-        buildRHS(Uin, Rout);
+        validate_interior( uin );
+        apply_bc( uin );
+        build_rhs( uin, rout );
     };
 
-    // Advance until finalTime. The last accepted step is clipped so the solver
-    // lands exactly on the requested terminal time.
-    while (t < finalTime_) {
-        double dt = computeDt(U_);
-        if (t + dt > finalTime_) dt = finalTime_ - t;
+    while ( t < final_time_ )
+    {
+        double dt = compute_dt( conservative_field_ );
 
-        if (!std::isfinite(dt) || dt <= 0.0 || t + dt <= t)
-            throw std::runtime_error("Time step does not advance the physical clock");
+        // Shorten the final step to reach the requested terminal time.
+        if ( t + dt > final_time_ )
+            dt = final_time_ - t;
+
+        if ( !std::isfinite( dt ) || dt <= 0.0 || t + dt <= t )
+            throw std::runtime_error( "Time step does not advance the physical clock" );
         stage = 0;
-        try {
-            ti_->step(U_, dt, rhsFun);
-            validateInterior(U_);
-        } catch (const std::exception& e) {
-            throw std::runtime_error("step=" + std::to_string(step) +
-                ", t=" + std::to_string(t) + ", RHS stage=" + std::to_string(stage) + ": " + e.what());
+
+        try
+        {
+            ti_->step( conservative_field_, dt, rhs_fun );
+            validate_interior( conservative_field_ );
         }
+        catch ( const std::exception &e )
+        {
+            throw std::runtime_error( "step=" + std::to_string( step ) + ", t=" + std::to_string( t ) +
+                                      ", RHS stage=" + std::to_string( stage ) + ": " + e.what() );
+        }
+
+        // Advance the clock only after the full step passes the state checks.
         t += dt;
         ++step;
 
-        processRegularOutputPhase(step, t);
+        process_regular_output_phase( step, t );
     }
 
-    // Optionally write the terminal snapshot.
-    if (writeFinal_) {
-        applyBC(U_);
-        writeFinalOutput(t);
+    if ( write_final_ )
+    {
+        apply_bc( conservative_field_ );
+        write_final_output( t );
     }
 }

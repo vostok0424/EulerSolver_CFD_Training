@@ -192,7 +192,10 @@ EulerSolver_CFD_Training/
 - `src/setFields.cpp`         background-plus-region initial-field setup
 - `src/io.cpp`                VTK output and MPI gather/write
 - `src/mpi_parallel.cpp`      Cartesian MPI topology and halo exchange
-- `src/state.cpp`             state conversion and admissibility checks
+- `include/constants.hpp`     fixed dimension and serialization conventions
+- `include/structures.hpp`    named states, state algebra, packing, and grid metadata
+- `src/thermodynamics.cpp`    ideal-gas EOS closure
+- `src/common_functions.cpp` common flow-state operations and text/numeric utilities
 - `src/cfg.cpp`               key-value configuration parser
 
 ## Requirements
@@ -488,7 +491,175 @@ Build and run the failure-handling regression checks with:
 
 ```bash
 ./make.sh debug
-python3 tests/test_fail_fast.py
+python3 tests/test_architecture.py
 # Optional two-rank checks, including failure on one rank only:
-python3 tests/test_fail_fast.py --mpi
+python3 tests/test_architecture.py --mpi
 ```
+
+## State and module architecture
+
+The solver stores a contiguous array of `Conservative_vector` objects. Each cell
+has named `specific_mass`, `specific_x_momentum`, `specific_y_momentum`, and
+`specific_energy` members, storing rho, rho*u, rho*v, and rho*E respectively.
+Despite the `specific_*` names, these conserved quantities are per unit volume;
+`specific_energy` is total energy density, not energy per unit mass.
+`Primitive_vector` carries density, x/y velocity and pressure. `Flux_vector`
+stores `mass_flux`, `x_momentum_flux`, `y_momentum_flux` and `energy_flux` in the
+selected coordinate direction. `EvaluatedState` retains primitive quantities,
+sound speed and total enthalpy per unit mass.
+
+Physical and numerical flux functions return `ReturnCodes` and write to a
+`Flux_vector` output reference only on success. Rusanov and HLLC explicitly combine the physical flux with
+wave-speed-scaled conservative jumps. The solver forms the conservative residual
+from the corresponding flux components; the integrators advance conservative
+states. There are no implicit conversions between state and flux types.
+
+`structures.hpp` owns these shared types, componentwise state algebra, explicit
+packing functions, and `GridBlock2DInfo`. State structs are never reinterpreted
+as arrays of doubles: halo exchange and VTK gathering explicitly pack/unpack
+in density, x-momentum, y-momentum, total-energy order. Mathematical arrays
+remain local to characteristic projection and WENO reconstruction.
+
+`thermodynamics` implements the constant-gamma EOS closure: pressure/internal-
+energy-density conversion and sound speed from density and pressure.
+Following MovingBoundaries_chemistry, `common_functions` is the shared flow
+operation layer. Its global functions include `calc_conservative_variables`,
+`calc_primitive_variables`, `calc_sound_velocity`, `calc_flow_variables`, and
+`calc_physical_flux` (x/y selected by direction). It delegates EOS calculations
+to `thermodynamics`; the `trim_string`, `to_lowercase`, and `all_values_finite` functions provide text operations
+and finite-value predicates. Flow functions return `ReturnCodes` and assign their
+output reference only on success. The enum is defined in `constants.hpp`; callers must explicitly check every computational return code. Callers use
+`require_success` from `common_functions` to report the operation and numeric error code and raise a
+fatal error for MPI termination. There are no repaired states,
+zero sound-speed substitutes, or silent defaults. Cached flux properties must
+come from the same conservative state.
+
+`common_functions` also provides `is_finite_state` for individual conservative
+states and residuals, `is_finite_flux` for fluxes, and `require_success` for
+converting failed return codes into exceptions. State conversions check physical validity at the calculation
+site. `flux.cpp` contains Riemann/numerical-flux algorithms and reuses the common
+physical flux functions.
+`constants.hpp` contains fixed conventions, not run settings.
+Module-specific boundary/reconstruction options and face workspaces remain
+with their owning modules. Functions and variables use snake_case. The shared
+vector types use the reference-project names `Primitive_vector`,
+`Conservative_vector` and `Flux_vector`; other type names retain PascalCase.
+Configuration keys and VTK field names remain unchanged.
+
+Compile and run the standalone state/serialization checks:
+
+```bash
+c++ -std=c++17 -Wall -Wextra -pedantic-errors -Iinclude tests/test_state_types.cpp src/thermodynamics.cpp src/common_functions.cpp -o /tmp/euler_state_types_test
+/tmp/euler_state_types_test
+```
+
+The architecture regression checks exercise all four fluxes, three
+reconstruction schemes, and four time integrators, plus boundary conditions,
+initialization, and strict failures. An optional pre-refactor executable can be
+compared with `python3 tests/test_architecture.py --reference /path/to/old_solver`.
+Comparisons permit roundoff differences (relative tolerance 1e-12, absolute
+1e-13). `--mpi` additionally checks serial/four-rank VTK agreement for uneven
+subdomains and abort behavior when only one rank fails.
+
+Common flow API example:
+
+```cpp
+Conservative_vector conservative{};
+const ReturnCodes code = calc_conservative_variables(primitive, gamma, conservative);
+require_success(code, "initial state conversion");
+```
+
+Text transformations return strings and finite-value predicates return booleans;
+they do not use computational error codes. Expected EOS numerical exceptions are
+translated into return codes inside the common flow layer. Failure never commits
+a partial output or authorizes continued time advancement.
+
+The common flow functions use the same calling style as
+MovingBoundaries_chemistry: an unscoped `enum ReturnCodes` in `constants.hpp`,
+uppercase values such as `SUCCESS`, `NEGATIVE_PRESSURE`, and
+`INVALID_SOUND_VELOCITY`, and standalone functions with output references.
+Check against `SUCCESS` before using an output. The historical
+`NEGATIVE_DENSITY`/`NEGATIVE_PRESSURE` names reject zero as well as negative
+values. Text and finite-value utilities are also standalone functions.
+
+## Implementation style
+
+The implementation prioritizes visible calculations and explicit failure paths.
+Flux functions and time-integrator interfaces operate on the current 2D
+conservative state; no dimensional/state templates or explicit instantiation
+machinery are used. MUSCL and WENO stencil loading and reconstruction use direct branches and
+loops. Common flow functions use standalone calls, output references, and an
+explicit `ReturnCodes` check before committing outputs. EOS exception translation
+is scoped to the individual EOS call.
+
+`std::vector`, `std::string`, and smart pointers manage storage and ownership.
+The short RHS callback connects the time integrator to stage boundary/halo
+updates without giving the integrator knowledge of the mesh or MPI. Fixed
+constants and simple state algebra remain where they make formulas clearer.
+No `[[nodiscard]]` attributes or C++17 if-initializers are required.
+
+## Namespace policy
+
+Project interfaces use global functions and descriptive types such as
+`ReconstructionOptions`, `ReconstructionScheme`, and `BoundaryConditions2D`.
+There are no project-defined namespaces or namespace aliases. Implementation-only
+helper functions use file-local `static` linkage. Standard-library names keep
+explicit `std::` prefixes; the code does not import `std` into global scope.
+
+## Source formatting
+
+All C++ headers and sources follow `.clang-format`, modeled on
+MovingBoundaries_chemistry's gas_thermodynamics module: four-space indentation,
+braces on separate lines, spaces inside non-empty parentheses, pointer/reference
+symbols beside the variable name, and four-space continuation indentation.
+Function return types and names stay on the same line; long parameter lists
+continue after commas, with a 120-column target. Formatting preserves existing
+statement blocks, include order, string literals, and computation.
+
+Separate validation, local preparation, calculation, and output assignment with
+blank lines. Keep return-code calls next to their checks, and keep related
+formula or matrix entries together. Use two blank lines between top-level
+definitions; declarations inside a class or header use a single blank line.
+The formatter preserves these logical groups.
+
+```bash
+clang-format -i include/*.hpp src/*.cpp
+```
+
+## Shared constants
+
+`constants.hpp` defines the spatial dimension, conservative component count,
+coordinate directions (`x_direction`, `y_direction`), serialization component
+indices, and `ReturnCodes`. State packing and conservative eigenvectors use the
+same component order: density, x-momentum density, y-momentum density, total energy
+density. Direction arguments still accept integers so invalid values can follow
+the existing error paths.
+
+Algorithm settings stay with their modules: Godunov iteration controls in
+`flux.cpp` and the default WENO epsilon in `reconstruction.hpp`. WENO epsilon is
+a weight regularization parameter. Physical-state checks remain in the flow
+calculations and reject invalid inputs without repairing them. MPI tags remain
+in the MPI module. Gamma, CFL and end time remain case
+settings. Reconstruction stencil sizes count cells and are independent of the
+conservative component count.
+
+## Numerical flux return codes
+
+`flux.hpp` declares `calc_rusanov_flux`, `calc_hllc_flux`, `calc_ausm_flux` and
+`calc_godunov_flux`. Each accepts two conservative states, direction, gamma and a
+flux output reference. All four return `ReturnCodes`; failure leaves every output
+component unchanged. `FluxScheme` and `calc_numerical_flux` select the calculation
+with an explicit switch, replacing the former flux class hierarchy and factory.
+The configuration names remain rusanov, hllc, ausm and godunov. Unknown names
+remain configuration errors.
+
+Expected numerical failures propagate from the calculation site without broad
+exception catches. Additional codes identify invalid wave speeds, invalid star
+states, unsupported vacuum, invalid pressure estimates, invalid Newton iterations,
+pressure-iteration nonconvergence and invalid scheme values. All internal numerical helpers use
+`static void` and output references. Helpers that can fail additionally write a
+`ReturnCodes &code` status, which callers check before using numerical outputs.
+Numerical outputs are committed only on success. No pressure repair or alternate
+flux is applied after failure. The solver reports the selected scheme, numeric
+code and global face coordinates; its existing step/stage reporting and MPI-abort
+path remain in place.
