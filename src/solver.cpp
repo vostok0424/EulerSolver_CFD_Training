@@ -26,19 +26,12 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
 
 #include <type_traits>
 
 namespace {
 
 constexpr const char* kOutputDir2D = "solution";
-
-std::unordered_map<const Solver*, recon::ReconstructionStats> gLastReconstructionStats;
-
-recon::ReconstructionStats& accessLastReconstructionStats(const Solver* solver) {
-    return gLastReconstructionStats[solver];
-}
 
 VTKDataOutputType parseVTKDataOutputType(const std::string& value) {
     std::string s = value;
@@ -208,41 +201,8 @@ Solver::Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp)
     writeFinal_  = cfg.getBool  ("writeFinal", true);
     outPrefix_   = cfg.getString("outPrefix", "run2d");
 
-    // Shared state-layer thresholds and optional diagnostic controls.
-    stateLimits_ = recon_.options().stateLimits();
-    stateDiagnosticsOptions_ = diagnostics::parseStateDiagnosticsOptions(cfg);
-
     vtkDataOutputType_ = parseVTKDataOutputType(
         cfg.getString("output.vtkDataOutputType", "point"));
-
-    // Positivity-preserving flux limiter controls.  The limiter is disabled
-    // by default so existing cases keep their original numerical behavior
-    // unless positivityPreserving.enable is explicitly set to true.
-    positivityOptions_.enable = cfg.getBool("positivityPreserving.enable", false);
-    positivityOptions_.rhoFloor = cfg.getDouble("positivityPreserving.rhoFloor",
-                                               stateLimits_.rhoMin);
-    positivityOptions_.pFloor = cfg.getDouble("positivityPreserving.pFloor",
-                                             stateLimits_.pMin);
-    positivityOptions_.lowOrderFlux = positivity_preserving::parseLowOrderFluxType(
-        cfg.getString("positivityPreserving.lowOrderFlux", "rusanov"));
-    positivityOptions_.alphaMode = positivity_preserving::parseAlphaMode(
-        cfg.getString("positivityPreserving.alphaMode", "constant"));
-    positivityOptions_.pressureBisectionIters = cfg.getInt(
-        "positivityPreserving.pressureBisectionIters", 20);
-
-    if (positivityOptions_.pressureBisectionIters < 1) {
-        positivityOptions_.pressureBisectionIters = 1;
-    }
-    
-    if (positivityOptions_.rhoFloor <= 0.0) {
-        positivityOptions_.rhoFloor = stateLimits_.rhoMin;
-    }
-    
-    if (positivityOptions_.pFloor <= 0.0) {
-        positivityOptions_.pFloor = stateLimits_.pMin;
-    }
-
-    accessLastReconstructionStats(this).clear();
 
     // -----------------------------
     // 4) Boundary conditions
@@ -348,90 +308,35 @@ void Solver::buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS) {
 
     // Characteristic reconstruction returns conservative face states on x- and y-faces.
     // U must already have valid ghost cells when calling buildRHS.
-    auto& reconStats = accessLastReconstructionStats(this);
-    reconStats.clear();
     recon_.reconstructFacesX(U,
                              grid_.nx,
                              grid_.ny,
                              grid_.ng,
                              gamma_,
                              faces_.x.UL,
-                             faces_.x.UR,
-                             &reconStats);
+                             faces_.x.UR);
     recon_.reconstructFacesY(U,
                              grid_.nx,
                              grid_.ny,
                              grid_.ng,
                              gamma_,
                              faces_.y.UL,
-                             faces_.y.UR,
-                             &reconStats);
+                             faces_.y.UR);
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
-    // Reset flux-limiter statistics for this RHS evaluation.  These statistics
-    // describe flux-level limiting only; no post-update cell repair is performed
-    // in the solver workflow.
-    positivityStats_.reset();
-
-    // First solver-side implementation follows the constant multidimensional
-    // partition alphaX = alphaY = 0.5 used by the 2-D Hu-Adams-Shu extension.
-    // Therefore scaleX = 2*dt/(alphaX*dx) = 4*dt/dx, and similarly for y.
-    const double scaleX = (currentDtForLimiter_ > 0.0) ? 4.0 * currentDtForLimiter_ / dx : 0.0;
-    const double scaleY = (currentDtForLimiter_ > 0.0) ? 4.0 * currentDtForLimiter_ / dy : 0.0;
-
-    // X-faces: compute numerical flux using dir=0 (x-normal).
+    // Compute the configured numerical flux directly on each face.
     for (int j = 0; j < grid_.ny; ++j) {
         for (int i = 0; i < grid_.nx + 1; ++i) {
             const int f = idxFaceX(i, j);
-            const Vec4 highOrderFlux = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
-
-            if (positivityOptions_.enable && scaleX > 0.0) {
-                const Vec4& leftCell  = U[idx(grid_.ng + i - 1, grid_.ng + j)];
-                const Vec4& rightCell = U[idx(grid_.ng + i,     grid_.ng + j)];
-
-                const auto limited = positivity_preserving::limitFaceFlux(
-                    leftCell,
-                    rightCell,
-                    highOrderFlux,
-                    scaleX,
-                    positivity_preserving::Direction::X,
-                    gamma_,
-                    positivityOptions_,
-                    positivityStats_);
-
-                faces_.x.F[f] = limited.flux;
-            } else {
-                faces_.x.F[f] = highOrderFlux;
-            }
+            faces_.x.F[f] = flux_->numericalFlux(faces_.x.UL[f], faces_.x.UR[f], 0, gamma_);
         }
     }
-
-    // Y-faces: compute numerical flux using dir=1 (y-normal).
     for (int j = 0; j < grid_.ny + 1; ++j) {
         for (int i = 0; i < grid_.nx; ++i) {
             const int f = idxFaceY(i, j);
-            const Vec4 highOrderFlux = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
-
-            if (positivityOptions_.enable && scaleY > 0.0) {
-                const Vec4& bottomCell = U[idx(grid_.ng + i, grid_.ng + j - 1)];
-                const Vec4& topCell    = U[idx(grid_.ng + i, grid_.ng + j)];
-
-                const auto limited = positivity_preserving::limitFaceFlux(
-                    bottomCell,
-                    topCell,
-                    highOrderFlux,
-                    scaleY,
-                    positivity_preserving::Direction::Y,
-                    gamma_,
-                    positivityOptions_,
-                    positivityStats_);
-
-                faces_.y.F[f] = limited.flux;
-            } else {
-                faces_.y.F[f] = highOrderFlux;
-            }
+            faces_.y.F[f] = flux_->numericalFlux(faces_.y.UL[f], faces_.y.UR[f], 1, gamma_);
         }
     }
 
@@ -457,60 +362,6 @@ bool Solver::shouldWriteStepOutput(const int step) const {
     return outputEvery_ > 0 && (step % outputEvery_ == 0);
 }
 
-bool Solver::shouldRecordStateDiagnostics(const int step) const {
-    if (!stateDiagnosticsOptions_.enable) {
-        return false;
-    }
-
-    if (!stateDiagnosticsOptions_.includePerStepSummary) {
-        return false;
-    }
-
-    return shouldWriteStepOutput(step);
-}
-
-// Record one reduced state-diagnostics snapshot for the current solver state.
-// This helper owns the scan -> MPI reduce -> CSV append sequence.
-void Solver::recordStateDiagnostics(const int step,
-                                    const double t,
-                                    const std::string& tag) const {
-    if (!stateDiagnosticsOptions_.enable) {
-        return;
-    }
-
-    ensureOutputDirectoryExists(mp_);
-
-    const auto local = diagnostics::scanInteriorStates(U_,
-                                                       grid_.nx,
-                                                       grid_.ny,
-                                                       grid_.ng,
-                                                       gamma_,
-                                                       stateLimits_.rhoMin,
-                                                       stateLimits_.pMin);
-
-    auto localWithLimiterStats = local;
-    localWithLimiterStats.positivityLimitedFaceCount = positivityStats_.limitedFaceCount;
-    localWithLimiterStats.positivityDensityLimitedFaceCount = positivityStats_.densityLimitedFaceCount;
-    localWithLimiterStats.positivityPressureLimitedFaceCount = positivityStats_.pressureLimitedFaceCount;
-    localWithLimiterStats.positivityFailedFaceCount = positivityStats_.failedFaceCount;
-    localWithLimiterStats.positivityMinThetaDensity = positivityStats_.minThetaDensity;
-    localWithLimiterStats.positivityMinThetaPressure = positivityStats_.minThetaPressure;
-    localWithLimiterStats.positivityMinThetaFinal = positivityStats_.minThetaFinal;
-
-    const auto global = diagnostics::reduceStateScanReportMPI(localWithLimiterStats, mp_);
-    
-    if (stateDiagnosticsOptions_.printToStdout && mp_.isRoot()) {
-        diagnostics::printStateScanReport(global, step, t, tag);
-    }
-
-    diagnostics::appendStateDiagnosticsCsv(stateDiagnosticsOptions_.csvFile,
-                                           global,
-                                           step,
-                                           t,
-                                           tag,
-                                           mp_.isRoot());
-}
-
 // Write one scheduled merged step snapshot when this step hits the configured
 // output cadence. All ranks contribute interior-cell data and rank 0 writes
 // the merged legacy VTK file.
@@ -526,10 +377,6 @@ void Solver::writeOutput(int step, double t) const {
                          grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
                          vtkDataOutputType_);
 }
-
-// Note: reconstruction statistics are cached in a file-local map keyed by `this`
-// so reconstruction diagnostics can be forwarded without expanding the public
-// solver interface. The VTK output type is stored directly as a Solver member.
 
 // Write the terminal merged snapshot independent of the regular output cadence.
 void Solver::writeFinalOutput(const double t) const {
@@ -547,30 +394,17 @@ void Solver::writeFinalOutput(const double t) const {
                          vtkDataOutputType_);
 }
 
-// Common diagnostics/output handling for the initial state and regular output
-// steps. This helper refreshes ghost cells, records the initial diagnostics
-// whenever diagnostics are enabled, records regular diagnostics on the selected
-// output cadence, and writes the merged step snapshot when needed.
-void Solver::processRegularOutputPhase(const int step,
-                                       const double t,
-                                       const std::string& diagnosticsTag) {
+// Refresh ghost cells and write any scheduled snapshot.
+void Solver::processRegularOutputPhase(const int step, const double t) {
     applyBC(U_);
-
-    const bool isInitial = (diagnosticsTag == "initial");
-
-    if (stateDiagnosticsOptions_.enable &&
-        (isInitial || shouldRecordStateDiagnostics(step))) {
-        recordStateDiagnostics(step, t, diagnosticsTag);
-    }
-    
     writeOutput(step, t);
 }
 
 // Main time-marching loop.
-// - Build an initial RHS and process the initial diagnostics/output phase.
+// - Build an initial RHS and process the initial output phase.
 // - Advance in time with the selected explicit integrator.
-// - After each accepted step, process the regular diagnostics/output phase.
-// - Optionally emit one terminal diagnostics/output phase at the final time.
+// - After each accepted step, process the regular output phase.
+// - Optionally emit one terminal output phase at the final time.
 //
 // The time integrator calls rhsFun(...) multiple times per time step; rhsFun
 // refreshes ghost cells before reconstruction and flux evaluation.
@@ -582,14 +416,10 @@ void Solver::run() {
               << ", local=" << grid_.nx << "x" << grid_.ny
               << ", begin=(" << grid_.iBeg << "," << grid_.jBeg << ")\n";
 
-    // Build the initial RHS once, then run the initial diagnostics/output phase
-    // through the same helper used by regular scheduled outputs.  The initial
-    // RHS is not tied to an accepted time step yet, so the positivity limiter
-    // scale bridge is kept at zero and only state-health diagnostics are active.
-    currentDtForLimiter_ = 0.0;
+    // Build the initial RHS before the initial output phase.
     applyBC(U_);
     buildRHS(U_, RHS_);
-    processRegularOutputPhase(step, t, "initial");
+    processRegularOutputPhase(step, t);
 
     // RHS callback used by explicit multi-stage integrators.
     auto rhsFun = [this](std::vector<Vec4>& Uin, std::vector<Vec4>& Rout){
@@ -605,29 +435,16 @@ void Solver::run() {
         double dt = computeDt(U_);
         if (t + dt > finalTime_) dt = finalTime_ - t;
 
-        // buildRHS() uses this value to form the one-sided positivity-test
-        // scale factors while the current RHS callback interface does not yet
-        // pass dt explicitly.
-        currentDtForLimiter_ = dt;
-
         ti_->step(U_, dt, rhsFun);
         t += dt;
         ++step;
 
-        processRegularOutputPhase(step, t, "output");
+        processRegularOutputPhase(step, t);
     }
 
-    // Optional terminal diagnostics/output phase. Diagnostics are skipped here
-    // only when the final step has already been recorded on the regular output
-    // cadence.
+    // Optionally write the terminal snapshot.
     if (writeFinal_) {
         applyBC(U_);
-
-        const bool finalAlreadyRecorded = shouldRecordStateDiagnostics(step);
-        if (stateDiagnosticsOptions_.enable && !finalAlreadyRecorded) {
-            recordStateDiagnostics(step, t, "final");
-        }
-        
         writeFinalOutput(t);
     }
 }

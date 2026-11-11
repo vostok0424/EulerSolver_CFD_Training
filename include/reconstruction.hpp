@@ -87,58 +87,14 @@ struct Options {
     // Limiter for MUSCL (ignored for FirstOrder/WENO5).
     Limiter limiter = Limiter::VanLeer;
 
-    // Admissibility controls.
-    // If enabled, reconstructed face states are checked against shared
-    // state-layer limits. Invalid high-order candidates are rejected rather
-    // than repaired.
-    bool positivityFix = true;
-    // If a reconstructed face state is not admissible, retry with a lower-order scheme.
-    bool enableFallback = true;
-
-    // Numerical tolerances.
-    // Small epsilon used in WENO weights and admissibility-related checks.
+    // Small positive epsilon used in WENO weights and characteristic algebra.
     double eps = 1e-12;
-
-    // Small admissibility floors used by the centralized state-layer checks.
-    double rhoMin = 1e-12;
-    double pMin = 1e-12;
 
     // Characteristic reconstruction is fixed to conservative variables
     // with Roe-linearized eigenvectors.
 
     // Convenience: required ghost cells for the chosen scheme.
     int requiredNg() const { return recon::requiredGhostCells(scheme); }
-
-    // Convert reconstruction-local thresholds into the shared state-layer limits.
-    StateLimits stateLimits() const {
-        StateLimits limits{};
-        limits.eps = eps;
-        limits.rhoMin = rhoMin;
-        limits.pMin = pMin;
-        return limits;
-    }
-};
-
-// Reconstruction statistics
-// -------------------------
-// Lightweight counters collected during face reconstruction.
-// These counters are intended to be accumulated by the caller per reconstruction pass.
-struct ReconstructionStats {
-    int fallbackFaceCount = 0;
-    int admissibilityFallbackCount = 0;
-    int failedAdmissibilityFallbackCount = 0;
-
-    void clear() {
-        fallbackFaceCount = 0;
-        admissibilityFallbackCount = 0;
-        failedAdmissibilityFallbackCount = 0;
-    }
-
-    void accumulate(const ReconstructionStats& other) {
-        fallbackFaceCount += other.fallbackFaceCount;
-        admissibilityFallbackCount += other.admissibilityFallbackCount;
-        failedAdmissibilityFallbackCount += other.failedAdmissibilityFallbackCount;
-    }
 };
 
 // Read reconstruction options from cfg.
@@ -146,11 +102,7 @@ struct ReconstructionStats {
 // Expected keys (strict strings; invalid values should trigger clear errors):
 //   reconstruction.scheme: firstOrder | muscl | weno5
 //   reconstruction.limiter: none | minmod | vanleer
-//   reconstruction.positivityFix: true|false
-//   reconstruction.enableFallback: true|false
 //   reconstruction.eps: small positive number (e.g. 1e-12)
-//   reconstruction.rhoMin: small positive density floor passed into state-layer checks
-//   reconstruction.pMin: small positive pressure floor passed into state-layer checks
 //
 //   WENO5 uses the standard Jiang–Shu nonlinear weights with exponent fixed at p = 2
 // Characteristic reconstruction is fixed to conservative variables
@@ -160,8 +112,7 @@ Options readOptions(const Cfg& cfg);
 
 // Reconstruction2D
 // ----------------
-// Characteristic-space reconstruction only; admissibility checks use shared
-// state-layer limits from state.hpp/state.cpp.
+// Characteristic-space reconstruction without positivity repair or order fallback.
 // Fixed to conservative-characteristic projection with Roe linearization.
 // Build left/right face states in both x- and y-directions.
 //
@@ -181,15 +132,13 @@ public:
                            int nx, int ny, int ng,
                            double gamma,
                            std::vector<Vec4>& ULx,
-                           std::vector<Vec4>& URx,
-                           ReconstructionStats* stats = nullptr) const;
+                           std::vector<Vec4>& URx) const;
 
     void reconstructFacesY(const std::vector<Vec4>& U,
                            int nx, int ny, int ng,
                            double gamma,
                            std::vector<Vec4>& ULy,
-                           std::vector<Vec4>& URy,
-                           ReconstructionStats* stats = nullptr) const;
+                           std::vector<Vec4>& URy) const;
 
 private:
     Options opt_;

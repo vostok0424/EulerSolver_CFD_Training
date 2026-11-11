@@ -6,8 +6,6 @@
 // Active cfg options:
 //   - reconstruction.scheme         : firstOrder | muscl | weno5
 //   - reconstruction.limiter        : none | minmod | vanleer
-//   - reconstruction.positivityFix  : enables face-state admissibility checks
-//   - reconstruction.enableFallback : fall back to first order when needed
 //
 // This implementation always uses conservative-characteristic reconstruction
 // with a Roe face linearization.
@@ -27,7 +25,6 @@
 //   3) Project the local stencil to characteristic space.
 //   4) Reconstruct each scalar characteristic component.
 //   5) Map the reconstructed face states back to conservative variables.
-//   6) Apply high-order to first-order fallback if needed.
 // -----------------------------------------------------------------------------
 
 namespace recon {
@@ -149,11 +146,7 @@ Options readOptions(const Cfg& cfg) {
     opt.scheme   = parseScheme(cfg.getString("reconstruction.scheme", "firstOrder"));
     opt.limiter  = parseLimiter(cfg.getString("reconstruction.limiter", "vanleer"));
 
-    opt.positivityFix  = cfg.getBool("reconstruction.positivityFix", true);
-    opt.enableFallback = cfg.getBool("reconstruction.enableFallback", true);
     opt.eps            = cfg.getDouble("reconstruction.eps", 1e-12);
-    opt.rhoMin         = cfg.getDouble("reconstruction.rhoMin", 1e-12);
-    opt.pMin           = cfg.getDouble("reconstruction.pMin", 1e-12);
 
     const std::string legacyVars = trim(cfg.getString("reconstruction.variables", ""));
     if (!legacyVars.empty() && legacyVars != "characteristic") {
@@ -163,13 +156,6 @@ Options readOptions(const Cfg& cfg) {
     if (opt.eps <= 0.0) {
         throw std::runtime_error("reconstruction.eps must be > 0");
     }
-    if (opt.rhoMin <= 0.0) {
-        throw std::runtime_error("reconstruction.rhoMin must be > 0");
-    }
-    if (opt.pMin <= 0.0) {
-        throw std::runtime_error("reconstruction.pMin must be > 0");
-    }
-
     return opt;
 }
 
@@ -312,77 +298,6 @@ static inline void projectChar4(const Eigen4& e, const Vec4& q, double w[4]) {
     }
 }
 
-// File-local admissibility helpers.
-template <typename VecT>
-struct CachedStateCheck {
-    bool quickDone = false;
-    bool quickOk   = false;
-    bool fullDone  = false;
-    bool fullOk    = false;
-};
-
-template <typename VecT>
-static inline bool quickAdmissibleStateCached(const VecT& Uc,
-                                              double gamma,
-                                              const StateLimits& limits,
-                                              CachedStateCheck<VecT>& cache) {
-    if (!cache.quickDone) {
-        cache.quickOk = quickCheckConservative(Uc, gamma, limits).ok;
-        cache.quickDone = true;
-    }
-    return cache.quickOk;
-}
-
-template <typename VecT>
-static inline bool admissibleStateCached(const VecT& Uc,
-                                         double gamma,
-                                         const StateLimits& limits,
-                                         CachedStateCheck<VecT>& cache) {
-    if (quickAdmissibleStateCached(Uc, gamma, limits, cache)) {
-        cache.fullDone = true;
-        cache.fullOk   = true;
-        return true;
-    }
-    if (!cache.fullDone) {
-        cache.fullOk = checkConservative(Uc, gamma, limits).ok;
-        cache.fullDone = true;
-    }
-    return cache.fullOk;
-}
-
-template <typename VecT>
-static inline bool isAdmissibleState(const VecT& Uc, double gamma, const StateLimits& limits) {
-    CachedStateCheck<VecT> cache;
-    return admissibleStateCached(Uc, gamma, limits, cache);
-}
-
-
-template <typename VecT>
-static inline bool isQuickAdmissibleState(const VecT& Uc, double gamma, const StateLimits& limits) {
-    CachedStateCheck<VecT> cache;
-    return quickAdmissibleStateCached(Uc, gamma, limits, cache);
-}
-
-// First-order face loading shared by the 2D reconstruction drivers. The caller
-// provides a small loader that fills ULf/URf from neighboring cell-centered states.
-// Face-state repair is intentionally not performed here; any remaining
-// inadmissibility is exposed by diagnostics or handled by solver-side flux
-// limiting.
-template <typename VecT, typename LoadFaceFn>
-static inline void loadFirstOrderFaceStates(LoadFaceFn&& loadFace,
-                                            bool positivityFix,
-                                            double gamma,
-                                            const StateLimits& limits,
-                                            VecT& ULf,
-                                            VecT& URf,
-                                            ReconstructionStats* stats = nullptr) {
-    (void)positivityFix;
-    (void)gamma;
-    (void)limits;
-    (void)stats;
-    loadFace(ULf, URf);
-}
-
 template <typename VecT, typename EigenT, int NVAR>
 static inline void reconstructFaceMUSCLFromCharCache(const EigenT& eig,
                                                      Limiter limiter,
@@ -471,75 +386,6 @@ static inline void reconstructHighOrderFaceFromChar(Scheme scheme,
     throw std::runtime_error("Characteristic reconstruction: unsupported scheme");
 }
 
-// Final face-state selection pipeline shared by the 2D reconstruction paths:
-//   1) reconstruct with the requested high-order scheme;
-//   2) check admissibility when requested;
-//   3) if enabled, fall back to first order when the high-order state fails;
-//   4) leave any remaining inadmissibility to diagnostics or solver-side flux
-//      limiting instead of modifying face states here.
-template <typename VecT, typename ReconstructFaceFn, typename LoadFirstOrderFn>
-static inline void finalizeFaceWithFallback(Scheme requestedScheme,
-                                            bool enableFallback,
-                                            bool positivityFix,
-                                            double gamma,
-                                            const StateLimits& limits,
-                                            ReconstructFaceFn&& reconstructFaceWithScheme,
-                                            LoadFirstOrderFn&& loadFirstOrderFace,
-                                            VecT& ULf,
-                                            VecT& URf,
-                                            ReconstructionStats* stats = nullptr)
-{
-    CachedStateCheck<VecT> leftCheck;
-    CachedStateCheck<VecT> rightCheck;
-
-    auto resetChecks = [&]() {
-        leftCheck = CachedStateCheck<VecT>{};
-        rightCheck = CachedStateCheck<VecT>{};
-    };
-
-    auto reconstructAndReset = [&](Scheme scheme) {
-        reconstructFaceWithScheme(scheme, ULf, URf);
-        resetChecks();
-    };
-
-    auto loadFirstOrderAndReset = [&]() {
-        loadFirstOrderFace(ULf, URf);
-        resetChecks();
-    };
-
-    auto faceAdmissible = [&]() {
-        return admissibleStateCached(ULf, gamma, limits, leftCheck)
-        && admissibleStateCached(URf, gamma, limits, rightCheck);
-    };
-
-    // First try the requested reconstruction scheme.
-    reconstructAndReset(requestedScheme);
-
-    bool ok = !positivityFix || faceAdmissible();
-
-    // If the requested high-order state is not admissible, retry with a
-    // first-order face state when fallback is enabled.
-    if (!ok && enableFallback && requestedScheme != Scheme::FirstOrder) {
-        if (stats) {
-            ++stats->fallbackFaceCount;
-            ++stats->admissibilityFallbackCount;
-        }
-        loadFirstOrderAndReset();
-        ok = quickAdmissibleStateCached(ULf, gamma, limits, leftCheck)
-        && quickAdmissibleStateCached(URf, gamma, limits, rightCheck);
-        if (!ok) {
-            ok = faceAdmissible();
-        }
-        if (!ok && stats) {
-            ++stats->failedAdmissibilityFallbackCount;
-        }
-    }
-
-    // No post-reconstruction face-state modification is performed here.  If the
-    // first-order fallback is still inadmissible, the state is left unchanged
-    // and downstream diagnostics will expose it.
-    (void)ok;
-}
 // -------------------------
 // Reconstruction2D
 // -------------------------
@@ -553,8 +399,7 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                                          int nx, int ny, int ng,
                                          double gamma,
                                          std::vector<Vec4>& ULx,
-                                         std::vector<Vec4>& URx,
-                                         ReconstructionStats* stats) const {
+                                         std::vector<Vec4>& URx) const {
     const int nxTot = nx + 2 * ng;
     const int nyTot = ny + 2 * ng;
     if ((int)U.size() != nxTot * nyTot) {
@@ -568,8 +413,6 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
     if (ULx.size() != nFaceX) ULx.resize(nFaceX);
     if (URx.size() != nFaceX) URx.resize(nFaceX);
 
-    const StateLimits limits = opt_.stateLimits();
-    ReconstructionStats localStats{};
 
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny; ++j) {
@@ -582,11 +425,8 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                     ULf = U[idx2(I_L, J, nxTot)];
                     URf = U[idx2(I_R, J, nxTot)];
                 };
-                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULx[f], URx[f], &localStats);
+                loadFace(ULx[f], URx[f]);
             }
-        }
-        if (stats) {
-            stats->accumulate(localStats);
         }
         return;
     }
@@ -636,37 +476,13 @@ void recon::Reconstruction2D::reconstructFacesX(const std::vector<Vec4>& U,
                                                            URf);
     };
 
-    // Finalize each x-face with admissibility checks and fallback only.
+    // Reconstruct each x-face using the selected scheme.
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx + 1; ++i) {
             const int f = i + (nx + 1) * j;
 
-            auto reconstructWithScheme = [&](Scheme scheme, Vec4& ULf, Vec4& URf) {
-                reconstructFace(i, j, scheme, ULf, URf);
-            };
-
-            auto loadFirstOrder = [&](Vec4& ULf, Vec4& URf) {
-                const int I_R = ng + i;
-                const int I_L = I_R - 1;
-                const int J   = ng + j;
-                ULf = U[idx2(I_L, J, nxTot)];
-                URf = U[idx2(I_R, J, nxTot)];
-            };
-
-            finalizeFaceWithFallback(opt_.scheme,
-                                       opt_.enableFallback,
-                                       opt_.positivityFix,
-                                       gamma,
-                                       limits,
-                                       reconstructWithScheme,
-                                       loadFirstOrder,
-                                       ULx[f],
-                                       URx[f],
-                                       &localStats);
+            reconstructFace(i, j, opt_.scheme, ULx[f], URx[f]);
         }
-    }
-    if (stats) {
-        stats->accumulate(localStats);
     }
 }
 
@@ -675,8 +491,7 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                                          int nx, int ny, int ng,
                                          double gamma,
                                          std::vector<Vec4>& ULy,
-                                         std::vector<Vec4>& URy,
-                                         ReconstructionStats* stats) const {
+                                         std::vector<Vec4>& URy) const {
     const int nxTot = nx + 2 * ng;
     const int nyTot = ny + 2 * ng;
     if ((int)U.size() != nxTot * nyTot) {
@@ -690,8 +505,6 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
     if (ULy.size() != nFaceY) ULy.resize(nFaceY);
     if (URy.size() != nFaceY) URy.resize(nFaceY);
 
-    const StateLimits limits = opt_.stateLimits();
-    ReconstructionStats localStats{};
 
     if (opt_.scheme == Scheme::FirstOrder) {
         for (int j = 0; j < ny + 1; ++j) {
@@ -704,11 +517,8 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                     ULf = U[idx2(I, J_B, nxTot)];
                     URf = U[idx2(I, J_T, nxTot)];
                 };
-                loadFirstOrderFaceStates(loadFace, opt_.positivityFix, gamma, limits, ULy[f], URy[f], &localStats);
+                loadFace(ULy[f], URy[f]);
             }
-        }
-        if (stats) {
-            stats->accumulate(localStats);
         }
         return;
     }
@@ -770,37 +580,13 @@ void recon::Reconstruction2D::reconstructFacesY(const std::vector<Vec4>& U,
                                                            URf);
     };
 
-    // Finalize each y-face with admissibility checks and fallback only.
+    // Reconstruct each y-face using the selected scheme.
     for (int j = 0; j < ny + 1; ++j) {
         for (int i = 0; i < nx; ++i) {
             const int f = i + nx * j;
 
-            auto reconstructWithScheme = [&](Scheme scheme, Vec4& ULf, Vec4& URf) {
-                reconstructFace(i, j, scheme, ULf, URf);
-            };
-
-            auto loadFirstOrder = [&](Vec4& ULf, Vec4& URf) {
-                const int I   = ng + i;
-                const int J_T = ng + j;
-                const int J_B = J_T - 1;
-                ULf = U[idx2(I, J_B, nxTot)];
-                URf = U[idx2(I, J_T, nxTot)];
-            };
-
-            finalizeFaceWithFallback(opt_.scheme,
-                                       opt_.enableFallback,
-                                       opt_.positivityFix,
-                                       gamma,
-                                       limits,
-                                       reconstructWithScheme,
-                                       loadFirstOrder,
-                                       ULy[f],
-                                       URy[f],
-                                       &localStats);
+            reconstructFace(i, j, opt_.scheme, ULy[f], URy[f]);
         }
-    }
-    if (stats) {
-        stats->accumulate(localStats);
     }
 }
 } // namespace reconstruction

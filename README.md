@@ -29,7 +29,6 @@ The current codebase supports the following main capabilities.
 - setFields-style background-plus-region initialization
 - merged single-file VTK output for serial and MPI runs
 - selectable VTK `POINT_DATA` or `CELL_DATA` output
-- compact optional CSV state-diagnostics output
 
 The legacy 1D pathway has been removed from the active build and runtime path.
 
@@ -96,13 +95,9 @@ Important notes:
 - if `reconstruction.variables` is provided, it should be `characteristic`
 - older limiter names such as `mc` and `superbee` are not supported by the current implementation
 
-Additional reconstruction controls currently used by the solver include:
-
-- `reconstruction.enableFallback`
-- `reconstruction.positivityFix`
-- `reconstruction.eps`
-- `reconstruction.rhoMin`
-- `reconstruction.pMin`
+`reconstruction.eps` controls the small regularization parameter.
+Reconstruction uses the selected scheme directly, without positivity repair or automatic first-order fallback.
+The solver does not apply a positivity-preserving flux limiter.
 
 ## Boundary Conditions
 
@@ -148,7 +143,6 @@ The current output module writes:
 
 - ASCII legacy VTK `.vtk` files for flow-field visualization
 - a single merged output file even in MPI runs
-- optional CSV state diagnostics
 
 Current VTK output fields are:
 
@@ -172,13 +166,6 @@ Typical output control keys are:
 - `outputEvery`
 - `writeFinal`
 - `output.vtkDataOutputType`
-
-Typical diagnostics keys are:
-
-- `stateDiagnostics.enable`
-- `stateDiagnostics.csv`
-- `stateDiagnostics.printToStdout`
-- `stateDiagnostics.includePerStepSummary`
 
 ## Repository Structure
 
@@ -204,7 +191,7 @@ EulerSolver_CFD_Training/
 - `src/setFields.cpp`         background-plus-region initial-field setup
 - `src/io.cpp`                VTK output and MPI gather/write
 - `src/mpi_parallel.cpp`      Cartesian MPI topology and halo exchange
-- `src/state.cpp`             state conversion, admissibility checks, diagnostics
+- `src/state.cpp`             state conversion and admissibility checks
 - `src/cfg.cpp`               key-value configuration parser
 
 ## Requirements
@@ -372,7 +359,7 @@ output.vtkDataOutputType = point
 - `timeIntegrator`
 - `bc` and optional side-specific `bc.left`, `bc.right`, `bc.bottom`, `bc.top`
 - `mpi.px`, `mpi.py`
-- output and diagnostics keys
+- output keys
 
 ### Boundary-condition keys
 
@@ -422,11 +409,7 @@ Side-specific outlet pressure is also supported.
 ```text
 reconstruction.scheme = weno5
 reconstruction.limiter = vanleer
-reconstruction.enableFallback = true
-reconstruction.positivityFix = true
 reconstruction.eps = 1e-12
-reconstruction.rhoMin = 1e-12
-reconstruction.pMin = 1e-12
 reconstruction.variables = characteristic
 ```
 
@@ -471,7 +454,7 @@ The current code structure is intended to support future work such as:
 
 - further solver-architecture refinement
 - stronger verification and benchmark coverage
-- improved diagnostics and output variables
+- additional output variables
 - extended setFields options for more complex initial and boundary-driven test problems
 - more advanced shock and detonation-oriented test problems
 - continued numerical-method development on the current modular framework

@@ -11,12 +11,12 @@
 //        - characteristic reconstruction for face states
 //        - numerical flux evaluation on x/y faces
 //        - explicit time integrator for time advancement
-//   3) Build an initial RHS and process the initial diagnostics/output phase.
+//   3) Build an initial RHS and process the initial output phase.
 //   4) Advance in time with repeated:
 //        - CFL-based dt computation
 //        - explicit time-integrator stage calls through rhsFun
-//        - regular diagnostics/output processing on the configured cadence
-//   5) Optionally emit one final diagnostics/output phase at the terminal time.
+//        - regular output processing on the configured cadence
+//   5) Optionally emit one final output phase at the terminal time.
 //
 // MPI:
 // - The 2D solver uses a Cartesian px-by-py rank layout (mpi.px, mpi.py).
@@ -35,8 +35,6 @@
 #include "io.hpp"
 #include "boundary.hpp"
 
-#include "diagnostics.hpp"
-#include "positivity_preserving.hpp"
 
 #include <memory>
 #include <string>
@@ -116,7 +114,7 @@ public:
     // The solver stores a reference to mp, so mp must outlive the solver.
     Solver(const Cfg& cfg, const mpi_parallel::MpiParallel& mp);
 
-    // Run the full simulation: initial RHS build, time stepping, diagnostics,
+    // Run the full simulation: initial RHS build, time stepping,
     // and scheduled/final output.
     void run();
 
@@ -158,24 +156,6 @@ private:
     // - Cell : write CELL_DATA directly from finite-volume cell-centered values.
     VTKDataOutputType vtkDataOutputType_{VTKDataOutputType::Point};
 
-    // Shared state-layer thresholds and diagnostics controls used for interior
-    // validity checks and reporting.  These checks only diagnose the conservative
-    // state; they do not modify or repair the solution.
-    StateLimits stateLimits_{};
-    diagnostics::StateDiagnosticsOptions stateDiagnosticsOptions_{};
-
-    // Positivity-preserving flux-limiter controls and statistics.
-    // This is a flux-level safeguard used during RHS construction, not a
-    // post-update cell-repair mechanism.
-    positivity_preserving::Options positivityOptions_{};
-    positivity_preserving::Stats positivityStats_{};
-
-    // Temporary dt bridge for the positivity-preserving flux limiter.
-    // buildRHS() currently does not receive dt directly, so run() sets this
-    // before invoking the explicit time integrator.  A later cleanup can pass
-    // dt through the RHS callback interface instead.
-    double currentDtForLimiter_{0.0};
-
     // Flatten (i,j) into a 1D row-major index for ghosted cell-centered arrays.
     int idx(int i, int j) const { return i + grid_.nxTot * j; }
 
@@ -191,17 +171,13 @@ private:
     double computeDt(const std::vector<Vec4>& U) const;
     // Build the spatial finite-volume RHS for the given state vector.
     // Expects ghost cells already valid (call applyBC first).
-    // Uses: reconstruction -> numerical flux -> optional flux limiting ->
+    // Uses: reconstruction -> numerical flux ->
     // flux divergence.  This routine must not perform post-update state repair.
     void buildRHS(const std::vector<Vec4>& U, std::vector<Vec4>& RHS);
 
-    // Diagnostics/output orchestration helpers.
-    // These keep run() focused on the main advance loop while centralizing
-    // cadence checks, state-health diagnostics, and merged snapshot writing.
+    // Scheduled and terminal merged VTK output.
     bool shouldWriteStepOutput(int step) const;
-    bool shouldRecordStateDiagnostics(int step) const;
-    void recordStateDiagnostics(int step, double t, const std::string& tag) const;
-    void processRegularOutputPhase(int step, double t, const std::string& diagnosticsTag);
+    void processRegularOutputPhase(int step, double t);
     void writeOutput(int step, double t) const;
     void writeFinalOutput(double t) const;
 };

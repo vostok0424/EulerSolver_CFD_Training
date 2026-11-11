@@ -181,7 +181,7 @@ double velocitySquared(const Vec4& U) {
     return ux * ux + uy * uy;
 }
 
-// Shared conservative-state pressure reader used by diagnostics/repair.
+// Shared conservative-state pressure reader used by numerical modules.
 // Returns NaN when the state cannot be interpreted safely.
 double pressureFromConservative(const Vec4& U, const double gamma) {
     if (!isFiniteState(U)) {

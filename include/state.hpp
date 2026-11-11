@@ -20,8 +20,7 @@
 // - This EOS assumes an ideal gas with constant gamma.
 // - This header provides state definitions, EOS helpers, and single-state
 //   validation utilities.
-// - Global scan/summary diagnostics and repair logic now live outside this
-//   module.
+// - These checks inspect individual states without modifying them.
 
 #include <array>
 #include <cstddef>
@@ -157,7 +156,7 @@ bool isFiniteState(const Vec4& U);
 // Return u^2 + v^2 for a conservative state. Non-finite inputs yield +inf.
 double velocitySquared(const Vec4& U);
 
-// Shared conservative-state readers used by diagnostics and cell repair.
+// Shared conservative-state readers used by numerical modules.
 // These helpers centralize basic physics interpretation so other modules do
 // not keep duplicate pressure/internal-energy formulas.
 double pressureFromConservative(const Vec4& U, double gamma);
