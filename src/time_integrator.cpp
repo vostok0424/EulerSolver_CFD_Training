@@ -3,7 +3,7 @@
 #include <stdexcept>
 
 
-// Return the configuration name of this numerical method.
+// Return the name of the time-integration scheme.
 std::string EulerIntegrator::name() const
 {
     return "euler";
@@ -11,9 +11,10 @@ std::string EulerIntegrator::name() const
 
 
 // Advance the state by one time step using Forward Euler.
-// state (in/out) - ghosted conservative field advanced by dt
-// dt (in) - time-step size
-// rhs (in) - callback that refreshes stage ghosts and computes the residual
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// dt (in) - time increment for the current integration step
+// rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
 void EulerIntegrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
     TimeIntegrator::ensure_size( r_, state.size() );
@@ -28,7 +29,7 @@ void EulerIntegrator::step( std::vector<Conservative_vector> &state, double dt, 
 }
 
 
-// Return the configuration name of this numerical method.
+// Return the name of the time-integration scheme.
 std::string RK2Integrator::name() const
 {
     return "rk2";
@@ -36,9 +37,11 @@ std::string RK2Integrator::name() const
 
 
 // Advance the state by one time step using two-stage Heun RK2.
-// state (in/out) - ghosted conservative field advanced by dt
-// dt (in) - time-step size
-// rhs (in) - callback that refreshes stage ghosts and computes the residual
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// dt (in) - time increment for the current integration step
+// rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
+//
 void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
     const size_t n = state.size();
@@ -68,7 +71,7 @@ void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, co
 }
 
 
-// Return the configuration name of this numerical method.
+// Return the name of the time-integration scheme.
 std::string SSPRK3Integrator::name() const
 {
     return "ssprk3";
@@ -76,9 +79,11 @@ std::string SSPRK3Integrator::name() const
 
 
 // Advance the state by one time step using three-stage Shu-Osher SSPRK3.
-// state (in/out) - ghosted conservative field advanced by dt
-// dt (in) - time-step size
-// rhs (in) - callback that refreshes stage ghosts and computes the residual
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// dt (in) - time increment for the current integration step
+// rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
+//
 void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
     const size_t n = state.size();
@@ -118,17 +123,19 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
 }
 
 
-// Return the configuration name of this numerical method.
+// Return the name of the time-integration scheme.
 std::string RK4Integrator::name() const
 {
     return "rk4";
 }
 
 
-// Advance the state by one time step using classical four-stage RK4.
-// state (in/out) - ghosted conservative field advanced by dt
-// dt (in) - time-step size
-// rhs (in) - callback that refreshes stage ghosts and computes the residual
+// Advance the state by one time step using classical four-stage Runge-Kutta.
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// dt (in) - time increment for the current integration step
+// rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
+//
 void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
     const size_t n = state.size();
@@ -179,6 +186,8 @@ void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, co
 
 
 // Create the selected time integrator: euler, rk2, ssprk3 or rk4.
+//
+// name (in) - requested numerical-method name
 std::unique_ptr<TimeIntegrator> make_time_integrator( const std::string &name )
 {
     if ( name == "euler" )

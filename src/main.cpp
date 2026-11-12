@@ -1,4 +1,4 @@
-#include "cfg.hpp"
+#include "read_parameters.hpp"
 #include "solver.hpp"
 #include "mpi_parallel.hpp"
 
@@ -8,7 +8,12 @@
 
 #include <iostream>
 
-// Initialize MPI, read the case and run the solver; abort the MPI job on an exception.
+// Run the MPI solver with an explicit case path.
+//
+// argc (in) - number of command-line arguments
+// argv (in) - command-line arguments; argv[1] is the explicitly supplied case path
+//
+// Configuration failures and numerical exceptions abort the complete MPI job.
 int main( int argc, char **argv )
 {
     // Initialize MPI for both direct and mpirun execution.
@@ -19,24 +24,40 @@ int main( int argc, char **argv )
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
     MPI_Comm_size( MPI_COMM_WORLD, &size );
 
+    // Invalid command lines exit collectively before creating the Cartesian communicator.
+    if ( argc != 2 )
+    {
+        if ( rank == 0 )
+        {
+            std::cerr << "Usage: " << argv[0] << " <case.cfg>\n";
+        }
+
+        MPI_Finalize();
+        return 1;
+    }
+
     int exit_code = 0;
 
     try
     {
-        std::string cfg_file = "cases/case2d_sod.cfg";
+        const std::string cfg_file = argv[1];
 
-        if ( argc >= 2 )
-            cfg_file = argv[1];
+        // Reading writes directly to parameters; no member is used before checking the status.
+        CaseParameters parameters{};
+        std::string parameter_error;
+        const ReturnCodes code = read_parameters( cfg_file, parameters, parameter_error );
+        if ( code != SUCCESS )
+        {
+            std::cerr << "Parameter error [rank " << rank << ", code " << static_cast<int>( code )
+                      << "]: " << parameter_error << std::endl;
+            MPI_Abort( MPI_COMM_WORLD, 1 );
+            return 1;
+        }
+        const int dim = parameters.dim;
+        const int px = parameters.mpi_px;
+        const int py = parameters.mpi_py;
 
-        Cfg cfg;
-
-        cfg.load( cfg_file );
-
-        const int dim = cfg.get_int( "dim", spatial_dimension );
-
-        const int px = cfg.get_int( "mpi.px", 1 );
-        const int py = cfg.get_int( "mpi.py", 1 );
-
+        // Build the configured process layout, then pass parsed settings to the solver.
         MpiParallel mp( px, py, MPI_COMM_WORLD );
 
         if ( mp.is_root() )
@@ -61,7 +82,7 @@ int main( int argc, char **argv )
                 std::cout << "[main] dim=2, 2D solver\n";
             }
 
-            Solver solver( cfg, mp );
+            Solver solver( parameters, mp );
 
             solver.run();
         }

@@ -7,63 +7,23 @@
 #include <stdexcept>
 #include <string>
 
-// Select the normal-shock propagation direction.
-enum class ShockDir
-{
-    PlusX,
-    MinusX,
-    PlusY,
-    MinusY
-};
-
-
-// Read the shock propagation direction along the x- or y-axis.
-ShockDir parse_shock_dir( const std::string &s )
-{
-    if ( s == "+x" || s == "x" || s == "+X" || s == "X" )
-    {
-        return ShockDir::PlusX;
-    }
-
-    if ( s == "-x" || s == "-X" )
-    {
-        return ShockDir::MinusX;
-    }
-
-    if ( s == "+y" || s == "y" || s == "+Y" || s == "Y" )
-    {
-        return ShockDir::PlusY;
-    }
-
-    if ( s == "-y" || s == "-Y" )
-    {
-        return ShockDir::MinusY;
-    }
-
-    throw std::runtime_error( "setFields: invalid shockDir='" + s + "' (expected +x, -x, +y, or -y)" );
-}
-
-
 // Compute a region state from direct values or normal-shock jump conditions.
-Primitive_vector build_region_prim_2d( const Primitive_vector &bg, double gamma, const Cfg &cfg,
-    const std::string &base )
+//
+// gamma (in) - ideal-gas heat-capacity ratio
+// region (in) - initialization region with a direct or upstream primitive state and optional shock controls
+Primitive_vector build_region_prim_2d( double gamma, const SetFieldsRegion &region )
 {
-    Primitive_vector primitive = bg;
-    const double shock_mach = cfg.get_double( base + "shockMach", -1.0 );
+    Primitive_vector primitive = region.primitive;
+    const double shock_mach = region.shock_mach;
 
     if ( shock_mach > 0.0 )
     {
         if ( shock_mach <= 1.0 )
         {
-            throw std::runtime_error( "setFields: shockMach must be > 1 for " + base );
+            throw std::runtime_error( "setFields: shockMach must be > 1" );
         }
 
-        primitive.density = cfg.get_double( base + "rho", bg.density );
-        primitive.x_velocity = cfg.get_double( base + "u", 0.0 );
-        primitive.y_velocity = cfg.get_double( base + "v", 0.0 );
-        primitive.pressure = cfg.get_double( base + "p", bg.pressure );
-
-        const ShockDir dir = parse_shock_dir( cfg.get_string( base + "shockDir", "+x" ) );
+        const ShockDir dir = region.shock_dir;
 
         double nx = 0.0;
         double ny = 0.0;
@@ -115,22 +75,27 @@ Primitive_vector build_region_prim_2d( const Primitive_vector &bg, double gamma,
         return primitive;
     }
 
-    primitive.density = cfg.get_double( base + "rho", bg.density );
-    primitive.x_velocity = cfg.get_double( base + "u", bg.x_velocity );
-    primitive.y_velocity = cfg.get_double( base + "v", bg.y_velocity );
-    primitive.pressure = cfg.get_double( base + "p", bg.pressure );
     return primitive;
 }
 
 
+// Fill the interior background, then apply regions in order using the supplied settings.
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// x0 (in) - left physical bound of the represented domain
+// x1 (in) - right physical bound of the represented domain
+// y0 (in) - bottom physical bound of the represented domain
+// y1 (in) - top physical bound of the represented domain
+// gamma (in) - ideal-gas heat-capacity ratio
+// options (in) - parsed options consumed by this module
+//
 // Fill the interior with a background state, then apply rectangular regions in index order.
-// state (in/out) - ghosted conservative field; only interior cells are assigned
-// nx, ny, ng (in) - local interior sizes and ghost width
-// x0, x1, y0, y1 (in) - local interior-domain bounds
-// gamma, cfg (in) - ideal-gas ratio and setFields settings
 // Later regions overwrite earlier regions where their cell-center selections overlap.
 void set_fields_2d( std::vector<Conservative_vector> &state, int nx, int ny, int ng, double x0, double x1, double y0,
-    double y1, double gamma, const Cfg &cfg )
+    double y1, double gamma, const SetFieldsOptions &options )
 {
     const int nx_tot = nx + 2 * ng;
     auto idx = [&]( int i, int j )
@@ -141,13 +106,7 @@ void set_fields_2d( std::vector<Conservative_vector> &state, int nx, int ny, int
     const double dx = ( x1 - x0 ) / static_cast<double>( nx );
     const double dy = ( y1 - y0 ) / static_cast<double>( ny );
 
-    Primitive_vector bg{};
-
-    // Read the background primitive state from setFields.bg.rho, u, v and p.
-    bg.density = cfg.get_double( "setFields.bg.rho", 1.0 );
-    bg.x_velocity = cfg.get_double( "setFields.bg.u", 0.0 );
-    bg.y_velocity = cfg.get_double( "setFields.bg.v", 0.0 );
-    bg.pressure = cfg.get_double( "setFields.bg.p", 1.0 );
+    const Primitive_vector &bg = options.background;
 
     Conservative_vector ubg{};
 
@@ -157,18 +116,14 @@ void set_fields_2d( std::vector<Conservative_vector> &state, int nx, int ny, int
         for ( int i = 0; i < nx; ++i )
             state[idx( ng + i, ng + j )] = ubg;
 
-    const int n_regions = cfg.get_int( "setFields.nRegions", 0 );
-
-    // Apply setFields.regionK boxes in ascending K; later boxes overwrite earlier selections.
-    for ( int r = 1; r <= n_regions; ++r )
+    // Later regions overwrite earlier selections; omitted bounds use the local domain.
+    for ( const auto &region : options.regions )
     {
-        const std::string base = "setFields.region" + std::to_string( r ) + ".";
-        const double x_min = cfg.get_double( base + "xMin", x0 );
-        const double x_max = cfg.get_double( base + "xMax", x1 );
-        const double y_min = cfg.get_double( base + "yMin", y0 );
-        const double y_max = cfg.get_double( base + "yMax", y1 );
-
-        const Primitive_vector primitive = build_region_prim_2d( bg, gamma, cfg, base );
+        const double x_min = region.x_min.value_or( x0 );
+        const double x_max = region.x_max.value_or( x1 );
+        const double y_min = region.y_min.value_or( y0 );
+        const double y_max = region.y_max.value_or( y1 );
+        const Primitive_vector primitive = build_region_prim_2d( gamma, region );
         Conservative_vector ureg{};
 
         require_success( calc_conservative_variables( primitive, gamma, ureg ), "calc_conservative_variables" );

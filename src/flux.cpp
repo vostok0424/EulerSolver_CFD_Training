@@ -15,7 +15,15 @@ struct ExactSample1D
 };
 
 
-// Compute the Rusanov flux using the largest left/right acoustic signal speed.
+// Compute the Rusanov flux vector at a discontinuity interface.
+//
+// left_state (in) - conserved variables to the left of the interface
+// right_state (in) - conserved variables to the right of the interface
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
     double gamma, Flux_vector &output )
 {
@@ -64,14 +72,11 @@ ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Cons
     // Average the physical fluxes and subtract acoustic dissipation across the state jump.
     Flux_vector flux{};
 
-    flux.mass_flux = 0.5 * ( fl.mass_flux + fr.mass_flux ) -
-                     ( 0.5 * smax ) * ( right_state.specific_mass - left_state.specific_mass );
-    flux.x_momentum_flux = 0.5 * ( fl.x_momentum_flux + fr.x_momentum_flux ) -
-                           ( 0.5 * smax ) * ( right_state.specific_x_momentum - left_state.specific_x_momentum );
-    flux.y_momentum_flux = 0.5 * ( fl.y_momentum_flux + fr.y_momentum_flux ) -
-                           ( 0.5 * smax ) * ( right_state.specific_y_momentum - left_state.specific_y_momentum );
-    flux.energy_flux = 0.5 * ( fl.energy_flux + fr.energy_flux ) -
-                       ( 0.5 * smax ) * ( right_state.specific_energy - left_state.specific_energy );
+    flux.mass_flux = 0.5 * ( fl.mass_flux + fr.mass_flux ) - ( 0.5 * smax ) * ( right_state.specific_mass - left_state.specific_mass );
+    flux.x_momentum_flux = 0.5 * ( fl.x_momentum_flux + fr.x_momentum_flux ) - ( 0.5 * smax ) * ( right_state.specific_x_momentum - left_state.specific_x_momentum );
+    flux.y_momentum_flux = 0.5 * ( fl.y_momentum_flux + fr.y_momentum_flux ) - ( 0.5 * smax ) * ( right_state.specific_y_momentum - left_state.specific_y_momentum );
+    flux.energy_flux = 0.5 * ( fl.energy_flux + fr.energy_flux ) - ( 0.5 * smax ) * ( right_state.specific_energy - left_state.specific_energy );
+    
     if ( !is_finite_flux( flux ) )
     {
         return NON_FINITE_FLUX;
@@ -83,7 +88,15 @@ ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Cons
 
 
 // Compute a HLLC star state while preserving the tangential velocity.
-// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// primitive (in) - cached primitive variables, sound speed and enthalpy from the same conservative state
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// s (in) - estimated HLLC bounding-wave speed
+// Sstar (in) - HLLC contact-wave speed
+// output (out) - computed conservative state
+// code (out) - operation status; SUCCESS indicates valid numerical outputs
 static void calc_hllc_star_state( const Conservative_vector &state, const EvaluatedState &primitive, int dir,
     double gamma, double s, double Sstar, Conservative_vector &output, ReturnCodes &code )
 {
@@ -142,7 +155,15 @@ static void calc_hllc_star_state( const Conservative_vector &state, const Evalua
 }
 
 
-// Compute the HLLC flux from the two outer waves and the contact wave.
+// Compute the HLLC flux vector at a discontinuity interface.
+//
+// left_state (in) - conserved variables to the left of the interface
+// right_state (in) - conserved variables to the right of the interface
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
     double gamma, Flux_vector &output )
 {
@@ -224,6 +245,7 @@ ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conserv
     }
 
     Conservative_vector uls{}, urs{};
+    
     calc_hllc_star_state( left_state, wl, dir, gamma, sl, sm, uls, code );
     if ( code != SUCCESS )
     {
@@ -267,7 +289,9 @@ ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conserv
 
 
 // Compute the positive Mach-number split for AUSM.
-// output (out) - value of the split function
+//
+// m (in) - signed normal Mach number
+// output (out) - computed signed Mach or pressure splitting coefficient
 static void ausm_mach_plus( double m, double &output )
 {
     const double a_m = std::abs( m );
@@ -284,7 +308,9 @@ static void ausm_mach_plus( double m, double &output )
 
 
 // Compute the negative Mach-number split for AUSM.
-// output (out) - value of the split function
+//
+// m (in) - signed normal Mach number
+// output (out) - computed signed Mach or pressure splitting coefficient
 static void ausm_mach_minus( double m, double &output )
 {
     const double a_m = std::abs( m );
@@ -301,7 +327,9 @@ static void ausm_mach_minus( double m, double &output )
 
 
 // Compute the positive pressure weight for AUSM.
-// output (out) - value of the split function
+//
+// m (in) - signed normal Mach number
+// output (out) - computed signed Mach or pressure splitting coefficient
 static void ausm_pressure_plus( double m, double &output )
 {
     const double a_m = std::abs( m );
@@ -318,7 +346,9 @@ static void ausm_pressure_plus( double m, double &output )
 
 
 // Compute the negative pressure weight for AUSM.
-// output (out) - value of the split function
+//
+// m (in) - signed normal Mach number
+// output (out) - computed signed Mach or pressure splitting coefficient
 static void ausm_pressure_minus( double m, double &output )
 {
     const double a_m = std::abs( m );
@@ -334,7 +364,15 @@ static void ausm_pressure_minus( double m, double &output )
 }
 
 
-// Compute the AUSM flux by splitting mass transport and interface pressure.
+// Compute the AUSM flux vector at a discontinuity interface.
+//
+// left_state (in) - conserved variables to the left of the interface
+// right_state (in) - conserved variables to the right of the interface
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_ausm_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
     double gamma, Flux_vector &output )
 {
@@ -420,7 +458,13 @@ ReturnCodes calc_ausm_flux( const Conservative_vector &left_state, const Conserv
 
 
 // Compute the shock or rarefaction pressure function and its pressure derivative.
-// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+//
+// p (in) - trial pressure for the normal Riemann pressure function
+// primitive (in) - density, velocity and pressure of the flow state
+// gamma (in) - ideal-gas heat-capacity ratio
+// f (out) - pressure-function value for Newton iteration
+// df (out) - pressure derivative of the pressure function
+// code (out) - operation status; SUCCESS indicates valid numerical outputs
 static void godunov_prefun_impl( double p, const Primitive_vector &primitive, double gamma, double &f, double &df,
     ReturnCodes &code )
 {
@@ -469,7 +513,12 @@ static void godunov_prefun_impl( double p, const Primitive_vector &primitive, do
 
 
 // Estimate the star pressure with the primitive-variable Riemann approximation.
-// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+//
+// wl (in) - primitive state on the left of the normal Riemann problem
+// wr (in) - primitive state on the right of the normal Riemann problem
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - computed pressure
+// code (out) - operation status; SUCCESS indicates valid numerical outputs
 static void guess_pressure_pvrsimpl( const Primitive_vector &wl, const Primitive_vector &wr, double gamma,
     double &output, ReturnCodes &code )
 {
@@ -508,10 +557,13 @@ static constexpr double godunov_residual_relative_tolerance = 1e-10;
 
 
 // Solve for the star pressure and normal velocity by Newton iteration.
-// wl, wr (in) - left/right states with normal velocity stored in x_velocity
+//
+// wl (in) - primitive state on the left of the normal Riemann problem
+// wr (in) - primitive state on the right of the normal Riemann problem
 // gamma (in) - ideal-gas heat-capacity ratio
-// p_star, u_star (out) - star pressure and normal velocity
-// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
+// p_star (out) - pressure in the Riemann star region
+// u_star (out) - normal velocity in the Riemann star region
+// code (out) - operation status; SUCCESS indicates valid numerical outputs
 static void calc_godunov_star_state( const Primitive_vector &wl, const Primitive_vector &wr, double gamma,
     double &p_star, double &u_star, ReturnCodes &code )
 {
@@ -627,10 +679,16 @@ static void calc_godunov_star_state( const Primitive_vector &wl, const Primitive
 
 
 // Sample the exact Riemann solution at the stationary face, x/t = 0.
-// wl, wr (in) - left/right states with normal velocity stored in x_velocity
-// p_star, u_star (in) - star pressure and normal velocity
+//
+// wl (in) - primitive state on the left of the normal Riemann problem
+// wr (in) - primitive state on the right of the normal Riemann problem
+// gamma (in) - ideal-gas heat-capacity ratio
+// p_star (in) - pressure in the Riemann star region
+// u_star (in) - normal velocity in the Riemann star region
+// output (out) - normal Riemann sample at interface similarity coordinate zero
+// code (out) - operation status; SUCCESS indicates valid numerical outputs
+//
 // The returned side_tag selects the upstream tangential velocity: -1 left, +1 right.
-// code (out) - calculation status; numerical outputs are assigned only on SUCCESS
 static void sample_at_s0( const Primitive_vector &wl, const Primitive_vector &wr, double gamma, double p_star,
     double u_star, ExactSample1D &output, ReturnCodes &code )
 {
@@ -765,7 +823,15 @@ static void sample_at_s0( const Primitive_vector &wl, const Primitive_vector &wr
 }
 
 
-// Compute the Godunov flux from the exact normal Riemann solution.
+// Compute the exact-directional Godunov flux vector at a discontinuity interface.
+//
+// left_state (in) - conserved variables to the left of the interface
+// right_state (in) - conserved variables to the right of the interface
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_godunov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
     double gamma, Flux_vector &output )
 {
@@ -843,6 +909,10 @@ ReturnCodes calc_godunov_flux( const Conservative_vector &left_state, const Cons
 }
 
 
+// Read rusanov, hllc, ausm or godunov; unknown names throw a configuration error.
+//
+// name (in) - requested numerical-method name
+//
 // Read the case-sensitive flux selection; unknown names are configuration errors.
 FluxScheme read_flux_scheme( const std::string &name )
 {
@@ -866,7 +936,17 @@ FluxScheme read_flux_scheme( const std::string &name )
 }
 
 
+// Compute the flux vector at a discontinuity interface using the selected scheme.
+//
+// scheme (in) - selected numerical flux scheme
+// left_state (in) - conserved variables to the left of the interface
+// right_state (in) - conserved variables to the right of the interface
+// dir (in) - flux calculation direction: x_direction or y_direction
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - flux vector of conserved variables in the selected direction
+//
 // Dispatch the selected calculation; output is assigned only on SUCCESS.
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_numerical_flux( FluxScheme scheme, const Conservative_vector &left_state,
     const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output )
 {

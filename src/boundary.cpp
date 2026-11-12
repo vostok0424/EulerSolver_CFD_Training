@@ -7,224 +7,20 @@
 #include <string>
 
 
-// Trim a boundary name; use zeroGradient when the name is empty.
-static inline std::string normalize_name( const std::string &s )
-{
-    const std::string v = trim_string( s );
-
-    if ( v.empty() )
-    {
-        return "zeroGradient";
-    }
-
-    return v;
-}
-
-
-// Reject periodic and cyclic boundary names.
-static inline void reject_if_periodic( const std::string &n )
-{
-    const std::string v = normalize_name( n );
-
-    if ( v == "periodic" || v == "cyclic" )
-    {
-        throw std::runtime_error( "boundary: periodic/cyclic is not supported in this training code." );
-    }
-}
-
-
-// Convert a case-sensitive boundary name to its boundary type.
-static inline BoundaryType parse_bc_type( const std::string &n, const std::string &where )
-{
-    const std::string v = normalize_name( n );
-
-    reject_if_periodic( v );
-
-    if ( v == "inlet" )
-    {
-        return BoundaryType::inlet;
-    }
-
-    if ( v == "outlet" )
-    {
-        return BoundaryType::outlet;
-    }
-
-    if ( v == "zeroGradient" )
-    {
-        return BoundaryType::zero_gradient;
-    }
-
-    if ( v == "slipWall" )
-    {
-        return BoundaryType::slip_wall;
-    }
-
-    if ( v == "symmetry" )
-    {
-        return BoundaryType::symmetry;
-    }
-
-    if ( v == "internal" )
-    {
-        return BoundaryType::internal;
-    }
-
-    throw std::runtime_error( "boundary: unsupported BC name in " + where + ": " + n );
-}
-
-
 // Check whether the boundary reflects normal momentum.
+//
+// t (in) - physical boundary type
 static inline bool is_wall_like( BoundaryType t )
 {
     return ( t == BoundaryType::slip_wall || t == BoundaryType::symmetry );
 }
 
 
-// Read a side-specific boundary name, or use the supplied fallback.
-static inline std::string pick_name( const Cfg &cfg, const std::string &key, const std::string &fallback )
-{
-    if ( cfg.has( key ) )
-    {
-        return normalize_name( cfg.get_string( key, "" ) );
-    }
-
-    return normalize_name( fallback );
-}
-
-
-// Throw an exception when a required configuration key is absent.
-static inline void require_key( const Cfg &cfg, const std::string &key )
-{
-    if ( !cfg.has( key ) )
-    {
-        throw std::runtime_error( "boundary: missing required cfg key: " + key );
-    }
-}
-
-
-// Read a required floating-point configuration value.
-static inline double read_double_strict( const Cfg &cfg, const std::string &key )
-{
-    require_key( cfg, key );
-    return cfg.get_double( key, 0.0 );
-}
-
-
-// Check whether any listed key exists under the supplied prefix.
-static inline bool has_any_prefix( const Cfg &cfg, const std::string &prefix,
-    const std::initializer_list<std::string> &keys )
-{
-    for ( const auto &k : keys )
-    {
-        if ( cfg.has( prefix + k ) )
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-
-// Read inlet rho, u, v and p; any side-specific inlet key selects the complete side-specific set.
-static Primitive_vector read_inlet_prim2( const Cfg &cfg, const std::string &side )
-{
-    const std::string p1 = "bc." + side + ".inlet.";
-    const std::string p0 = "bc.inlet.";
-
-    const bool side_has = has_any_prefix( cfg, p1, { "rho", "u", "v", "p" } );
-    const std::string p = side_has ? p1 : p0;
-
-    Primitive_vector primitive{};
-
-    primitive.density = read_double_strict( cfg, p + "rho" );
-    primitive.x_velocity = read_double_strict( cfg, p + "u" );
-    primitive.y_velocity = read_double_strict( cfg, p + "v" );
-    primitive.pressure = read_double_strict( cfg, p + "p" );
-    return primitive;
-}
-
-
-// Read a positive outlet pressure, preferring bc.<side>.outlet.p over bc.outlet.p.
-static double read_outlet_p( const Cfg &cfg, const std::string &side )
-{
-    const std::string k1 = "bc." + side + ".outlet.p";
-    const std::string k0 = "bc.outlet.p";
-    const double p = read_double_strict( cfg, cfg.has( k1 ) ? k1 : k0 );
-
-    if ( p <= 0.0 )
-    {
-        throw std::runtime_error( "boundary: outlet pressure must be > 0" );
-    }
-
-    return p;
-}
-
-
-// Read boundary types and their required inlet or outlet parameters.
-BoundaryConditions2D read_boundary_conditions( const Cfg &cfg )
-{
-    const std::string base = normalize_name( cfg.get_string( "bc", "zeroGradient" ) );
-
-    BoundaryConditions2D b;
-
-    b.gamma = cfg.get_double( "gamma", 1.4 );
-
-    const std::string left_name = pick_name( cfg, "bc.left", base );
-    const std::string right_name = pick_name( cfg, "bc.right", base );
-    const std::string bottom_name = pick_name( cfg, "bc.bottom", base );
-    const std::string top_name = pick_name( cfg, "bc.top", base );
-
-    b.left.type = parse_bc_type( left_name, "read2D.left" );
-    b.right.type = parse_bc_type( right_name, "read2D.right" );
-    b.bottom.type = parse_bc_type( bottom_name, "read2D.bottom" );
-    b.top.type = parse_bc_type( top_name, "read2D.top" );
-
-    if ( b.left.type == BoundaryType::inlet )
-    {
-        b.left.inlet = read_inlet_prim2( cfg, "left" );
-    }
-    else if ( b.left.type == BoundaryType::outlet )
-    {
-        b.left.pout = read_outlet_p( cfg, "left" );
-    }
-
-    if ( b.right.type == BoundaryType::inlet )
-    {
-        b.right.inlet = read_inlet_prim2( cfg, "right" );
-    }
-    else if ( b.right.type == BoundaryType::outlet )
-    {
-        b.right.pout = read_outlet_p( cfg, "right" );
-    }
-
-    if ( b.bottom.type == BoundaryType::inlet )
-    {
-        b.bottom.inlet = read_inlet_prim2( cfg, "bottom" );
-    }
-    else if ( b.bottom.type == BoundaryType::outlet )
-    {
-        b.bottom.pout = read_outlet_p( cfg, "bottom" );
-    }
-
-    if ( b.top.type == BoundaryType::inlet )
-    {
-        b.top.inlet = read_inlet_prim2( cfg, "top" );
-    }
-    else if ( b.top.type == BoundaryType::outlet )
-    {
-        b.top.pout = read_outlet_p( cfg, "top" );
-    }
-
-    return b;
-}
-
-
 // Extrapolate a supersonic state; impose outlet pressure when the normal Mach magnitude is below one.
-// uin (in) - adjacent interior state
-// pout (in) - prescribed subsonic outlet pressure
-// normal_dir (in) - boundary-normal axis: 0 for x, 1 for y
+//
+// uin (in) - conserved state of the adjacent interior cell
+// pout (in) - prescribed positive outlet pressure
+// normal_dir (in) - outlet-normal coordinate direction
 // gamma (in) - ideal-gas heat-capacity ratio
 static inline Conservative_vector outlet_state_2d( const Conservative_vector &uin, double pout, int normal_dir,
     double gamma )
@@ -257,9 +53,12 @@ static inline Conservative_vector outlet_state_2d( const Conservative_vector &ui
 
 
 // Fill physical-boundary ghost cells; leave interior cells and internal MPI boundaries unchanged.
-// state (in/out) - row-major conservative field including ghost cells
-// nx, ny, ng (in) - interior sizes and ghost width
-// bc (in) - per-side boundary types, inlet states, outlet pressures and gamma
+//
+// state (in/out) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// bc (in) - physical boundary types, inlet states, outlet pressures and gas model
 void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     const BoundaryConditions2D &bc )
 {
@@ -279,7 +78,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         else if ( bc.left.type == BoundaryType::zero_gradient )
         {
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( ng - 1 - g, j )] = state[idx( ng, j )];
+            }
         }
         else if ( bc.left.type == BoundaryType::inlet )
         {
@@ -288,7 +89,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             require_success( calc_conservative_variables( bc.left.inlet, gamma, uin ), "calc_conservative_variables" );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( ng - 1 - g, j )] = uin;
+            }
         }
         else if ( bc.left.type == BoundaryType::outlet )
         {
@@ -296,7 +99,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             const Conservative_vector uo = outlet_state_2d( uadj, bc.left.pout, x_direction, gamma );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( ng - 1 - g, j )] = uo;
+            }
         }
         else if ( is_wall_like( bc.left.type ) )
         {
@@ -319,7 +124,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         else if ( bc.right.type == BoundaryType::zero_gradient )
         {
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( nx + ng + g, j )] = state[idx( nx + ng - 1, j )];
+            }
         }
         else if ( bc.right.type == BoundaryType::inlet )
         {
@@ -328,7 +135,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             require_success( calc_conservative_variables( bc.right.inlet, gamma, uin ), "calc_conservative_variables" );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( nx + ng + g, j )] = uin;
+            }
         }
         else if ( bc.right.type == BoundaryType::outlet )
         {
@@ -369,10 +178,12 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         {
             Conservative_vector uin{};
 
-            require_success( calc_conservative_variables( bc.bottom.inlet, gamma, uin ),
-                "calc_conservative_variables" );
+            require_success( calc_conservative_variables( bc.bottom.inlet, gamma, uin ), "calc_conservative_variables" );
+            
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( i, ng - 1 - g )] = uin;
+            }
         }
         else if ( bc.bottom.type == BoundaryType::outlet )
         {
@@ -380,7 +191,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             const Conservative_vector uo = outlet_state_2d( uadj, bc.bottom.pout, y_direction, gamma );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( i, ng - 1 - g )] = uo;
+            }
         }
         else if ( is_wall_like( bc.bottom.type ) )
         {
@@ -403,7 +216,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         else if ( bc.top.type == BoundaryType::zero_gradient )
         {
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( i, ny + ng + g )] = state[idx( i, ny + ng - 1 )];
+            }
         }
         else if ( bc.top.type == BoundaryType::inlet )
         {
@@ -412,7 +227,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             require_success( calc_conservative_variables( bc.top.inlet, gamma, uin ), "calc_conservative_variables" );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( i, ny + ng + g )] = uin;
+            }
         }
         else if ( bc.top.type == BoundaryType::outlet )
         {
@@ -420,7 +237,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
             const Conservative_vector uo = outlet_state_2d( uadj, bc.top.pout, y_direction, gamma );
 
             for ( int g = 0; g < ng; ++g )
+            {
                 state[idx( i, ny + ng + g )] = uo;
+            }
         }
         else if ( is_wall_like( bc.top.type ) )
         {

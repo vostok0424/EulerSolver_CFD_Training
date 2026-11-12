@@ -2,7 +2,7 @@
 
 
 #include "structures.hpp"
-#include "cfg.hpp"
+#include "read_parameters.hpp"
 #include "flux.hpp"
 #include "time_integrator.hpp"
 #include "mpi_parallel.hpp"
@@ -23,6 +23,9 @@ struct DirectionalFaceBuffers2D
     std::vector<Conservative_vector> right_state;
     std::vector<Flux_vector> flux;
 
+    // Resize the face workspace for the supplied face count or interior mesh dimensions.
+    //
+    // n_faces (in) - number of faces to allocate
     void resize( std::size_t n_faces )
     {
         left_state.resize( n_faces );
@@ -38,6 +41,10 @@ struct FaceBuffers2D
     DirectionalFaceBuffers2D x;
     DirectionalFaceBuffers2D y;
 
+    // Resize the face workspace for the supplied face count or interior mesh dimensions.
+    //
+    // nx (in) - number of interior cells along x
+    // ny (in) - number of interior cells along y
     void resize( int nx, int ny )
     {
         x.resize( static_cast<std::size_t>( nx + 1 ) * static_cast<std::size_t>( ny ) );
@@ -50,8 +57,11 @@ struct FaceBuffers2D
 class Solver
 {
   public:
-    // cfg, mp (in) - case settings and MPI helper; mp must outlive the solver.
-    Solver( const Cfg &cfg, const MpiParallel &mp );
+    // Construct the local mesh, allocate workspaces and initialize the conservative field.
+    //
+    // parameters (in) - typed computational experiment parameters
+    // mp (in) - MPI topology and communication helper; must outlive the solver
+    Solver( const CaseParameters &parameters, const MpiParallel &mp );
 
     // Advance the initialized solution and process scheduled and final output.
     void run();
@@ -87,43 +97,73 @@ class Solver
 
     VTKDataOutputType vtk_data_output_type_{ VTKDataOutputType::point };
 
-    // Flatten a ghosted cell index; interior cells start at (grid_.ng, grid_.ng).
+    // Map a ghosted cell index to its row-major storage offset.
+    //
+    // i (in) - cell or face index along x
+    // j (in) - cell or face index along y
     int idx( int i, int j ) const
     {
         return i + grid_.nx_tot * j;
     }
 
+    // Map an x-normal face index to its row-major storage offset.
+    //
+    // i (in) - cell or face index along x
+    // j (in) - cell or face index along y
     int idx_face_x( int i, int j ) const
     {
         return i + ( grid_.nx + 1 ) * j;
     }
 
+    // Map a y-normal face index to its row-major storage offset.
+    //
+    // i (in) - cell or face index along x
+    // j (in) - cell or face index along y
     int idx_face_y( int i, int j ) const
     {
         return i + grid_.nx * j;
     }
 
     // Exchange MPI halos and apply physical boundary conditions before reconstruction.
+    //
+    // state (in/out) - conserved variables in the ghosted cell field
     void apply_bc( std::vector<Conservative_vector> &state ) const;
 
     // Check interior states and throw with cell coordinates on failure.
+    //
+    // state (in) - conserved variables in the ghosted cell field
     void validate_interior( const std::vector<Conservative_vector> &state ) const;
 
     // Compute the CFL time step using the global maximum acoustic signal rate.
+    //
+    // state (in) - conserved variables in the ghosted cell field
     double compute_dt( const std::vector<Conservative_vector> &state ) const;
 
     // Compute the flux divergence; the input ghost cells must already be valid.
+    //
+    // state (in) - conserved variables in the ghosted cell field
+    // rhs (out) - conservative residual on the ghosted cell layout
     void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs );
 
     // Check whether the step meets the configured output interval.
+    //
+    // step (in) - current time-step index
     bool should_write_step_output( int step ) const;
 
     // Refresh ghost cells and process scheduled output.
+    //
+    // step (in) - current time-step index
+    // t (in) - current simulation time
     void process_regular_output_phase( int step, double t );
 
     // Write scheduled merged VTK output.
+    //
+    // step (in) - current time-step index
+    // t (in) - current simulation time
     void write_output( int step, double t ) const;
 
     // Write the final merged VTK output when enabled.
+    //
+    // t (in) - current simulation time
     void write_final_output( double t ) const;
 };

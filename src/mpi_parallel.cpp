@@ -7,6 +7,9 @@
 
 
 // Throw an exception with the operation name when an MPI call reports failure.
+//
+// err (in) - MPI return status to check
+// where (in) - MPI operation name included in an error report
 static inline void mpi_check( int err, const char *where )
 {
     if ( err == MPI_SUCCESS )
@@ -15,6 +18,12 @@ static inline void mpi_check( int err, const char *where )
 }
 
 
+// Split a global axis into contiguous blocks; distribute remainder cells to the first blocks.
+//
+// global_n (in) - global number of cells along the split axis
+// p (in) - number of process blocks along the split axis
+// coord (in) - process coordinate along the split axis
+//
 // Split a global axis into contiguous blocks; the first remainder blocks get one extra cell.
 Range1D MpiParallel::split1_d( int global_n, int p, int coord )
 {
@@ -44,7 +53,14 @@ Range1D MpiParallel::split1_d( int global_n, int p, int coord )
 }
 
 
-// Create a px-by-py Cartesian communicator and identify neighboring ranks.
+// Create the Cartesian MPI topology and identify neighboring ranks.
+//
+// px (in) - number of process columns along x
+// py (in) - number of process rows along y
+// parent (in) - parent MPI communicator
+// periodic_x (in) - whether the Cartesian topology is periodic along x
+// periodic_y (in) - whether the Cartesian topology is periodic along y
+// reorder (in) - whether MPI may reorder Cartesian ranks
 MpiParallel::MpiParallel( int px, int py, MPI_Comm parent, bool periodic_x, bool periodic_y, bool reorder )
     : parent_( parent ), px_( px ), py_( py )
 {
@@ -66,6 +82,10 @@ MpiParallel::MpiParallel( int px, int py, MPI_Comm parent, bool periodic_x, bool
 
 
 // Create the Cartesian topology with MPI dimensions ordered as (y, x).
+//
+// periodic_x (in) - whether the Cartesian topology is periodic along x
+// periodic_y (in) - whether the Cartesian topology is periodic along y
+// reorder (in) - whether MPI may reorder Cartesian ranks
 void MpiParallel::init_cart_( bool periodic_x, bool periodic_y, bool reorder )
 {
     // MPI axis 0 is y and axis 1 is x; the stored cell index varies fastest along x.
@@ -95,6 +115,10 @@ void MpiParallel::init_cart_( bool periodic_x, bool periodic_y, bool reorder )
 }
 
 
+// Transfer MPI communicator and buffer ownership from the source helper.
+//
+// o (in/out) - MPI helper whose communicator and buffers are transferred
+//
 // Transfer communicator ownership from another MPI helper.
 MpiParallel::MpiParallel( MpiParallel &&o ) noexcept
 {
@@ -102,6 +126,9 @@ MpiParallel::MpiParallel( MpiParallel &&o ) noexcept
 }
 
 
+// Transfer MPI communicator and buffer ownership from the source helper.
+//
+// o (in/out) - MPI helper whose communicator and buffers are transferred
 MpiParallel &MpiParallel::operator=( MpiParallel &&o ) noexcept
 {
     if ( this == &o )
@@ -138,7 +165,7 @@ MpiParallel &MpiParallel::operator=( MpiParallel &&o ) noexcept
 }
 
 
-// Free the Cartesian communicator during normal destruction.
+// Release owned resources during object destruction.
 MpiParallel::~MpiParallel()
 {
     // Skip collective cleanup during exception unwinding; main reports the failure and aborts the MPI job.
@@ -153,6 +180,11 @@ MpiParallel::~MpiParallel()
 }
 
 
+// Return this rank's global interior-cell ranges.
+//
+// global_nx (in) - global number of interior cells along x
+// global_ny (in) - global number of interior cells along y
+//
 // Compute this rank's global interior-cell ranges.
 Subdomain2D MpiParallel::decompose( int global_nx, int global_ny ) const
 {
@@ -175,6 +207,8 @@ Subdomain2D MpiParallel::decompose( int global_nx, int global_ny ) const
 }
 
 
+// Synchronize all Cartesian ranks.
+//
 // Synchronize all ranks in the Cartesian communicator.
 void MpiParallel::barrier() const
 {
@@ -182,6 +216,10 @@ void MpiParallel::barrier() const
 }
 
 
+// Return the maximum local_val over all Cartesian ranks.
+//
+// local_val (in) - this rank's contribution to the collective reduction
+//
 // Compute the maximum value over all Cartesian ranks.
 double MpiParallel::allreduce_max( double local_val ) const
 {
@@ -192,6 +230,10 @@ double MpiParallel::allreduce_max( double local_val ) const
 }
 
 
+// Return the minimum local_val over all Cartesian ranks.
+//
+// local_val (in) - this rank's contribution to the collective reduction
+//
 // Compute the minimum value over all Cartesian ranks.
 double MpiParallel::allreduce_min( double local_val ) const
 {
@@ -202,6 +244,10 @@ double MpiParallel::allreduce_min( double local_val ) const
 }
 
 
+// Return the sum of local_val over all Cartesian ranks.
+//
+// local_val (in) - this rank's contribution to the collective reduction
+//
 // Compute the sum over all Cartesian ranks.
 double MpiParallel::allreduce_sum( double local_val ) const
 {
@@ -212,10 +258,15 @@ double MpiParallel::allreduce_sum( double local_val ) const
 }
 
 
+// Exchange packed cell components with Cartesian neighbors and fill ghost strips.
+//
+// data (in/out) - packed ghosted cell array; cell (i,j) begins at (i + (nx_local + 2*ng)*j)*ncomp
+// nx_local (in) - local number of interior cells along x
+// ny_local (in) - local number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// ncomp (in) - number of packed components stored per cell
+//
 // Exchange cell values with the four Cartesian neighbors and update ghost strips.
-// data (in/out) - packed doubles; cell (i,j), component k is at ((i + nx_tot*j)*ncomp + k)
-// nx_local, ny_local (in) - interior cell counts; nx_tot = nx_local + 2*ng
-// ng, ncomp (in) - ghost width and number of double components per cell
 // MPI_PROC_NULL sides are left for the physical boundary conditions.
 void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, int ng, int ncomp ) const
 {

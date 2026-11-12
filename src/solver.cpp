@@ -17,26 +17,9 @@
 
 constexpr const char *k_output_dir_2d = "solution";
 
-// Read the VTK data location: point or cell, ignoring letter case.
-static VTKDataOutputType parse_vtkdata_output_type( const std::string &value )
-{
-    std::string s = to_lowercase( value );
-
-    if ( s == "point" )
-    {
-        return VTKDataOutputType::point;
-    }
-
-    if ( s == "cell" )
-    {
-        return VTKDataOutputType::cell;
-    }
-
-    throw std::runtime_error( "Unknown output.vtkDataOutputType: " + value + " (expected point or cell)" );
-}
-
-
 // Return the VTK label for the selected data location.
+//
+// output_type (in) - selected VTK point or cell data location
 static const char *vtk_data_output_type_name( VTKDataOutputType output_type )
 {
     switch ( output_type )
@@ -52,6 +35,8 @@ static const char *vtk_data_output_type_name( VTKDataOutputType output_type )
 
 
 // Create the solution directory on root, then synchronize all ranks.
+//
+// mp (in) - MPI topology and communication helper; must outlive the solver
 static void ensure_output_directory_exists( const MpiParallel &mp )
 {
     if ( mp.is_root() )
@@ -64,6 +49,10 @@ static void ensure_output_directory_exists( const MpiParallel &mp )
 
 
 // Build the scheduled output path from the prefix, step and time.
+//
+// out_prefix (in) - filename prefix for solution output
+// step (in) - current time-step index
+// t (in) - current simulation time
 static std::string make_step_output_path( const std::string &out_prefix, int step, double t )
 {
     std::ostringstream step_ss;
@@ -80,6 +69,9 @@ static std::string make_step_output_path( const std::string &out_prefix, int ste
 
 
 // Build the final output path from the prefix and time.
+//
+// out_prefix (in) - filename prefix for solution output
+// t (in) - current simulation time
 static std::string make_final_output_path( const std::string &out_prefix, double t )
 {
     std::ostringstream t_ss;
@@ -92,6 +84,25 @@ static std::string make_final_output_path( const std::string &out_prefix, double
 
 
 // Write a merged MPI snapshot using the selected point or cell data location.
+//
+// mp (in) - MPI topology and communication helper; must outlive the solver
+// path (in) - destination VTK file path
+// label (in) - output-phase label used in the log
+// t (in) - current simulation time
+// state (in) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// i_beg (in) - global x index of the first local interior cell
+// j_beg (in) - global y index of the first local interior cell
+// nx_global (in) - global number of interior cells along x
+// ny_global (in) - global number of interior cells along y
+// x0 (in) - left physical bound of the represented domain
+// x1 (in) - right physical bound of the represented domain
+// y0 (in) - bottom physical bound of the represented domain
+// y1 (in) - top physical bound of the represented domain
+// gamma (in) - ideal-gas heat-capacity ratio
+// data_output_type (in) - selected VTK point or cell data location
 static void write_merged_vtk_file_2d( const MpiParallel &mp, const std::string &path, const std::string &label,
     double t, const std::vector<Conservative_vector> &state, int nx, int ny, int ng, int i_beg, int j_beg,
     int nx_global, int ny_global, double x0, double x1, double y0, double y1, double gamma,
@@ -118,16 +129,17 @@ static void write_merged_vtk_file_2d( const MpiParallel &mp, const std::string &
 }
 
 
-// Read the case, decompose the mesh, allocate fields and initialize the interior state.
-// cfg (in) - case configuration
-// mp (in) - MPI helper; must outlive the solver
-Solver::Solver( const Cfg &cfg, const MpiParallel &mp ) : mp_( mp ), recon_( cfg )
+// Construct the local mesh, allocate workspaces and initialize the conservative field.
+//
+// parameters (in) - typed computational experiment parameters
+// mp (in) - MPI topology and communication helper; must outlive the solver
+Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp ) : mp_( mp ), recon_( parameters.reconstruction )
 {
-    // 1. Read the global mesh and verify the selected reconstruction stencil fits the ghost width.
-    grid_.nx_global = cfg.get_int( "nx", 200 );
-    grid_.ny_global = cfg.get_int( "ny", 50 );
+    // 1. Set the global mesh and verify the selected reconstruction stencil fits the ghost width.
+    grid_.nx_global = parameters.grid.nx;
+    grid_.ny_global = parameters.grid.ny;
 
-    grid_.ng = cfg.get_int( "ng", 2 );
+    grid_.ng = parameters.grid.ng;
 
     if ( grid_.ng < 1 )
     {
@@ -141,10 +153,10 @@ Solver::Solver( const Cfg &cfg, const MpiParallel &mp ) : mp_( mp ), recon_( cfg
         throw std::runtime_error( "ng is too small for the selected reconstruction.scheme" );
     }
 
-    grid_.x0 = cfg.get_double( "x0", 0.0 );
-    grid_.x1 = cfg.get_double( "x1", 1.0 );
-    grid_.y0 = cfg.get_double( "y0", 0.0 );
-    grid_.y1 = cfg.get_double( "y1", 0.2 );
+    grid_.x0 = parameters.grid.x0;
+    grid_.x1 = parameters.grid.x1;
+    grid_.y0 = parameters.grid.y0;
+    grid_.y1 = parameters.grid.y1;
 
     if ( grid_.nx_global <= 0 || grid_.ny_global <= 0 || grid_.x1 <= grid_.x0 || grid_.y1 <= grid_.y0 ||
          !std::isfinite( grid_.dx() ) || !std::isfinite( grid_.dy() ) || grid_.dx() <= 0.0 || grid_.dy() <= 0.0 )
@@ -165,55 +177,62 @@ Solver::Solver( const Cfg &cfg, const MpiParallel &mp ) : mp_( mp ), recon_( cfg
     const double y0_loc = grid_.y0 + static_cast<double>( grid_.j_beg ) * dy_g;
     const double y1_loc = grid_.y0 + static_cast<double>( grid_.j_beg + grid_.ny ) * dy_g;
 
-    // 3. Read the gas model, time controls and output settings.
-    gamma_ = cfg.get_double( "gamma", 1.4 );
-    cfl_ = cfg.get_double( "cfl", 0.5 );
-    final_time_ = cfg.get_double( "finalTime", 0.2 );
-    output_every_ = cfg.get_int( "outputEvery", 50 );
-    write_final_ = cfg.get_bool( "writeFinal", true );
-    out_prefix_ = cfg.get_string( "outPrefix", "run2d" );
+    // 3. Set the gas model, time controls and output settings.
+    gamma_ = parameters.solver.gamma;
+    cfl_ = parameters.solver.cfl;
+    final_time_ = parameters.solver.final_time;
+    output_every_ = parameters.solver.output_every;
+    write_final_ = parameters.solver.write_final;
+    out_prefix_ = parameters.solver.out_prefix;
 
     if ( gamma_ <= 1.0 || cfl_ <= 0.0 || final_time_ < 0.0 )
         throw std::runtime_error( "Require gamma > 1, cfl > 0, finalTime >= 0" );
     if ( grid_.nx < grid_.ng || grid_.ny < grid_.ng )
         throw std::runtime_error( "Local nx and ny must be >= ng for halo exchange and wall reflection" );
 
-    vtk_data_output_type_ = parse_vtkdata_output_type( cfg.get_string( "output.vtkDataOutputType", "point" ) );
+    vtk_data_output_type_ = parameters.solver.vtk_data_output_type;
 
-    // 4. Read the physical boundary conditions.
-    bc_ = read_boundary_conditions( cfg );
+    // 4. Store the physical boundary conditions.
+    bc_ = parameters.boundary;
 
     // 5. Allocate the ghosted cell fields and reusable face arrays.
     grid_.nx_tot = grid_.nx + 2 * grid_.ng;
     grid_.ny_tot = grid_.ny + 2 * grid_.ng;
-    conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ),
-        Conservative_vector{} );
+    conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
     rhs_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
     faces_.resize( grid_.nx, grid_.ny );
 
     // 6. Select the numerical flux and explicit time integrator.
-    flux_name_ = cfg.get_string( "flux", "hllc" );
+    flux_name_ = parameters.solver.flux;
     flux_scheme_ = read_flux_scheme( flux_name_ );
-    ti_ = make_time_integrator( cfg.get_string( "timeIntegrator", "ssprk3" ) );
+    ti_ = make_time_integrator( parameters.solver.time_integrator );
 
     // 7. Initialize this rank's interior cells; ghost cells are filled before the first residual.
-    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, cfg );
+    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, parameters.set_fields );
 }
 
 
+// Exchange MPI halos and apply physical boundary conditions before reconstruction.
+//
+// state (in/out) - conserved variables in the ghosted cell field
+//
 // Exchange MPI halos, then fill physical-boundary ghost cells.
-// state (in/out) - local conservative field including ghost cells
 void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
 {
     // Pack named state members explicitly; MPI does not depend on the structure memory layout.
     halo_buffer_.resize( state.size() * conservative_variable_count );
 
     for ( std::size_t cell = 0; cell < state.size(); ++cell )
+    {
         pack_state( state[cell], halo_buffer_.data() + cell * conservative_variable_count );
+    }
+    
     mp_.exchange_halos_2d( halo_buffer_.data(), grid_.nx, grid_.ny, grid_.ng, conservative_variable_count );
 
     for ( std::size_t cell = 0; cell < state.size(); ++cell )
+    {
         state[cell] = unpack_state( halo_buffer_.data() + cell * conservative_variable_count );
+    }
 
     // Keep exchanged ghost values at MPI interfaces; apply physical conditions only at global edges.
     const auto nbr = mp_.neighbors();
@@ -244,6 +263,10 @@ void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
 }
 
 
+// Check interior states and throw with cell coordinates on failure.
+//
+// field (in) - ghosted conservative field; only interior cells contribute to this operation
+//
 // Check every interior state; report global cell indices and conserved values on failure.
 void Solver::validate_interior( const std::vector<Conservative_vector> &field ) const
 {
@@ -275,6 +298,10 @@ void Solver::validate_interior( const std::vector<Conservative_vector> &field ) 
 }
 
 
+// Compute the CFL time step using the global maximum acoustic signal rate.
+//
+// field (in) - ghosted conservative field; only interior cells contribute to this operation
+//
 // Compute a common MPI time step: dt = CFL / max((abs(u) + c)/dx + (abs(v) + c)/dy).
 double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
 {
@@ -288,13 +315,16 @@ double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
         {
             EvaluatedState primitive{};
 
-            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ),
-                "calc_flow_variables" );
+            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ), "calc_flow_variables" );
             const double s = ( std::abs( primitive.x_velocity ) + primitive.sound_speed ) / dx +
-                             ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
+                ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
+            
             if ( !std::isfinite( s ) || s <= 0.0 )
+            {
                 throw std::runtime_error( "CFL: invalid spectral radius at cell (" + std::to_string( grid_.i_beg + i ) +
-                                          "," + std::to_string( grid_.j_beg + j ) + ")" );
+                                         "," + std::to_string( grid_.j_beg + j ) + ")" );
+            }
+            
             max_s = std::max( max_s, s );
         }
     }
@@ -312,18 +342,19 @@ double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
 }
 
 
+// Compute the flux divergence; the input ghost cells must already be valid.
+//
+// state (in) - conserved variables in the ghosted cell field
+// output_rhs (out) - conservative residual on the ghosted cell layout
+//
 // Compute the finite-volume residual: RHS = -(F_right - F_left)/dx - (G_top - G_bottom)/dy.
-// state (in) - local conservative field with valid ghost cells
-// output_rhs (out) - preallocated residual array; ghost entries are set to zero
 void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &output_rhs )
 {
     std::fill( output_rhs.begin(), output_rhs.end(), Conservative_vector{} );
 
     // 1. Reconstruct face states from the field with valid ghost cells.
-    recon_.reconstruct_faces_x( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.left_state,
-        faces_.x.right_state );
-    recon_.reconstruct_faces_y( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.left_state,
-        faces_.y.right_state );
+    recon_.reconstruct_faces_x( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.left_state, faces_.x.right_state );
+    recon_.reconstruct_faces_y( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.left_state, faces_.y.right_state );
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
@@ -347,6 +378,7 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
 
             Flux_vector flux{};
             const ReturnCodes code = calc_numerical_flux( flux_scheme_, left, right, dir, gamma_, flux );
+            
             if ( code != SUCCESS )
             {
                 throw std::runtime_error( "numerical flux: error code " + std::to_string( static_cast<int>( code ) ) );
@@ -399,14 +431,10 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
             // 3. Subtract outgoing fluxes from incoming fluxes to form the cell residual.
             Conservative_vector rhs{};
 
-            rhs.specific_mass =
-                ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
-            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx -
-                                      ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
-            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx -
-                                      ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
-            rhs.specific_energy =
-                ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
+            rhs.specific_mass = ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
+            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx - ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
+            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx - ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
+            rhs.specific_energy = ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
 
             if ( !is_finite_state( rhs ) )
             {
@@ -419,6 +447,10 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
 }
 
 
+// Check whether the step meets the configured output interval.
+//
+// step (in) - current time-step index
+//
 // Check the step against the configured output interval; non-positive intervals disable step output.
 bool Solver::should_write_step_output( const int step ) const
 {
@@ -426,6 +458,11 @@ bool Solver::should_write_step_output( const int step ) const
 }
 
 
+// Write scheduled merged VTK output.
+//
+// step (in) - current time-step index
+// t (in) - current simulation time
+//
 // Write a merged snapshot when the step meets the output interval.
 void Solver::write_output( int step, double t ) const
 {
@@ -442,6 +479,10 @@ void Solver::write_output( int step, double t ) const
 }
 
 
+// Write the final merged VTK output when enabled.
+//
+// t (in) - current simulation time
+//
 // Write the final merged snapshot when final output is enabled.
 void Solver::write_final_output( const double t ) const
 {
@@ -460,6 +501,11 @@ void Solver::write_final_output( const double t ) const
 }
 
 
+// Refresh ghost cells and process scheduled output.
+//
+// step (in) - current time-step index
+// t (in) - current simulation time
+//
 // Refresh ghost cells and process scheduled output for the current step.
 void Solver::process_regular_output_phase( const int step, const double t )
 {
@@ -468,6 +514,8 @@ void Solver::process_regular_output_phase( const int step, const double t )
 }
 
 
+// Advance the initialized solution and process scheduled and final output.
+//
 // Advance the solution to final_time_, checking each stage and completed step.
 void Solver::run()
 {

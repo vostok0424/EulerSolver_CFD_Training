@@ -4,8 +4,9 @@
 #include <cctype>
 
 // Check whether all values in the array are finite.
-// values (in) - array with at least count entries
-// count (in) - number of entries to check
+//
+// values (in) - array of numeric values to inspect
+// count (in) - number of array entries to inspect
 bool all_values_finite( const double *values, std::size_t count )
 {
     for ( std::size_t i = 0; i < count; ++i )
@@ -21,6 +22,8 @@ bool all_values_finite( const double *values, std::size_t count )
 
 
 // Check whether all four conservative components are finite.
+//
+// state (in) - conserved variables of the flow state
 bool is_finite_state( const Conservative_vector &state )
 {
     return all_values_finite( state_components( state ).data(), conservative_variable_count );
@@ -28,6 +31,8 @@ bool is_finite_state( const Conservative_vector &state )
 
 
 // Check whether all four flux components are finite.
+//
+// flux (in) - flux vector of conserved variables
 bool is_finite_flux( const Flux_vector &flux )
 {
     return all_values_finite( flux_components( flux ).data(), conservative_variable_count );
@@ -35,8 +40,9 @@ bool is_finite_flux( const Flux_vector &flux )
 
 
 // Throw with the operation name and numeric return code when a calculation fails.
-// code (in) - return code from the calculation
-// operation (in) - operation name included in the exception
+//
+// code (in) - operation status; SUCCESS indicates valid numerical outputs
+// operation (in) - flow operation name included in the failure report
 void require_success( ReturnCodes code, const char *operation )
 {
     if ( code != SUCCESS )
@@ -48,6 +54,8 @@ void require_success( ReturnCodes code, const char *operation )
 
 
 // Remove leading and trailing whitespace from a string.
+//
+// value (in) - input text copied before transformation
 std::string trim_string( std::string value )
 {
     std::size_t first = 0;
@@ -70,6 +78,8 @@ std::string trim_string( std::string value )
 
 
 // Convert a string to lowercase using the current character locale.
+//
+// value (in) - input text copied before transformation
 std::string to_lowercase( std::string value )
 {
     for ( std::size_t i = 0; i < value.size(); ++i )
@@ -82,6 +92,10 @@ std::string to_lowercase( std::string value )
 
 
 // Check finite primitive variables and positive density and pressure.
+//
+// state (in) - conserved variables of the flow state
+//
+// Returns SUCCESS when the state is valid, otherwise the numerical failure code.
 static ReturnCodes check_primitive( const Primitive_vector &state )
 {
     if ( !std::isfinite( state.density ) || !std::isfinite( state.x_velocity ) || !std::isfinite( state.y_velocity ) ||
@@ -105,9 +119,12 @@ static ReturnCodes check_primitive( const Primitive_vector &state )
 
 
 // Compute density, velocity and pressure from the conserved variables.
-// state (in) - conserved variables per unit volume
-// gamma (in) - finite heat-capacity ratio greater than one
-// output (out) - density, velocity and pressure; assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - computed primitive state
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_primitive_variables( const Conservative_vector &state, double gamma, Primitive_vector &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -165,9 +182,12 @@ ReturnCodes calc_primitive_variables( const Conservative_vector &state, double g
 
 
 // Compute the conserved variables from density, velocity and pressure.
-// primitive (in) - density, x/y velocity and pressure
-// gamma (in) - finite heat-capacity ratio greater than one
-// output (out) - conserved variables per unit volume; assigned only on SUCCESS
+//
+// primitive (in) - density, velocity and pressure of the flow state
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - computed conservative state
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_conservative_variables( const Primitive_vector &primitive, double gamma, Conservative_vector &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -212,9 +232,12 @@ ReturnCodes calc_conservative_variables( const Primitive_vector &primitive, doub
 
 
 // Compute the ideal-gas speed of sound.
-// primitive (in) - finite primitive state with positive density and pressure
-// gamma (in) - finite heat-capacity ratio greater than one
-// output (out) - speed of sound; assigned only on SUCCESS
+//
+// primitive (in) - density, velocity and pressure of the flow state
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - computed speed of sound
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_sound_velocity( const Primitive_vector &primitive, double gamma, double &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -245,9 +268,12 @@ ReturnCodes calc_sound_velocity( const Primitive_vector &primitive, double gamma
 
 
 // Compute primitive variables, sound speed and specific total enthalpy.
-// state (in) - conserved variables per unit volume
-// gamma (in) - finite heat-capacity ratio greater than one
-// output (out) - primitive variables, sound speed and enthalpy per unit mass; assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// gamma (in) - ideal-gas heat-capacity ratio
+// output (out) - computed primitive variables, sound speed and specific total enthalpy
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -291,8 +317,11 @@ ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma,
 
 
 // Compute the squared velocity magnitude from the conserved variables.
-// state (in) - finite conserved variables with positive density
-// output (out) - x_velocity squared plus y_velocity squared; assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// output (out) - computed squared velocity magnitude
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes velocity_squared( const Conservative_vector &state, double &output )
 {
     if ( !all_values_finite( state_components( state ).data(), conservative_variable_count ) )
@@ -320,9 +349,12 @@ ReturnCodes velocity_squared( const Conservative_vector &state, double &output )
 
 
 // Recover pressure from the conserved variables.
-// state (in) - conserved variables per unit volume
+//
+// state (in) - conserved variables of the flow state
 // gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - pressure; assigned only on SUCCESS
+// output (out) - computed pressure
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes pressure_from_conservative( const Conservative_vector &state, double gamma, double &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -343,8 +375,11 @@ ReturnCodes pressure_from_conservative( const Conservative_vector &state, double
 
 
 // Compute internal energy per unit mass by subtracting kinetic energy.
-// state (in) - conserved variables per unit volume
-// output (out) - positive internal energy per unit mass; assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// output (out) - computed internal energy per unit mass
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes specific_internal_energy_from_conservative( const Conservative_vector &state, double &output )
 {
     double speed2 = 0.0;
@@ -367,9 +402,13 @@ ReturnCodes specific_internal_energy_from_conservative( const Conservative_vecto
 
 
 // Compute the Euler flux in the selected coordinate direction.
-// state, primitive (in) - conserved state and cached flow variables from that same state
-// dir (in) - flux direction: 0 for x, 1 for y
-// output (out) - physical flux; assigned only on SUCCESS
+//
+// state (in) - conserved variables of the flow state
+// primitive (in) - cached primitive variables, sound speed and enthalpy from the same conservative state
+// dir (in) - flux calculation direction: x_direction or y_direction
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_physical_flux( const Conservative_vector &state, const EvaluatedState &primitive, int dir,
     Flux_vector &output )
 {
@@ -441,10 +480,13 @@ ReturnCodes calc_physical_flux( const Conservative_vector &state, const Evaluate
 
 
 // Compute the Euler flux in the selected coordinate direction.
-// primitive (in) - density, velocity and pressure
-// dir (in) - flux direction: 0 for x, 1 for y
+//
+// primitive (in) - density, velocity and pressure of the flow state
+// dir (in) - flux calculation direction: x_direction or y_direction
 // gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - physical flux; assigned only on SUCCESS
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_physical_flux( const Primitive_vector &primitive, int dir, double gamma, Flux_vector &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
@@ -506,10 +548,13 @@ ReturnCodes calc_physical_flux( const Primitive_vector &primitive, int dir, doub
 
 
 // Compute the Euler flux in the selected coordinate direction.
-// state (in) - conserved variables per unit volume
-// direction (in) - flux direction: 0 for x, 1 for y
+//
+// state (in) - conserved variables of the flow state
+// direction (in) - coordinate direction: x_direction or y_direction
 // gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - physical flux; assigned only on SUCCESS
+// output (out) - flux vector of conserved variables in the selected direction
+//
+// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_physical_flux( const Conservative_vector &state, int direction, double gamma, Flux_vector &output )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )

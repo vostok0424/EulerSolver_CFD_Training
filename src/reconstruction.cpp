@@ -9,83 +9,6 @@
 #include <array>
 
 
-// Read reconstruction settings.
-
-// Read the reconstruction scheme: firstOrder, muscl or weno5.
-static ReconstructionScheme parse_scheme( const std::string &s )
-{
-    const std::string v = trim_string( s );
-
-    if ( v.empty() || v == "firstOrder" )
-    {
-        return ReconstructionScheme::first_order;
-    }
-
-    if ( v == "muscl" )
-    {
-        return ReconstructionScheme::muscl;
-    }
-
-    if ( v == "weno5" )
-    {
-        return ReconstructionScheme::weno5;
-    }
-
-    throw std::runtime_error( "reconstruction.scheme unsupported: " + v );
-}
-
-
-// Read the MUSCL limiter: none, minmod or vanleer.
-static SlopeLimiter parse_limiter( const std::string &s )
-{
-    const std::string v = trim_string( s );
-
-    if ( v.empty() || v == "vanleer" )
-    {
-        return SlopeLimiter::van_leer;
-    }
-
-    if ( v == "none" )
-    {
-        return SlopeLimiter::none;
-    }
-
-    if ( v == "minmod" )
-    {
-        return SlopeLimiter::minmod;
-    }
-
-    throw std::runtime_error( "reconstruction.limiter unsupported: " + v + " (supported: none|minmod|vanleer)" );
-}
-
-
-// Read the reconstruction scheme, MUSCL limiter and positive WENO epsilon.
-ReconstructionOptions read_reconstruction_options( const Cfg &cfg )
-{
-    ReconstructionOptions opt;
-
-    opt.scheme = parse_scheme( cfg.get_string( "reconstruction.scheme", "firstOrder" ) );
-    opt.limiter = parse_limiter( cfg.get_string( "reconstruction.limiter", "vanleer" ) );
-
-    opt.eps = cfg.get_double( "reconstruction.eps", default_weno_epsilon );
-
-    const std::string legacy_vars = trim_string( cfg.get_string( "reconstruction.variables", "" ) );
-
-    if ( !legacy_vars.empty() && legacy_vars != "characteristic" )
-    {
-        throw std::runtime_error(
-            "reconstruction.variables is deprecated; only characteristic reconstruction is supported" );
-    }
-
-    if ( !std::isfinite( opt.eps ) || opt.eps <= 0.0 )
-    {
-        throw std::runtime_error( "reconstruction.eps must be > 0" );
-    }
-
-    return opt;
-}
-
-
 // Shared characteristic projection.
 
 // Store the right and left eigenvector matrices of the 2D conservative Euler system.
@@ -97,9 +20,16 @@ struct Eigen4
 
 
 // Recover the characteristic reference state from the arithmetic mean of adjacent conserved states.
-// ulc, urc (in) - valid adjacent conservative states
+//
+// ulc (in) - conserved variables in the cell to the left of the interface
+// urc (in) - conserved variables in the cell to the right of the interface
 // gamma (in) - ideal-gas heat-capacity ratio
-// rho0, u0, v0, p0, h0, c0 (out) - reference density, velocities, pressure, enthalpy and sound speed
+// rho0 (out) - density at the characteristic reference state
+// u0 (out) - x velocity at the characteristic reference state
+// v0 (out) - y velocity at the characteristic reference state
+// p0 (out) - pressure at the characteristic reference state
+// h0 (out) - specific total enthalpy at the characteristic reference state
+// c0 (out) - sound speed at the characteristic reference state
 static inline void face_state_2d( const Conservative_vector &ulc, const Conservative_vector &urc, double gamma,
     double &rho0, double &u0, double &v0, double &p0, double &h0, double &c0 )
 {
@@ -131,6 +61,13 @@ static inline void face_state_2d( const Conservative_vector &ulc, const Conserva
 
 
 // Compute the left and right conservative eigenvector matrices for an x-normal face.
+//
+// u (in) - x velocity of the characteristic reference state
+// v (in) - y velocity of the characteristic reference state
+// specific_total_enthalpy (in) - total enthalpy per unit mass of the reference state
+// c (in) - sound speed of the characteristic reference state
+// gamma (in) - ideal-gas heat-capacity ratio
+// e (out) - left and right characteristic eigenvector matrices
 static inline void build_eigen2_dconservative_x( double u, double v, double specific_total_enthalpy, double c,
     double gamma, Eigen4 &e )
 {
@@ -183,6 +120,13 @@ static inline void build_eigen2_dconservative_x( double u, double v, double spec
 
 
 // Compute the left and right conservative eigenvector matrices for a y-normal face.
+//
+// u (in) - x velocity of the characteristic reference state
+// v (in) - y velocity of the characteristic reference state
+// specific_total_enthalpy (in) - total enthalpy per unit mass of the reference state
+// c (in) - sound speed of the characteristic reference state
+// gamma (in) - ideal-gas heat-capacity ratio
+// e (out) - left and right characteristic eigenvector matrices
 static inline void build_eigen2_dconservative_y( double u, double v, double specific_total_enthalpy, double c,
     double gamma, Eigen4 &e )
 {
@@ -235,6 +179,10 @@ static inline void build_eigen2_dconservative_y( double u, double v, double spec
 
 
 // Map characteristic components back to conserved variables with the right eigenvector matrix.
+//
+// e (in) - left and right characteristic eigenvector matrices
+// w (in) - characteristic components in conservative-component order
+// q (out) - conservative state represented in the characteristic basis
 static inline void reconstruct_conservative_from_char_2d( const Eigen4 &e, const double *w, Conservative_vector &q )
 {
     std::array<double, conservative_variable_count> components{};
@@ -250,6 +198,10 @@ static inline void reconstruct_conservative_from_char_2d( const Eigen4 &e, const
 
 
 // Project a conservative state onto the four characteristic components.
+//
+// e (in) - left and right characteristic eigenvector matrices
+// q (in) - conservative state represented in the characteristic basis
+// w (out) - characteristic components in conservative-component order
 static inline void project_char4( const Eigen4 &e, const Conservative_vector &q, double w[conservative_variable_count] )
 {
     for ( std::size_t s = 0; s < conservative_variable_count; ++s )
@@ -263,6 +215,10 @@ static inline void project_char4( const Eigen4 &e, const Conservative_vector &q,
 
 
 // Compute the row-major index of a cell in the ghosted array.
+//
+// i (in) - cell or face index along x
+// j (in) - cell or face index along y
+// nx_tot (in) - number of cells along x including ghost cells
 static inline int idx2( int i, int j, int nx_tot )
 {
     return i + nx_tot * j;
@@ -272,6 +228,14 @@ static inline int idx2( int i, int j, int nx_tot )
 // 1. First-order reconstruction.
 
 // Copy adjacent cell states to the left and right sides of each x-face.
+//
+// state (in) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// nx_tot (in) - number of cells along x including ghost cells
+// ulx (out) - left conservative states on x-normal faces
+// urx (out) - right conservative states on x-normal faces
 static void reconstruct_first_order_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     int nx_tot, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx )
 {
@@ -289,6 +253,14 @@ static void reconstruct_first_order_x( const std::vector<Conservative_vector> &s
 
 
 // Copy adjacent cell states to the left and right sides of each y-face.
+//
+// state (in) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
+// nx_tot (in) - number of cells along x including ghost cells
+// uly (out) - left conservative states on y-normal faces
+// ury (out) - right conservative states on y-normal faces
 static void reconstruct_first_order_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     int nx_tot, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury )
 {
@@ -308,6 +280,8 @@ static void reconstruct_first_order_y( const std::vector<Conservative_vector> &s
 // 2. Second-order MUSCL reconstruction.
 
 // Return the sign of x: -1, 0 or 1.
+//
+// x (in) - scalar argument of the reconstruction helper
 static inline double sgn( double x )
 {
     return ( x > 0 ) - ( x < 0 );
@@ -315,6 +289,9 @@ static inline double sgn( double x )
 
 
 // Return the smaller same-sign slope, or zero when the slopes have opposite signs or include zero.
+//
+// a (in) - first scalar slope candidate
+// b (in) - second scalar slope candidate
 static inline double minmod( double a, double b )
 {
     if ( a * b <= 0.0 )
@@ -327,6 +304,9 @@ static inline double minmod( double a, double b )
 
 
 // Compute the van Leer limited slope; return zero when the slopes have opposite signs or include zero.
+//
+// a (in) - first scalar slope candidate
+// b (in) - second scalar slope candidate
 static inline double vanleer( double a, double b )
 {
     if ( a * b <= 0.0 )
@@ -339,6 +319,10 @@ static inline double vanleer( double a, double b )
 
 
 // Compute the MUSCL slope using the selected limiter.
+//
+// lim (in) - selected slope limiter
+// dl (in) - difference between the center and left stencil values
+// dr (in) - difference between the right and center stencil values
 static inline double apply_limiter( SlopeLimiter lim, double dl, double dr )
 {
     switch ( lim )
@@ -356,10 +340,12 @@ static inline double apply_limiter( SlopeLimiter lim, double dl, double dr )
 
 
 // Reconstruct both face states with second-order MUSCL slopes in characteristic space.
-// eig (in) - eigensystem at the conservative arithmetic-mean state
-// limiter (in) - slope limiter
-// wc (in) - four cells of characteristic components, ordered along the face normal
-// ulf, urf (out) - left and right conservative face states
+//
+// eig (in) - characteristic eigenvectors at the face reference state
+// limiter (in) - selected MUSCL slope limiter
+// wc (in) - cell stencil of characteristic components ordered along the face normal
+// ulf (out) - left conservative state reconstructed at the interface
+// urf (out) - right conservative state reconstructed at the interface
 static inline void reconstruct_face_musclfrom_char_cache( const Eigen4 &eig, SlopeLimiter limiter,
     const double ( &wc )[4][conservative_variable_count], Conservative_vector &ulf, Conservative_vector &urf )
 {
@@ -391,6 +377,8 @@ static inline void reconstruct_face_musclfrom_char_cache( const Eigen4 &eig, Slo
 // 3. Fifth-order WENO reconstruction.
 
 // Compute the inverse-square factor used in Jiang-Shu WENO weights.
+//
+// x (in) - scalar argument of the reconstruction helper
 static inline double inv_pow_weno( double x )
 {
     return 1.0 / ( x * x );
@@ -398,10 +386,17 @@ static inline double inv_pow_weno( double x )
 
 
 // Compute and normalize the three Jiang-Shu nonlinear weights.
-// b0, b1, b2 (in) - smoothness indicators
-// eps (in) - positive epsilon in the inverse-square weights
-// g0, g1, g2 (in) - linear weights
-// w0, w1, w2 (out) - normalized nonlinear weights
+//
+// b0 (in) - first Jiang-Shu smoothness indicator
+// b1 (in) - second Jiang-Shu smoothness indicator
+// b2 (in) - third Jiang-Shu smoothness indicator
+// eps (in) - positive Jiang-Shu weight regularization parameter
+// g0 (in) - first optimal linear weight
+// g1 (in) - second optimal linear weight
+// g2 (in) - third optimal linear weight
+// w0 (out) - first normalized nonlinear weight
+// w1 (out) - second normalized nonlinear weight
+// w2 (out) - third normalized nonlinear weight
 static inline void weno5_weights( double b0, double b1, double b2, double eps, double g0, double g1, double g2,
     double &w0, double &w1, double &w2 )
 {
@@ -419,6 +414,13 @@ static inline void weno5_weights( double b0, double b1, double b2, double eps, d
 
 
 // Compute the left face value from the five-cell stencil centered on the left cell.
+//
+// qim2 (in) - scalar stencil value two cells to the left
+// qim1 (in) - scalar stencil value one cell to the left
+// qi (in) - scalar stencil value at the center
+// qip1 (in) - scalar stencil value one cell to the right
+// qip2 (in) - scalar stencil value two cells to the right
+// eps (in) - positive Jiang-Shu weight regularization parameter
 static inline double weno5_left( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
 {
     // Evaluate the three third-order candidate polynomials at the face.
@@ -451,6 +453,13 @@ static inline double weno5_left( double qim2, double qim1, double qi, double qip
 
 
 // Compute the right face value by reversing the five-cell stencil.
+//
+// qim2 (in) - scalar stencil value two cells to the left
+// qim1 (in) - scalar stencil value one cell to the left
+// qi (in) - scalar stencil value at the center
+// qip1 (in) - scalar stencil value one cell to the right
+// qip2 (in) - scalar stencil value two cells to the right
+// eps (in) - positive Jiang-Shu weight regularization parameter
 static inline double weno5_right( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
 {
     return weno5_left( qip2, qip1, qi, qim1, qim2, eps );
@@ -458,10 +467,12 @@ static inline double weno5_right( double qim2, double qim1, double qi, double qi
 
 
 // Reconstruct both face states from a six-cell characteristic stencil using WENO5.
-// eig (in) - eigensystem at the conservative arithmetic-mean state
-// eps (in) - positive epsilon for the Jiang-Shu weights
-// wc (in) - six cells of characteristic components, ordered along the face normal
-// ulf, urf (out) - left and right conservative face states
+//
+// eig (in) - characteristic eigenvectors at the face reference state
+// eps (in) - positive Jiang-Shu weight regularization parameter
+// wc (in) - cell stencil of characteristic components ordered along the face normal
+// ulf (out) - left conservative state reconstructed at the interface
+// urf (out) - right conservative state reconstructed at the interface
 static inline void reconstruct_face_weno5_from_char_cache( const Eigen4 &eig, double eps,
     const double ( &wc )[6][conservative_variable_count], Conservative_vector &ulf, Conservative_vector &urf )
 {
@@ -479,17 +490,23 @@ static inline void reconstruct_face_weno5_from_char_cache( const Eigen4 &eig, do
 }
 
 
-// Store the configured reconstruction scheme and its parameters.
-Reconstruction2D::Reconstruction2D( const Cfg &cfg ) : opt_( read_reconstruction_options( cfg ) )
+// Store the supplied reconstruction options.
+//
+// options (in) - parsed options consumed by this module
+Reconstruction2D::Reconstruction2D( const ReconstructionOptions &options ) : opt_( options )
 {
 }
 
 
 // Compute left and right conservative states on all (nx + 1) * ny x-faces.
-// state (in) - local row-major conservative field with valid ghost cells
-// nx, ny, ng (in) - interior cell counts and ghost width
+//
+// state (in) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
 // gamma (in) - ideal-gas heat-capacity ratio
-// ulx, urx (out) - left and right conservative face states
+// ulx (out) - left conservative states on x-normal faces
+// urx (out) - right conservative states on x-normal faces
 void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const
 {
@@ -583,10 +600,14 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
 
 
 // Compute left and right conservative states on all nx * (ny + 1) y-faces.
-// state (in) - local row-major conservative field with valid ghost cells
-// nx, ny, ng (in) - interior cell counts and ghost width
+//
+// state (in) - conserved variables in the ghosted cell field
+// nx (in) - number of interior cells along x
+// ny (in) - number of interior cells along y
+// ng (in) - number of ghost-cell layers on each side
 // gamma (in) - ideal-gas heat-capacity ratio
-// uly, ury (out) - left and right conservative face states
+// uly (out) - left conservative states on y-normal faces
+// ury (out) - right conservative states on y-normal faces
 void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const
 {

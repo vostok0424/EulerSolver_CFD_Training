@@ -196,7 +196,7 @@ EulerSolver_CFD_Training/
 - `include/structures.hpp`    named states, state algebra, packing, and grid metadata
 - `src/thermodynamics.cpp`    ideal-gas EOS closure
 - `src/common_functions.cpp` common flow-state operations and text/numeric utilities
-- `src/cfg.cpp`               key-value configuration parser
+- `src/read_parameters.cpp`   configuration parsing and centralized control reading
 
 ## Requirements
 
@@ -253,17 +253,14 @@ By default, the build produces:
 
 ## Run
 
-The executable accepts an optional case file path.
+The executable requires an explicit case file path.
 
 ```bash
 ./solver cases/case2d.cfg
 ```
 
-If no configuration file is provided, the solver defaults to:
-
-```bash
-cases/case2d.cfg
-```
+If no case file is provided, or extra arguments are supplied, the solver prints
+`Usage: ./solver <case.cfg>` and exits with a nonzero status. There is no default case file.
 
 ### Important note about MPI decomposition
 
@@ -540,8 +537,8 @@ converting failed return codes into exceptions. State conversions check physical
 site. `flux.cpp` contains Riemann/numerical-flux algorithms and reuses the common
 physical flux functions.
 `constants.hpp` contains fixed conventions, not run settings.
-Module-specific boundary/reconstruction options and face workspaces remain
-with their owning modules. Functions and variables use snake_case. The shared
+Parameter structures and their supporting enums are defined in `structures.hpp`;
+face workspaces remain with their owning modules. Functions and variables use snake_case. The shared
 vector types use the reference-project names `Primitive_vector`,
 `Conservative_vector` and `Flux_vector`; other type names retain PascalCase.
 Configuration keys and VTK field names remain unchanged.
@@ -549,7 +546,7 @@ Configuration keys and VTK field names remain unchanged.
 Compile and run the standalone state/serialization checks:
 
 ```bash
-c++ -std=c++17 -Wall -Wextra -pedantic-errors -Iinclude tests/test_state_types.cpp src/thermodynamics.cpp src/common_functions.cpp -o /tmp/euler_state_types_test
+c++ -std=c++17 -Wall -Wextra -pedantic-errors -Iinclude tests/test_state_types.cpp src/structures.cpp src/thermodynamics.cpp src/common_functions.cpp -o /tmp/euler_state_types_test
 /tmp/euler_state_types_test
 ```
 
@@ -636,7 +633,8 @@ density. Direction arguments still accept integers so invalid values can follow
 the existing error paths.
 
 Algorithm settings stay with their modules: Godunov iteration controls in
-`flux.cpp` and the default WENO epsilon in `reconstruction.hpp`. WENO epsilon is
+`flux.cpp`; the default WENO epsilon accompanies `ReconstructionOptions` in
+`structures.hpp`. WENO epsilon is
 a weight regularization parameter. Physical-state checks remain in the flow
 calculations and reject invalid inputs without repairing them. MPI tags remain
 in the MPI module. Gamma, CFL and end time remain case
@@ -663,3 +661,42 @@ Numerical outputs are committed only on success. No pressure repair or alternate
 flux is applied after failure. The solver reports the selected scheme, numeric
 code and global face coordinates; its existing step/stage reporting and MPI-abort
 path remain in place.
+
+
+## Centralized parameter reading
+
+`read_parameters(filename, parameters, error)` in `read_parameters.cpp` reads the case once
+and directly fills `CaseParameters`, grouping mesh, solver, reconstruction, boundary,
+and initialization settings. All configuration key lookups and their defaults
+live in this module. `main` uses the dimension and MPI layout and passes the
+parsed settings to `Solver`. Reconstruction, boundary filling and setFields
+consume typed settings without accessing the configuration parser.
+
+Numerical operations and checks that depend on the local MPI mesh remain in
+their owning modules. Omitted initialization-region bounds still use the local
+domain bounds. Side-specific inlet values still select a complete inlet state,
+rather than mixing missing components with the global inlet state.
+
+Build with `bash make.sh` and check centralized parameter reading with
+`python3 tests/test_parameters.py`. To compare the five valid cases against an
+executable saved before this refactor, add `--reference /path/to/old_solver`;
+their VTK files must match byte for byte. These checks run in serial.
+
+All parameter structures (`GridParameters`, `SolverParameters`, `CaseParameters`,
+`ReconstructionOptions`, `BoundarySide2D`, `BoundaryConditions2D`,
+`SetFieldsRegion`, and `SetFieldsOptions`) and their supporting enums live in
+`include/structures.hpp`. The reader header declares configuration-reading
+interfaces; module headers declare their computational interfaces.
+
+The reading entry point returns `ReturnCodes` and writes a diagnostic string
+containing the filename, line (when available), key and reason. Internal reading
+helpers are file-local `void` functions using output references. There is no
+public parser class. Parameters and initialization regions are filled directly;
+on failure the structure may be partially assigned and callers must stop without
+using it. No temporary parameter structure or rollback is used.
+
+`structures.hpp` contains shared type definitions and function declarations.
+State algebra, serialization, structure member functions and reconstruction
+queries are implemented in `src/structures.cpp`, which must be linked in
+standalone checks that use those functions. The header has no inline function
+definitions; `default_weno_epsilon` is a header-local `constexpr` value.
