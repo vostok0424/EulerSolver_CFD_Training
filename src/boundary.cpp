@@ -10,7 +10,7 @@
 // Check whether the boundary reflects normal momentum.
 //
 // t (in) - physical boundary type
-static inline bool is_wall_like( BoundaryType t )
+static bool is_wall_like( BoundaryType t )
 {
     return ( t == BoundaryType::slip_wall || t == BoundaryType::symmetry );
 }
@@ -22,7 +22,7 @@ static inline bool is_wall_like( BoundaryType t )
 // pout (in) - prescribed positive outlet pressure
 // normal_dir (in) - outlet-normal coordinate direction
 // gamma (in) - ideal-gas heat-capacity ratio
-static inline Conservative_vector outlet_state_2d( const Conservative_vector &uin, double pout, int normal_dir,
+static Conservative_vector outlet_state_2d( const Conservative_vector &uin, double pout, int normal_dir,
     double gamma )
 {
     Primitive_vector primitive{};
@@ -64,14 +64,21 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
 {
     const double gamma = bc.gamma;
     const int nx_tot = nx + 2 * ng;
+    const int ny_tot = ny + 2 * ng;
     auto idx = [&]( int i, int j )
     {
         return i + nx_tot * j;
     };
 
-    // Fill left/right ghosts for interior rows; walls reverse x-momentum.
-    for ( int j = ng; j < ny + ng; ++j )
+    // Fill left/right ghosts also in exchanged y halos. Physical y corners are filled below.
+    for ( int j = 0; j < ny_tot; ++j )
     {
+        if ( ( j < ng && bc.bottom.type != BoundaryType::internal ) ||
+             ( j >= ny + ng && bc.top.type != BoundaryType::internal ) )
+        {
+            continue;
+        }
+
         if ( bc.left.type == BoundaryType::internal )
         {
         }
@@ -178,8 +185,9 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         {
             Conservative_vector uin{};
 
-            require_success( calc_conservative_variables( bc.bottom.inlet, gamma, uin ), "calc_conservative_variables" );
-            
+            require_success( calc_conservative_variables( bc.bottom.inlet, gamma, uin ),
+                "calc_conservative_variables" );
+
             for ( int g = 0; g < ng; ++g )
             {
                 state[idx( i, ng - 1 - g )] = uin;

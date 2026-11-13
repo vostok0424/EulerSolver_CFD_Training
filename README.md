@@ -90,7 +90,7 @@ The current limiter options are:
 - vanLeer
 
 Important notes:
-- reconstruction is now characteristic-based only
+- normal MUSCL/WENO reconstruction is characteristic-based
 - characteristic eigenvectors are evaluated at the arithmetic mean of the adjacent conservative states
 - `reconstruction.variables` is kept only as a compatibility key
 - if `reconstruction.variables` is provided, it should be `characteristic`
@@ -99,6 +99,43 @@ Important notes:
 `reconstruction.eps` controls the small regularization parameter.
 Reconstruction uses the selected scheme directly, without positivity repair or automatic first-order fallback.
 The solver does not apply a positivity-preserving flux limiter.
+
+For `weno5`, normal reconstruction produces transverse face averages. A second,
+componentwise WENO-JS reconstruction converts five such averages to point states
+at four transverse Gauss nodes. Both directions share the same three quadratic
+substencils, Jiang-Shu smoothness indicators and nonlinear-weight calculation.
+The transverse candidate values and optimal linear weights depend on the Gauss
+node. Four-point Gauss quadrature keeps these linear weights positive, avoiding
+negative-weight splitting at the midpoint of three-point quadrature.
+The solver evaluates the selected Riemann flux at each node and averages the
+fluxes with weights approximately `0.17392742, 0.32607258, 0.32607258, 0.17392742`.
+`reconstruction.eps` regularizes both normal and transverse WENO-JS weights.
+First-order and MUSCL retain their original single-flux paths. WENO5 still needs
+three ghost layers; its tensor stencil also needs valid diagonal ghost cells.
+MPI exchange therefore completes x halos before sending full-width y strips.
+
+This is a fifth-order spatial design for smooth two-dimensional solutions on
+uniform Cartesian meshes. WENO-JS weights can reduce accuracy near smooth
+critical points, and discontinuities reduce the local order. Physical boundary
+closures remain extrapolation/reflection/inlet/outlet treatments, without a
+fifth-order boundary accuracy guarantee. RK2 remains second order in time.
+No positivity limiter has been added by this spatial-accuracy change.
+
+Run the semi-discrete spatial regression (MPI compiler required):
+
+```bash
+bash tests/run_spatial_accuracy.sh       # one process
+bash tests/run_spatial_accuracy.sh 2 2   # four processes
+```
+
+The test integrates an analytic nonlinear periodic state into cell averages,
+compares the numerical residual with independently integrated exact face fluxes,
+and checks convergence on 16, 32, 64 and 128 squared meshes. It also checks constant
+preservation for every reconstruction scheme, transverse polynomial reconstruction
+at all four Gauss nodes in both directions, periodic diagonal halos, and mixed
+physical/MPI corners for extrapolation and slip walls. The smooth-state mean
+absolute residual errors were `2.774e-3`, `9.092e-5`, `3.305e-6` on the last three
+meshes (observed orders 4.93 and 4.78), matching between one and four processes.
 
 ## Boundary Conditions
 

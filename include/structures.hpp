@@ -17,6 +17,10 @@ struct Conservative_vector
 };
 
 
+// Four Gauss points in increasing transverse coordinate; weights integrate a face average.
+using FaceQuadratureState = std::array<Conservative_vector, 4>;
+
+
 // Store density, x/y velocity and pressure.
 struct Primitive_vector
 {

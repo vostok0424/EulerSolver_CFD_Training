@@ -19,8 +19,8 @@
 // Store reconstructed left/right states and numerical fluxes for one face-normal direction.
 struct DirectionalFaceBuffers2D
 {
-    std::vector<Conservative_vector> left_state;
-    std::vector<Conservative_vector> right_state;
+    std::vector<FaceQuadratureState> left_state;
+    std::vector<FaceQuadratureState> right_state;
     std::vector<Flux_vector> flux;
 
     // Resize the face workspace for the supplied face count or interior mesh dimensions.

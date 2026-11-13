@@ -128,7 +128,8 @@ static void write_merged_vtk_file_2d( const MpiParallel &mp, const std::string &
 //
 // parameters (in) - typed computational experiment parameters
 // mp (in) - MPI topology and communication helper; must outlive the solver
-Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp ) : mp_( mp ), recon_( parameters.reconstruction )
+Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
+    : mp_( mp ), recon_( parameters.reconstruction )
 {
     // 1. Set the global mesh and verify the selected reconstruction stencil fits the ghost width.
     grid_.nx_global = parameters.grid.nx;
@@ -196,7 +197,8 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp ) : mp_(
     // 5. Allocate the ghosted cell fields and reusable face arrays.
     grid_.nx_tot = grid_.nx + 2 * grid_.ng;
     grid_.ny_tot = grid_.ny + 2 * grid_.ng;
-    conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
+    conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ),
+        Conservative_vector{} );
     rhs_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
     faces_.resize( grid_.nx, grid_.ny );
 
@@ -206,7 +208,8 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp ) : mp_(
     ti_ = make_time_integrator( parameters.solver.time_integrator );
 
     // 7. Initialize this rank's interior cells; ghost cells are filled before the first residual.
-    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, parameters.set_fields );
+    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_,
+        parameters.set_fields );
 }
 
 
@@ -224,7 +227,7 @@ void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
     {
         pack_state( state[cell], halo_buffer_.data() + cell * conservative_variable_count );
     }
-    
+
     mp_.exchange_halos_2d( halo_buffer_.data(), grid_.nx, grid_.ny, grid_.ng, conservative_variable_count );
 
     for ( std::size_t cell = 0; cell < state.size(); ++cell )
@@ -313,16 +316,17 @@ double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
         {
             EvaluatedState primitive{};
 
-            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ), "calc_flow_variables" );
+            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ),
+                "calc_flow_variables" );
             const double s = ( std::abs( primitive.x_velocity ) + primitive.sound_speed ) / dx +
-                ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
-            
+                             ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
+
             if ( !std::isfinite( s ) || s <= 0.0 )
             {
                 throw std::runtime_error( "CFL: invalid spectral radius at cell (" + std::to_string( grid_.i_beg + i ) +
-                                         "," + std::to_string( grid_.j_beg + j ) + ")" );
+                                          "," + std::to_string( grid_.j_beg + j ) + ")" );
             }
-            
+
             max_s = std::max( max_s, s );
         }
     }
@@ -351,14 +355,17 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
     std::fill( output_rhs.begin(), output_rhs.end(), Conservative_vector{} );
 
     // 1. Reconstruct face states from the field with valid ghost cells.
-    recon_.reconstruct_faces_x( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.x.left_state, faces_.x.right_state );
-    recon_.reconstruct_faces_y( state, grid_.nx, grid_.ny, grid_.ng, gamma_, faces_.y.left_state, faces_.y.right_state );
+    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, x_direction, faces_.x.left_state,
+        faces_.x.right_state );
+    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, y_direction, faces_.y.left_state,
+        faces_.y.right_state );
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
     // 2. Check face states and attach global face coordinates to any flux failure.
-    auto face_flux = [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j )
+    auto face_flux =
+        [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j, int q )
     {
         try
         {
@@ -376,7 +383,7 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
 
             Flux_vector flux{};
             const ReturnCodes code = calc_numerical_flux( flux_scheme_, left, right, dir, gamma_, flux );
-            
+
             if ( code != SUCCESS )
             {
                 throw std::runtime_error( "numerical flux: error code " + std::to_string( static_cast<int>( code ) ) );
@@ -393,9 +400,14 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             throw std::runtime_error( flux_name_ + " " + std::string( dir == x_direction ? "x" : "y" ) + "-face (" +
                                       std::to_string( grid_.i_beg + i ) + "," + std::to_string( grid_.j_beg + j ) +
-                                      "): " + e.what() );
+                                      ") quadrature=" + std::to_string( q ) + ": " + e.what() );
         }
     };
+
+    // Four-point Gauss weights for a face average.
+    const double quadrature_weights[4] = {
+        0.17392742256872692869, 0.32607257743127307131, 0.32607257743127307131, 0.17392742256872692869 };
+    const int count = recon_.options().scheme == ReconstructionScheme::weno5 ? 4 : 1;
 
     for ( int j = 0; j < grid_.ny; ++j )
     {
@@ -403,7 +415,18 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_x( i, j );
 
-            faces_.x.flux[f] = face_flux( faces_.x.left_state[f], faces_.x.right_state[f], x_direction, i, j );
+            Flux_vector average{};
+            for ( int q = 0; q < count; ++q )
+            {
+                const auto flux =
+                    face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q], x_direction, i, j, q );
+                const double weight = count == 1 ? 1.0 : quadrature_weights[q];
+                average.mass_flux += weight * flux.mass_flux;
+                average.x_momentum_flux += weight * flux.x_momentum_flux;
+                average.y_momentum_flux += weight * flux.y_momentum_flux;
+                average.energy_flux += weight * flux.energy_flux;
+            }
+            faces_.x.flux[f] = average;
         }
     }
 
@@ -413,7 +436,18 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_y( i, j );
 
-            faces_.y.flux[f] = face_flux( faces_.y.left_state[f], faces_.y.right_state[f], y_direction, i, j );
+            Flux_vector average{};
+            for ( int q = 0; q < count; ++q )
+            {
+                const auto flux =
+                    face_flux( faces_.y.left_state[f][q], faces_.y.right_state[f][q], y_direction, i, j, q );
+                const double weight = count == 1 ? 1.0 : quadrature_weights[q];
+                average.mass_flux += weight * flux.mass_flux;
+                average.x_momentum_flux += weight * flux.x_momentum_flux;
+                average.y_momentum_flux += weight * flux.y_momentum_flux;
+                average.energy_flux += weight * flux.energy_flux;
+            }
+            faces_.y.flux[f] = average;
         }
     }
 
@@ -429,10 +463,14 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
             // 3. Subtract outgoing fluxes from incoming fluxes to form the cell residual.
             Conservative_vector rhs{};
 
-            rhs.specific_mass = ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
-            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx - ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
-            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx - ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
-            rhs.specific_energy = ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
+            rhs.specific_mass =
+                ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
+            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx -
+                                      ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
+            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx -
+                                      ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
+            rhs.specific_energy =
+                ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
 
             if ( !is_finite_state( rhs ) )
             {
@@ -573,9 +611,9 @@ void Solver::run()
         // Cap the tolerance below the interval so distinct events cannot be merged.
         const double output_tolerance = std::min( output_time_interval_ * 0.25,
             8.0 * std::numeric_limits<double>::epsilon() * std::max( std::abs( t ), std::abs( next_output_time ) ) );
-        const bool time_output = time_mode &&
-            ( t == next_output_time ||
-                ( t == final_time_ && std::abs( t - next_output_time ) <= output_tolerance ) );
+        const bool time_output =
+            time_mode &&
+            ( t == next_output_time || ( t == final_time_ && std::abs( t - next_output_time ) <= output_tolerance ) );
         process_regular_output_phase( step, t, time_output );
         if ( time_output && t < final_time_ )
         {

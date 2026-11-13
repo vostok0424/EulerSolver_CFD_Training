@@ -3,9 +3,8 @@
 #include <cstddef>
 
 
-inline constexpr int spatial_dimension = 2;
-inline constexpr std::size_t conservative_variable_count = 4;
-
+constexpr int spatial_dimension = 2;
+constexpr std::size_t conservative_variable_count = 4;
 
 // Select the coordinate axis; integer-valued interfaces also reject invalid direction values.
 enum CoordinateDirection

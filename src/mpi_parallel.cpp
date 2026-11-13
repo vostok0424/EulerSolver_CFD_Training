@@ -10,7 +10,7 @@
 //
 // err (in) - MPI return status to check
 // where (in) - MPI operation name included in an error report
-static inline void mpi_check( int err, const char *where )
+static void mpi_check( int err, const char *where )
 {
     if ( err == MPI_SUCCESS )
         return;
@@ -409,20 +409,6 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
             "MPI_Irecv(E)" );
     }
 
-    if ( nbr_.south != MPI_PROC_NULL )
-    {
-        recv_s_.resize( strip_y_dbl );
-        mpi_check( MPI_Irecv( recv_s_.data(), strip_y_dbl, MPI_DOUBLE, nbr_.south, tag_y_s2n, cart_, &req[nreq++] ),
-            "MPI_Irecv(S)" );
-    }
-
-    if ( nbr_.north != MPI_PROC_NULL )
-    {
-        recv_n_.resize( strip_y_dbl );
-        mpi_check( MPI_Irecv( recv_n_.data(), strip_y_dbl, MPI_DOUBLE, nbr_.north, tag_y_n2s, cart_, &req[nreq++] ),
-            "MPI_Irecv(N)" );
-    }
-
     if ( nbr_.west != MPI_PROC_NULL )
     {
         // 2. Pack interior strips and start nonblocking sends.
@@ -436,6 +422,39 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         pack_cols( ng + nx_local - ng, send_e_ );
         mpi_check( MPI_Isend( send_e_.data(), strip_x_dbl, MPI_DOUBLE, nbr_.east, tag_x_w2e, cart_, &req[nreq++] ),
             "MPI_Isend(E)" );
+    }
+
+    // 3. Complete all receives and sends before reusing the buffers.
+    if ( nreq > 0 )
+    {
+        mpi_check( MPI_Waitall( nreq, req, MPI_STATUSES_IGNORE ), "MPI_Waitall(exchangeHalos2D)" );
+    }
+
+    if ( nbr_.west != MPI_PROC_NULL )
+    {
+        // 4. Copy received strips into ghost cells.
+        unpack_cols( 0, recv_w_ );
+    }
+
+    if ( nbr_.east != MPI_PROC_NULL )
+    {
+        unpack_cols( ng + nx_local, recv_e_ );
+    }
+
+    // Finish x first: y strips must contain the newly received x halos to carry diagonal cells.
+    nreq = 0;
+    if ( nbr_.south != MPI_PROC_NULL )
+    {
+        recv_s_.resize( strip_y_dbl );
+        mpi_check( MPI_Irecv( recv_s_.data(), strip_y_dbl, MPI_DOUBLE, nbr_.south, tag_y_s2n, cart_, &req[nreq++] ),
+            "MPI_Irecv(S)" );
+    }
+
+    if ( nbr_.north != MPI_PROC_NULL )
+    {
+        recv_n_.resize( strip_y_dbl );
+        mpi_check( MPI_Irecv( recv_n_.data(), strip_y_dbl, MPI_DOUBLE, nbr_.north, tag_y_n2s, cart_, &req[nreq++] ),
+            "MPI_Irecv(N)" );
     }
 
     if ( nbr_.south != MPI_PROC_NULL )
@@ -456,17 +475,6 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
     if ( nreq > 0 )
     {
         mpi_check( MPI_Waitall( nreq, req, MPI_STATUSES_IGNORE ), "MPI_Waitall(exchangeHalos2D)" );
-    }
-
-    if ( nbr_.west != MPI_PROC_NULL )
-    {
-        // 4. Copy received strips into ghost cells.
-        unpack_cols( 0, recv_w_ );
-    }
-
-    if ( nbr_.east != MPI_PROC_NULL )
-    {
-        unpack_cols( ng + nx_local, recv_e_ );
     }
 
     if ( nbr_.south != MPI_PROC_NULL )
