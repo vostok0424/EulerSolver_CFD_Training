@@ -199,7 +199,6 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     grid_.ny_tot = grid_.ny + 2 * grid_.ng;
     conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ),
         Conservative_vector{} );
-    rhs_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ), Conservative_vector{} );
     faces_.resize( grid_.nx, grid_.ny );
 
     // 6. Select the numerical flux and explicit time integrator.
@@ -363,24 +362,12 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
     const double dx = grid_.dx();
     const double dy = grid_.dy();
 
-    // 2. Check face states and attach global face coordinates to any flux failure.
+    // 2. Let the numerical flux validate face states; attach global face coordinates to failures.
     auto face_flux =
         [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j, int q )
     {
         try
         {
-            {
-                EvaluatedState checked_state{};
-
-                require_success( calc_flow_variables( left, gamma_, checked_state ), "calc_flow_variables" );
-            }
-
-            {
-                EvaluatedState checked_state{};
-
-                require_success( calc_flow_variables( right, gamma_, checked_state ), "calc_flow_variables" );
-            }
-
             Flux_vector flux{};
             const ReturnCodes code = calc_numerical_flux( flux_scheme_, left, right, dir, gamma_, flux );
 
@@ -533,15 +520,14 @@ void Solver::write_final_output( const double t ) const
 }
 
 
-// Refresh ghost cells and process scheduled output.
+// Process scheduled output using interior cell values only.
 //
 // step (in) - current time-step index
 // t (in) - current simulation time
 //
-// Refresh ghost cells and process scheduled output for the current step.
+// Output gathers interior cells and does not require valid ghost cells.
 void Solver::process_regular_output_phase( const int step, const double t, const bool time_output )
 {
-    apply_bc( conservative_field_ );
     if ( output_time_interval_ > 0.0 ? time_output : should_write_step_output( step ) )
         write_output( t );
 }
@@ -562,8 +548,6 @@ void Solver::run()
 
     validate_interior( conservative_field_ );
 
-    apply_bc( conservative_field_ );
-    build_rhs( conservative_field_, rhs_ );
     process_regular_output_phase( step, t, true );
 
     int stage = 0;
@@ -629,7 +613,6 @@ void Solver::run()
 
     if ( write_final_ )
     {
-        apply_bc( conservative_field_ );
         write_final_output( t );
     }
 }

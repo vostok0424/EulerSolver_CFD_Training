@@ -73,7 +73,6 @@ class Solver
     GridBlock2DInfo grid_{};
 
     std::vector<Conservative_vector> conservative_field_;
-    std::vector<Conservative_vector> rhs_;
 
     // Packed communication storage in rho, rho*u, rho*v, rho*E order.
     mutable std::vector<double> halo_buffer_;
@@ -151,7 +150,7 @@ class Solver
     // step (in) - current time-step index
     bool should_write_step_output( int step ) const;
 
-    // Refresh ghost cells and process scheduled output.
+    // Process scheduled output using interior cell values only.
     //
     // step (in) - current time-step index
     // t (in) - current simulation time

@@ -69,10 +69,15 @@ class Reconstruction2D
     //
     // Face index is i + (nx + 1) * j for x and i + nx * j for y.
     // WENO5 fills all four slots in increasing transverse coordinate; other schemes fill slot zero.
+    // Reuses internal face-average buffers between calls.
     // Throws on invalid input; output buffers may be partially written on reconstruction failure.
     void reconstruct_quadrature( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
-        int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right ) const;
+        int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right );
 
   private:
     ReconstructionOptions opt_;
+
+    // Reuse normal face averages across directions and time-integration stages.
+    std::vector<Conservative_vector> averages_left_;
+    std::vector<Conservative_vector> averages_right_;
 };
