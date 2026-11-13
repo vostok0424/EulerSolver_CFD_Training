@@ -229,6 +229,12 @@ static int idx2( int i, int j, int nx_tot )
 
 
 // 1. First-order reconstruction.
+//
+// Implementation: piecewise-constant conservative cell averages; the numerical flux is selected separately.
+//
+// Reference: S. K. Godunov (1959), "A difference method for numerical calculation of discontinuous
+// solutions of the equations of hydrodynamics", Mat. Sb. (N.S.) 47(89)(3), 271-306.
+// https://www.mathnet.ru/eng/sm4873
 
 // Copy adjacent cell states to the left and right sides of each x-face.
 //
@@ -281,6 +287,13 @@ static void reconstruct_first_order_y( const std::vector<Conservative_vector> &s
 
 
 // 2. Second-order MUSCL reconstruction.
+//
+// Implementation: characteristic piecewise-linear slopes with none, minmod or van Leer limiting.
+// Time integration is handled separately from this spatial reconstruction.
+//
+// Reference: B. van Leer (1979), "Towards the ultimate conservative difference scheme. V.
+// A second-order sequel to Godunov's method", J. Comput. Phys. 32(1), 101-136.
+// https://doi.org/10.1016/0021-9991(79)90145-1
 
 // Return the sign of x: -1, 0 or 1.
 //
@@ -378,6 +391,16 @@ static void reconstruct_face_muscl_from_char_cache( const Eigen4 &eig, SlopeLimi
 
 
 // 3. Fifth-order WENO reconstruction.
+//
+// Implementation: fifth-order JS weights with exponent two; normal reconstruction is characteristic.
+// The transverse finite-volume extension evaluates quadratic candidates at four Gauss nodes with
+// node-dependent positive optimal weights and the same JS smoothness indicators.
+//
+// References: G.-S. Jiang and C.-W. Shu (1996), "Efficient Implementation of Weighted ENO Schemes",
+// J. Comput. Phys. 126(1), 202-228. https://doi.org/10.1006/jcph.1996.0130
+// C.-W. Shu (1997), "Essentially Non-Oscillatory and Weighted Essentially Non-Oscillatory Schemes
+// for Hyperbolic Conservation Laws", NASA/CR-97-206253, ICASE Report 97-65 (finite-volume reconstruction).
+// https://ntrs.nasa.gov/citations/19980007543
 
 // Compute the inverse-square factor used in Jiang-Shu WENO weights.
 //
@@ -745,6 +768,7 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
 
 
 // Reconstruct five transverse face averages to four Gauss points using WENO-JS.
+// Uses the JS weighting and finite-volume reconstruction references listed in Section 3 above.
 //
 // q (in) - five face averages, with the target face at index two
 // eps (in) - positive regularization for the Jiang-Shu nonlinear weights
@@ -847,16 +871,23 @@ void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_ve
                     continue;
                 }
                 
+                double components[5][conservative_variable_count];
+
+                for ( int k = 0; k < 5; ++k )
+                {
+                    const int index = dir == x_direction ? i + ni * ( j + k ) : i + k + ( nx + 4 ) * j;
+                    pack_state( averages[index], components[k] );
+                }
+
                 std::array<std::array<double, conservative_variable_count>, face_quadrature_point_count> values{};
-                
+
                 for ( std::size_t m = 0; m < conservative_variable_count; ++m )
                 {
                     std::array<double, 5> stencil{};
                     
                     for ( int k = 0; k < 5; ++k )
                     {
-                        const int index = dir == x_direction ? i + ni * ( j + k ) : i + k + ( nx + 4 ) * j;
-                        stencil[k] = state_components( averages[index] )[m];
+                        stencil[k] = components[k][m];
                     }
                     
                     std::array<double, face_quadrature_point_count> reconstructed{};

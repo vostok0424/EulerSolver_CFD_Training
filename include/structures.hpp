@@ -220,7 +220,7 @@ struct SolverParameters
 // Use only after read_parameters returns SUCCESS; a failed read can leave partial assignments.
 struct CaseParameters
 {
-    int dim, mpi_px, mpi_py;
+    int mpi_px, mpi_py;
     GridParameters grid;
     SolverParameters solver;
     ReconstructionOptions reconstruction;

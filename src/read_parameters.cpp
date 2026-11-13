@@ -151,8 +151,20 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
         return input.code;
     }
 
+    // Retain dim only as a compatibility key; the solver is always two-dimensional.
+    int dim = 2;
+    read_int( input, "dim", 2, dim );
+    if ( input.code == SUCCESS && dim != 2 )
+    {
+        fail( input, INVALID_PARAMETER_VALUE, "dim", "only two-dimensional cases (dim=2) are supported" );
+    }
+    if ( input.code != SUCCESS )
+    {
+        error = input.error;
+        return input.code;
+    }
+
     // Execution layout, global mesh and solver controls.
-    read_int( input, "dim", spatial_dimension, p.dim );
     read_int( input, "mpi.px", 1, p.mpi_px );
     read_int( input, "mpi.py", 1, p.mpi_py );
     read_int( input, "nx", 200, p.grid.nx );

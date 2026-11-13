@@ -36,8 +36,6 @@ int main( int argc, char **argv )
         return 1;
     }
 
-    int exit_code = 0;
-
     try
     {
         const std::string cfg_file = argv[1];
@@ -53,7 +51,6 @@ int main( int argc, char **argv )
             MPI_Abort( MPI_COMM_WORLD, 1 );
             return 1;
         }
-        const int dim = parameters.dim;
         const int px = parameters.mpi_px;
         const int py = parameters.mpi_py;
 
@@ -65,27 +62,14 @@ int main( int argc, char **argv )
             std::cout << "[main] MPI world size=" << size << ", mpi.px=" << px << ", mpi.py=" << py << "\n";
         }
 
-        if ( dim != spatial_dimension )
+        if ( mp.is_root() )
         {
-            if ( mp.is_root() )
-            {
-                std::cerr << "Unsupported dim=" << dim << ". This executable now supports 2D only."
-                          << " Please use dim=2 and a 2D case file.\n";
-            }
-
-            exit_code = 1;
+            std::cout << "[main] 2D solver\n";
         }
-        else
-        {
-            if ( mp.is_root() )
-            {
-                std::cout << "[main] dim=2, 2D solver\n";
-            }
 
-            Solver solver( parameters, mp );
+        Solver solver( parameters, mp );
 
-            solver.run();
-        }
+        solver.run();
     }
 
     // A failed rank may leave peers in communication; report the rank and abort the entire job.
@@ -102,10 +86,6 @@ int main( int argc, char **argv )
         return 1;
     }
 
-    int exit_code_global = 0;
-    // Combine normal exit statuses before finalizing MPI.
-    MPI_Allreduce( &exit_code, &exit_code_global, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD );
-
     MPI_Finalize();
-    return exit_code_global;
+    return 0;
 }

@@ -8,6 +8,36 @@
 
 
 // Build conservative face states with the selected scheme; MUSCL and WENO use characteristic projection.
+//
+// First-order reconstruction.
+//
+// Implementation: piecewise-constant conservative cell averages; the numerical flux is selected separately.
+//
+// Reference: S. K. Godunov (1959), "A difference method for numerical calculation of discontinuous
+// solutions of the equations of hydrodynamics", Mat. Sb. (N.S.) 47(89)(3), 271-306.
+// https://www.mathnet.ru/eng/sm4873
+//
+// Second-order MUSCL reconstruction.
+//
+// Implementation: characteristic piecewise-linear slopes with none, minmod or van Leer limiting.
+// Time integration is handled separately from this spatial reconstruction.
+//
+// Reference: B. van Leer (1979), "Towards the ultimate conservative difference scheme. V.
+// A second-order sequel to Godunov's method", J. Comput. Phys. 32(1), 101-136.
+// https://doi.org/10.1016/0021-9991(79)90145-1
+//
+// Fifth-order WENO-JS reconstruction.
+//
+// Implementation: fifth-order JS weights with exponent two; normal reconstruction is characteristic.
+// The transverse finite-volume extension evaluates quadratic candidates at four Gauss nodes with
+// node-dependent positive optimal weights and the same JS smoothness indicators.
+//
+// References: G.-S. Jiang and C.-W. Shu (1996), "Efficient Implementation of Weighted ENO Schemes",
+// J. Comput. Phys. 126(1), 202-228. https://doi.org/10.1006/jcph.1996.0130
+// C.-W. Shu (1997), "Essentially Non-Oscillatory and Weighted Essentially Non-Oscillatory Schemes
+// for Hyperbolic Conservation Laws", NASA/CR-97-206253, ICASE Report 97-65 (finite-volume reconstruction).
+// https://ntrs.nasa.gov/citations/19980007543
+//
 class Reconstruction2D
 {
   public:

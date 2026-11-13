@@ -415,7 +415,7 @@ output.vtkDataOutputType = point
 
 ### Core keys
 
-- `dim` must be `2`
+- `dim` is an optional compatibility key; if supplied, it must be `2`. The solver always uses two dimensions.
 - `nx`, `ny`, `ng`
 - `x0`, `x1`, `y0`, `y1`
 - `gamma`, `cfl`, `finalTime`

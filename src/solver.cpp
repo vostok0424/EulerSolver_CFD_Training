@@ -207,8 +207,7 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     ti_ = make_time_integrator( parameters.solver.time_integrator );
 
     // 7. Initialize this rank's interior cells; ghost cells are filled before the first residual.
-    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_,
-        parameters.set_fields );
+    set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, parameters.set_fields );
 }
 
 
@@ -315,8 +314,7 @@ double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
         {
             EvaluatedState primitive{};
 
-            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ),
-                "calc_flow_variables" );
+            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ), "calc_flow_variables" );
             const double s = ( std::abs( primitive.x_velocity ) + primitive.sound_speed ) / dx +
                              ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
 
@@ -354,10 +352,8 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
     std::fill( output_rhs.begin(), output_rhs.end(), Conservative_vector{} );
 
     // 1. Reconstruct face states from the field with valid ghost cells.
-    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, x_direction, faces_.x.left_state,
-        faces_.x.right_state );
-    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, y_direction, faces_.y.left_state,
-        faces_.y.right_state );
+    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, x_direction, faces_.x.left_state, faces_.x.right_state );
+    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, y_direction, faces_.y.left_state, faces_.y.right_state );
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
@@ -405,9 +401,9 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
             Flux_vector average{};
             for ( int q = 0; q < count; ++q )
             {
-                const auto flux =
-                    face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q], x_direction, i, j, q );
+                const auto flux = face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q], x_direction, i, j, q );
                 const double weight = count == 1 ? 1.0 : quadrature_weights[q];
+                
                 average.mass_flux += weight * flux.mass_flux;
                 average.x_momentum_flux += weight * flux.x_momentum_flux;
                 average.y_momentum_flux += weight * flux.y_momentum_flux;
@@ -426,9 +422,9 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
             Flux_vector average{};
             for ( int q = 0; q < count; ++q )
             {
-                const auto flux =
-                    face_flux( faces_.y.left_state[f][q], faces_.y.right_state[f][q], y_direction, i, j, q );
+                const auto flux = face_flux( faces_.y.left_state[f][q], faces_.y.right_state[f][q], y_direction, i, j, q );
                 const double weight = count == 1 ? 1.0 : quadrature_weights[q];
+                
                 average.mass_flux += weight * flux.mass_flux;
                 average.x_momentum_flux += weight * flux.x_momentum_flux;
                 average.y_momentum_flux += weight * flux.y_momentum_flux;
@@ -450,14 +446,10 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
             // 3. Subtract outgoing fluxes from incoming fluxes to form the cell residual.
             Conservative_vector rhs{};
 
-            rhs.specific_mass =
-                ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
-            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx -
-                                      ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
-            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx -
-                                      ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
-            rhs.specific_energy =
-                ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
+            rhs.specific_mass = ( -1.0 * ( fx_r.mass_flux - fx_l.mass_flux ) ) / dx - ( gy_t.mass_flux - gy_b.mass_flux ) / dy;
+            rhs.specific_x_momentum = ( -1.0 * ( fx_r.x_momentum_flux - fx_l.x_momentum_flux ) ) / dx - ( gy_t.x_momentum_flux - gy_b.x_momentum_flux ) / dy;
+            rhs.specific_y_momentum = ( -1.0 * ( fx_r.y_momentum_flux - fx_l.y_momentum_flux ) ) / dx - ( gy_t.y_momentum_flux - gy_b.y_momentum_flux ) / dy;
+            rhs.specific_energy = ( -1.0 * ( fx_r.energy_flux - fx_l.energy_flux ) ) / dx - ( gy_t.energy_flux - gy_b.energy_flux ) / dy;
 
             if ( !is_finite_state( rhs ) )
             {
@@ -595,19 +587,25 @@ void Solver::run()
         // Cap the tolerance below the interval so distinct events cannot be merged.
         const double output_tolerance = std::min( output_time_interval_ * 0.25,
             8.0 * std::numeric_limits<double>::epsilon() * std::max( std::abs( t ), std::abs( next_output_time ) ) );
-        const bool time_output =
-            time_mode &&
-            ( t == next_output_time || ( t == final_time_ && std::abs( t - next_output_time ) <= output_tolerance ) );
+        const bool time_output = time_mode && ( t == next_output_time || ( t == final_time_ && std::abs( t - next_output_time ) <= output_tolerance ) );
+        
         process_regular_output_phase( step, t, time_output );
+        
         if ( time_output && t < final_time_ )
         {
             // Multiplication avoids drift from repeatedly adding the interval.
             if ( output_index == std::numeric_limits<std::size_t>::max() )
+            {
                 throw std::runtime_error( "Output time index overflow" );
+            }
+            
             ++output_index;
             next_output_time = static_cast<double>( output_index ) * output_time_interval_;
+            
             if ( next_output_time <= t )
+            {
                 throw std::runtime_error( "outputTimeInterval does not advance the output clock" );
+            }
         }
     }
 
