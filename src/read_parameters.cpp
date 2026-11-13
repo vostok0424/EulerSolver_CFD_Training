@@ -83,7 +83,7 @@ static void read_required_double( ParameterInput &input, const std::string &key,
 static void read_scheme( ParameterInput &input, const std::string &key, const std::string &fallback,
     ReconstructionScheme &value );
 
-// Map case-sensitive limiter names; an empty name selects vanleer for compatibility.
+// Map case-sensitive limiter names; an empty name selects vanLeer for compatibility.
 //
 // input (in/out) - file-local key/value data, source locations and first-error status
 // key (in) - case-sensitive configuration key
@@ -166,6 +166,7 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
     read_double( input, "cfl", 0.5, p.solver.cfl );
     read_double( input, "finalTime", 0.2, p.solver.final_time );
     read_int( input, "outputEvery", 50, p.solver.output_every );
+    read_double( input, "outputTimeInterval", 0.0, p.solver.output_time_interval );
     read_bool( input, "writeFinal", true, p.solver.write_final );
     read_string( input, "outPrefix", "run2d", p.solver.out_prefix );
     read_string( input, "flux", "hllc", p.solver.flux );
@@ -179,7 +180,7 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
     // Numerical and output options, including legacy characteristic-only validation.
     read_vtk( input, "output.vtkDataOutputType", "point", p.solver.vtk_data_output_type );
     read_scheme( input, "reconstruction.scheme", "firstOrder", p.reconstruction.scheme );
-    read_limiter( input, "reconstruction.limiter", "vanleer", p.reconstruction.limiter );
+    read_limiter( input, "reconstruction.limiter", "vanLeer", p.reconstruction.limiter );
     read_double( input, "reconstruction.eps", default_weno_epsilon, p.reconstruction.eps );
     
     if ( input.code != SUCCESS )
@@ -525,7 +526,7 @@ static void read_scheme( ParameterInput &input, const std::string &key, const st
 }
 
 
-// Map case-sensitive limiter names; an empty name selects vanleer for compatibility.
+// Map case-sensitive limiter names; an empty name selects vanLeer for compatibility.
 //
 // input (in/out) - file-local key/value data, source locations and first-error status
 // key (in) - case-sensitive configuration key
@@ -541,8 +542,8 @@ static void read_limiter( ParameterInput &input, const std::string &key, const s
     read_string( input, key, fallback, text );
     
     if ( text.empty() )
-        text = "vanleer";
-    if ( text == "vanleer" )
+        text = "vanLeer";
+    if ( text == "vanLeer" )
         value = SlopeLimiter::van_leer;
     else if ( text == "none" )
         value = SlopeLimiter::none;

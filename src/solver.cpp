@@ -48,23 +48,18 @@ static void ensure_output_directory_exists( const MpiParallel &mp )
 }
 
 
-// Build the scheduled output path from the prefix, step and time.
+// Build the scheduled output path from the prefix and physical time.
 //
 // out_prefix (in) - filename prefix for solution output
-// step (in) - current time-step index
 // t (in) - current simulation time
-static std::string make_step_output_path( const std::string &out_prefix, int step, double t )
+static std::string make_step_output_path( const std::string &out_prefix, double t )
 {
-    std::ostringstream step_ss;
-
-    step_ss << std::setw( 4 ) << std::setfill( '0' ) << step;
-
     std::ostringstream t_ss;
 
     t_ss << std::fixed << std::setprecision( 6 ) << t;
 
     const std::filesystem::path out_dir = k_output_dir_2d;
-    return ( out_dir / ( out_prefix + "_step" + step_ss.str() + "_t=" + t_ss.str() + ".vtk" ) ).string();
+    return ( out_dir / ( out_prefix + "_t=" + t_ss.str() + ".vtk" ) ).string();
 }
 
 
@@ -182,11 +177,14 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp ) : mp_(
     cfl_ = parameters.solver.cfl;
     final_time_ = parameters.solver.final_time;
     output_every_ = parameters.solver.output_every;
+    output_time_interval_ = parameters.solver.output_time_interval;
     write_final_ = parameters.solver.write_final;
     out_prefix_ = parameters.solver.out_prefix;
 
     if ( gamma_ <= 1.0 || cfl_ <= 0.0 || final_time_ < 0.0 )
         throw std::runtime_error( "Require gamma > 1, cfl > 0, finalTime >= 0" );
+    if ( !std::isfinite( output_time_interval_ ) || output_time_interval_ < 0.0 )
+        throw std::runtime_error( "Require finite outputTimeInterval >= 0" );
     if ( grid_.nx < grid_.ng || grid_.ny < grid_.ng )
         throw std::runtime_error( "Local nx and ny must be >= ng for halo exchange and wall reflection" );
 
@@ -460,18 +458,14 @@ bool Solver::should_write_step_output( const int step ) const
 
 // Write scheduled merged VTK output.
 //
-// step (in) - current time-step index
 // t (in) - current simulation time
 //
-// Write a merged snapshot when the step meets the output interval.
-void Solver::write_output( int step, double t ) const
+// Write a merged snapshot after the caller has selected an output event.
+void Solver::write_output( double t ) const
 {
-    if ( !should_write_step_output( step ) )
-        return;
-
     ensure_output_directory_exists( mp_ );
 
-    const std::string fname = make_step_output_path( out_prefix_, step, t );
+    const std::string fname = make_step_output_path( out_prefix_, t );
 
     write_merged_vtk_file_2d( mp_, fname, "step", t, conservative_field_, grid_.nx, grid_.ny, grid_.ng, grid_.i_beg,
         grid_.j_beg, grid_.nx_global, grid_.ny_global, grid_.x0, grid_.x1, grid_.y0, grid_.y1, gamma_,
@@ -507,10 +501,11 @@ void Solver::write_final_output( const double t ) const
 // t (in) - current simulation time
 //
 // Refresh ghost cells and process scheduled output for the current step.
-void Solver::process_regular_output_phase( const int step, const double t )
+void Solver::process_regular_output_phase( const int step, const double t, const bool time_output )
 {
     apply_bc( conservative_field_ );
-    write_output( step, t );
+    if ( output_time_interval_ > 0.0 ? time_output : should_write_step_output( step ) )
+        write_output( t );
 }
 
 
@@ -521,6 +516,8 @@ void Solver::run()
 {
     double t = 0.0;
     int step = 0;
+    std::size_t output_index = 1;
+    double next_output_time = output_time_interval_;
     std::cout << "[2D][r" << mp_.rank() << "] Starting run, finalTime=" << final_time_ << ", global=" << grid_.nx_global
               << "x" << grid_.ny_global << ", local=" << grid_.nx << "x" << grid_.ny << ", begin=(" << grid_.i_beg
               << "," << grid_.j_beg << ")\n";
@@ -529,7 +526,7 @@ void Solver::run()
 
     apply_bc( conservative_field_ );
     build_rhs( conservative_field_, rhs_ );
-    process_regular_output_phase( step, t );
+    process_regular_output_phase( step, t, true );
 
     int stage = 0;
     // Each integrator stage must validate its interior and refresh ghosts before reconstruction.
@@ -545,9 +542,13 @@ void Solver::run()
     {
         double dt = compute_dt( conservative_field_ );
 
-        // Shorten the final step to reach the requested terminal time.
-        if ( t + dt > final_time_ )
-            dt = final_time_ - t;
+        // Land on the next scheduled time or final time without exceeding the CFL step.
+        const bool time_mode = output_time_interval_ > 0.0;
+        const double target_time = time_mode ? std::min( next_output_time, final_time_ ) : final_time_;
+        const double remaining = target_time - t;
+        const bool reaches_target = dt >= remaining;
+        if ( reaches_target )
+            dt = remaining;
 
         if ( !std::isfinite( dt ) || dt <= 0.0 || t + dt <= t )
             throw std::runtime_error( "Time step does not advance the physical clock" );
@@ -565,10 +566,27 @@ void Solver::run()
         }
 
         // Advance the clock only after the full step passes the state checks.
-        t += dt;
+        t = reaches_target ? target_time : t + dt;
         ++step;
 
-        process_regular_output_phase( step, t );
+        // Treat a rounded interval multiple at finalTime as the same output event.
+        // Cap the tolerance below the interval so distinct events cannot be merged.
+        const double output_tolerance = std::min( output_time_interval_ * 0.25,
+            8.0 * std::numeric_limits<double>::epsilon() * std::max( std::abs( t ), std::abs( next_output_time ) ) );
+        const bool time_output = time_mode &&
+            ( t == next_output_time ||
+                ( t == final_time_ && std::abs( t - next_output_time ) <= output_tolerance ) );
+        process_regular_output_phase( step, t, time_output );
+        if ( time_output && t < final_time_ )
+        {
+            // Multiplication avoids drift from repeatedly adding the interval.
+            if ( output_index == std::numeric_limits<std::size_t>::max() )
+                throw std::runtime_error( "Output time index overflow" );
+            ++output_index;
+            next_output_time = static_cast<double>( output_index ) * output_time_interval_;
+            if ( next_output_time <= t )
+                throw std::runtime_error( "outputTimeInterval does not advance the output clock" );
+        }
     }
 
     if ( write_final_ )

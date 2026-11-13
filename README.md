@@ -87,7 +87,7 @@ The current limiter options are:
 
 - none
 - minmod
-- vanleer
+- vanLeer
 
 Important notes:
 - reconstruction is now characteristic-based only
@@ -165,8 +165,34 @@ Typical output control keys are:
 
 - `outPrefix`
 - `outputEvery`
+- `outputTimeInterval`
 - `writeFinal`
 - `output.vtkDataOutputType`
+
+`outputTimeInterval` defaults to `0` (disabled). A positive, finite value selects
+fixed physical-time output and overrides `outputEvery`. For example:
+
+```ini
+outputTimeInterval = 0.01
+writeFinal = true
+```
+
+This writes snapshots at `t = 0, 0.01, 0.02, ...` up to `finalTime`. The solver
+still computes each step from the global CFL condition, shortening a step when
+needed to land on the next output time or `finalTime`. Output targets are computed
+from the output index times the interval to avoid cumulative scheduling drift.
+An interval smaller than the CFL step increases the number of integration steps.
+Negative or non-finite intervals are rejected.
+
+Scheduled filenames contain only the prefix and physical time, for example
+`implosion_t=0.010000.vtk`; iteration counts are omitted. Final files retain
+the separate name `implosion_final_t=0.300000.vtk`.
+
+With `outputTimeInterval = 0`, the existing `outputEvery` behavior is preserved:
+positive values write every N steps (including step 0), and non-positive values
+disable scheduled snapshots. `writeFinal` independently writes a final file,
+including when the final time already has a scheduled snapshot. If `finalTime`
+falls between scheduled times, only `writeFinal` requests that last snapshot.
 
 ## Repository Structure
 
@@ -409,7 +435,7 @@ Side-specific outlet pressure is also supported.
 
 ```text
 reconstruction.scheme = weno5
-reconstruction.limiter = vanleer
+reconstruction.limiter = vanLeer
 reconstruction.eps = 1e-12
 reconstruction.variables = characteristic
 ```

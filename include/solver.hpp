@@ -92,6 +92,7 @@ class Solver
     double cfl_{};
     double final_time_{};
     int output_every_{};
+    double output_time_interval_{};
     bool write_final_{};
     std::string out_prefix_{};
 
@@ -154,13 +155,13 @@ class Solver
     //
     // step (in) - current time-step index
     // t (in) - current simulation time
-    void process_regular_output_phase( int step, double t );
+    // time_output (in) - the clock has reached a scheduled physical output time
+    void process_regular_output_phase( int step, double t, bool time_output = false );
 
     // Write scheduled merged VTK output.
     //
-    // step (in) - current time-step index
     // t (in) - current simulation time
-    void write_output( int step, double t ) const;
+    void write_output( double t ) const;
 
     // Write the final merged VTK output when enabled.
     //

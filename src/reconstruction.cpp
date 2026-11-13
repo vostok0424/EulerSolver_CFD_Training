@@ -307,7 +307,7 @@ static inline double minmod( double a, double b )
 //
 // a (in) - first scalar slope candidate
 // b (in) - second scalar slope candidate
-static inline double vanleer( double a, double b )
+static inline double vanLeer( double a, double b )
 {
     if ( a * b <= 0.0 )
     {
@@ -332,7 +332,7 @@ static inline double apply_limiter( SlopeLimiter lim, double dl, double dr )
     case SlopeLimiter::minmod:
         return minmod( dl, dr );
     case SlopeLimiter::van_leer:
-        return vanleer( dl, dr );
+        return vanLeer( dl, dr );
     }
 
     throw std::runtime_error( "Invalid reconstruction limiter enum" );

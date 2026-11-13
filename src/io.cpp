@@ -8,6 +8,21 @@
 #include <limits>
 #include <locale>
 #include <cstdio>
+#include <cmath>
+
+
+// Avoid ASCII reader underflow failures without changing the stored flow state.
+//
+// value (in) - coordinate or field value being serialized to VTK
+static double vtk_output_value( double value )
+{
+    if ( std::fpclassify( value ) == FP_SUBNORMAL )
+    {
+        return 0.0;
+    }
+
+    return value;
+}
 
 
 // Write interior-cell fields to a VTK rectilinear grid after averaging them onto grid points.
@@ -77,7 +92,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         const double x = x0 + static_cast<double>( i ) * dx;
 
-        out << x << "\n";
+        out << vtk_output_value( x ) << "\n";
     }
 
     out << "Y_COORDINATES " << ny_pts << " double\n";
@@ -86,7 +101,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         const double y = y0 + static_cast<double>( j ) * dy;
 
-        out << y << "\n";
+        out << vtk_output_value( y ) << "\n";
     }
 
     out << "Z_COORDINATES 1 double\n";
@@ -195,7 +210,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         for ( int i = 0; i < nx_pts; ++i )
         {
-            out << rho_p[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
+            out << vtk_output_value( rho_p[static_cast<std::size_t>( idx_p( i, j ) )] ) << "\n";
         }
     }
 
@@ -207,7 +222,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
         {
             const std::size_t kp = static_cast<std::size_t>( idx_p( i, j ) );
 
-            out << u_p[kp] << ' ' << v_p[kp] << ' ' << 0.0 << "\n";
+            out << vtk_output_value( u_p[kp] ) << ' ' << vtk_output_value( v_p[kp] ) << ' ' << 0.0 << "\n";
         }
     }
 
@@ -218,7 +233,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         for ( int i = 0; i < nx_pts; ++i )
         {
-            out << p_p[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
+            out << vtk_output_value( p_p[static_cast<std::size_t>( idx_p( i, j ) )] ) << "\n";
         }
     }
 
@@ -229,7 +244,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         for ( int i = 0; i < nx_pts; ++i )
         {
-            out << rho_up[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
+            out << vtk_output_value( rho_up[static_cast<std::size_t>( idx_p( i, j ) )] ) << "\n";
         }
     }
 
@@ -240,7 +255,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         for ( int i = 0; i < nx_pts; ++i )
         {
-            out << rho_vp[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
+            out << vtk_output_value( rho_vp[static_cast<std::size_t>( idx_p( i, j ) )] ) << "\n";
         }
     }
 
@@ -251,7 +266,7 @@ void write_vtk_2d_point_data( const std::string &filename, const std::vector<Con
     {
         for ( int i = 0; i < nx_pts; ++i )
         {
-            out << ep[static_cast<std::size_t>( idx_p( i, j ) )] << "\n";
+            out << vtk_output_value( ep[static_cast<std::size_t>( idx_p( i, j ) )] ) << "\n";
         }
     }
 
@@ -326,7 +341,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
     {
         const double x = x0 + static_cast<double>( i ) * dx;
 
-        out << x << "\n";
+        out << vtk_output_value( x ) << "\n";
     }
 
     out << "Y_COORDINATES " << ny_pts << " double\n";
@@ -335,7 +350,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
     {
         const double y = y0 + static_cast<double>( j ) * dy;
 
-        out << y << "\n";
+        out << vtk_output_value( y ) << "\n";
     }
 
     out << "Z_COORDINATES 1 double\n";
@@ -356,7 +371,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
             Primitive_vector primitive{};
 
             require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
-            out << primitive.density << "\n";
+            out << vtk_output_value( primitive.density ) << "\n";
         }
     }
 
@@ -370,7 +385,8 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
             Primitive_vector primitive{};
 
             require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
-            out << primitive.x_velocity << ' ' << primitive.y_velocity << ' ' << 0.0 << "\n";
+            out << vtk_output_value( primitive.x_velocity ) << ' ' << vtk_output_value( primitive.y_velocity )
+                << ' ' << 0.0 << "\n";
         }
     }
 
@@ -385,7 +401,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
             Primitive_vector primitive{};
 
             require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
-            out << primitive.pressure << "\n";
+            out << vtk_output_value( primitive.pressure ) << "\n";
         }
     }
 
@@ -398,7 +414,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
         {
             const Conservative_vector &state = field[idx( ng + i, ng + j )];
 
-            out << state.specific_x_momentum << "\n";
+            out << vtk_output_value( state.specific_x_momentum ) << "\n";
         }
     }
 
@@ -411,7 +427,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
         {
             const Conservative_vector &state = field[idx( ng + i, ng + j )];
 
-            out << state.specific_y_momentum << "\n";
+            out << vtk_output_value( state.specific_y_momentum ) << "\n";
         }
     }
 
@@ -424,7 +440,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
         {
             const Conservative_vector &state = field[idx( ng + i, ng + j )];
 
-            out << state.specific_energy << "\n";
+            out << vtk_output_value( state.specific_energy ) << "\n";
         }
     }
 
