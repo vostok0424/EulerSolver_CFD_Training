@@ -14,6 +14,7 @@ class TimeIntegrator
   public:
     // RHS callback: first argument (in/out) is the stage state, second argument (out) is its residual.
     // Both arrays have the same ghosted layout; the callback may update stage ghost cells.
+    // The first callback receives the unchanged input state; later callbacks receive newly formed stages.
     using RHSFunc = std::function<void( std::vector<Conservative_vector> &, std::vector<Conservative_vector> & )>;
 
     // Release owned resources during object destruction.
@@ -127,9 +128,8 @@ class RK4Integrator final : public TimeIntegrator
 
   private:
     std::vector<Conservative_vector> u0_;
-    std::vector<Conservative_vector> u1_;
-    std::vector<Conservative_vector> u2_;
-    std::vector<Conservative_vector> u3_;
+    // Only one intermediate stage state is needed once its derivative has been evaluated.
+    std::vector<Conservative_vector> stage_state_;
     std::vector<Conservative_vector> k1_;
     std::vector<Conservative_vector> k2_;
     std::vector<Conservative_vector> k3_;

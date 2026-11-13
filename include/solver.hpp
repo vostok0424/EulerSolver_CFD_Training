@@ -137,7 +137,7 @@ class Solver
     // max_s (in) - local maximum spectral rate for the current state
     double compute_dt( double max_s ) const;
 
-    // Compute the flux divergence; the input ghost cells must already be valid.
+    // Compute the flux divergence; the interior must be validated and ghost cells refreshed.
     //
     // state (in) - conserved variables in the ghosted cell field
     // rhs (out) - conservative residual on the ghosted cell layout

@@ -105,9 +105,27 @@ class Reconstruction2D
         int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right );
 
   private:
+    // Solver validates interior states before applying halos/physical ghost boundaries.
+    // Keep this trusted entry point private so standalone public calls always validate their inputs.
+    friend class Solver;
+    void reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state, int nx, int ny,
+        int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
+        std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
+        std::vector<FaceQuadratureState> &right_y );
+
+    // Implementation helpers share checks only within one public call or one validated x/y pair.
+    void reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right,
+        int transverse_extension ) const;
+    void reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right,
+        int transverse_extension ) const;
+    void reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+        double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right );
+
     ReconstructionOptions opt_;
 
-    // Reset per direction/call: only reuse checks while the input state and gamma are unchanged.
+    // Reset for each standalone call or validated x/y pair; never retain checks across state updates.
     mutable std::vector<unsigned char> checked_cells_;
 
     // Reuse normal face averages across directions and time-integration stages.

@@ -318,7 +318,7 @@ double Solver::compute_dt( double max_s ) const
 }
 
 
-// Compute the flux divergence; the input ghost cells must already be valid.
+// Compute the flux divergence; the interior must already be validated and ghost cells refreshed.
 //
 // state (in) - conserved variables in the ghosted cell field
 // output_rhs (out) - conservative residual on the ghosted cell layout
@@ -326,11 +326,19 @@ double Solver::compute_dt( double max_s ) const
 // Compute the finite-volume residual: RHS = -(F_right - F_left)/dx - (G_top - G_bottom)/dy.
 void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &output_rhs )
 {
-    std::fill( output_rhs.begin(), output_rhs.end(), Conservative_vector{} );
+    // Interior residuals are overwritten below; integrators still need zero residuals in ghost cells.
+    std::fill_n( output_rhs.begin(), grid_.ng * grid_.nx_tot, Conservative_vector{} );
+    std::fill( output_rhs.begin() + idx( 0, grid_.ng + grid_.ny ), output_rhs.end(), Conservative_vector{} );
+
+    for ( int j = grid_.ng; j < grid_.ng + grid_.ny; ++j )
+    {
+        std::fill_n( output_rhs.begin() + idx( 0, j ), grid_.ng, Conservative_vector{} );
+        std::fill_n( output_rhs.begin() + idx( grid_.ng + grid_.nx, j ), grid_.ng, Conservative_vector{} );
+    }
 
     // 1. Reconstruct face states from the field with valid ghost cells.
-    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, x_direction, faces_.x.left_state, faces_.x.right_state );
-    recon_.reconstruct_quadrature( state, grid_.nx, grid_.ny, grid_.ng, gamma_, y_direction, faces_.y.left_state, faces_.y.right_state );
+    recon_.reconstruct_validated_quadrature_xy( state, grid_.nx, grid_.ny, grid_.ng, gamma_,
+        faces_.x.left_state, faces_.x.right_state, faces_.y.left_state, faces_.y.right_state );
 
     const double dx = grid_.dx();
     const double dy = grid_.dy();
@@ -521,11 +529,13 @@ void Solver::run()
     process_regular_output_phase( step, t, true );
 
     int stage = 0;
-    // Each integrator stage must validate its interior and refresh ghosts before reconstruction.
+    // The first stage uses the unchanged state checked at initialization or the previous step end.
+    // Later stages validate their newly constructed interiors; every stage refreshes ghost cells.
     auto rhs_fun = [this, &stage]( std::vector<Conservative_vector> &uin, std::vector<Conservative_vector> &rout )
     {
         ++stage;
-        validate_interior( uin );
+        if ( stage > 1 )
+            validate_interior( uin );
         apply_bc( uin );
         build_rhs( uin, rout );
     };

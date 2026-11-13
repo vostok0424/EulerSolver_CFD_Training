@@ -129,9 +129,7 @@ void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, co
 {
     const size_t n = state.size();
     TimeIntegrator::ensure_size( u0_, n );
-    TimeIntegrator::ensure_size( u1_, n );
-    TimeIntegrator::ensure_size( u2_, n );
-    TimeIntegrator::ensure_size( u3_, n );
+    TimeIntegrator::ensure_size( stage_state_, n );
     TimeIntegrator::ensure_size( k1_, n );
     TimeIntegrator::ensure_size( k2_, n );
     TimeIntegrator::ensure_size( k3_, n );
@@ -147,24 +145,24 @@ void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, co
 
     for ( size_t i = 0; i < n; ++i )
     {
-        u1_[i] = u0_[i] + 0.5 * dt * k1_[i];
+        stage_state_[i] = u0_[i] + 0.5 * dt * k1_[i];
     }
 
-    rhs( u1_, k2_ );
+    rhs( stage_state_, k2_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
-        u2_[i] = u0_[i] + 0.5 * dt * k2_[i];
+        stage_state_[i] = u0_[i] + 0.5 * dt * k2_[i];
     }
 
-    rhs( u2_, k3_ );
+    rhs( stage_state_, k3_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
-        u3_[i] = u0_[i] + dt * k3_[i];
+        stage_state_[i] = u0_[i] + dt * k3_[i];
     }
 
-    rhs( u3_, k4_ );
+    rhs( stage_state_, k4_ );
 
     for ( size_t i = 0; i < n; ++i )
     {

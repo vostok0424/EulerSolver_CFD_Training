@@ -566,6 +566,16 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
     double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx,
     int transverse_extension ) const
 {
+    if ( opt_.scheme != ReconstructionScheme::first_order )
+        checked_cells_.assign( state.size(), 0 );
+    reconstruct_faces_x_impl( state, nx, ny, ng, gamma, ulx, urx, transverse_extension );
+}
+
+
+void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx,
+    int transverse_extension ) const
+{
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
 
@@ -599,8 +609,6 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
         reconstruct_first_order_x( state, nx, ny, ng, nx_tot, ulx, urx );
         return;
     }
-
-    checked_cells_.assign( state.size(), 0 );
 
     // Build one eigensystem per face, then project the selected MUSCL or WENO stencil.
     auto reconstruct_face =
@@ -681,6 +689,16 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
     double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury,
     int transverse_extension ) const
 {
+    if ( opt_.scheme != ReconstructionScheme::first_order )
+        checked_cells_.assign( state.size(), 0 );
+    reconstruct_faces_y_impl( state, nx, ny, ng, gamma, uly, ury, transverse_extension );
+}
+
+
+void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury,
+    int transverse_extension ) const
+{
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
 
@@ -713,8 +731,6 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
         reconstruct_first_order_y( state, nx, ny, ng, nx_tot, uly, ury );
         return;
     }
-
-    checked_cells_.assign( state.size(), 0 );
 
     auto reconstruct_face =
         [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
@@ -845,6 +861,38 @@ static void transverse_weno5( const std::array<double, 5> &q, double eps, std::a
 void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
 {
+    if ( opt_.scheme != ReconstructionScheme::first_order )
+        checked_cells_.assign( state.size(), 0 );
+    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, dir, left, right );
+}
+
+
+// Reuse interior validation and successful ghost checks for an immutable x/y reconstruction pair.
+void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state,
+    int nx, int ny, int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
+    std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
+    std::vector<FaceQuadratureState> &right_y )
+{
+    const int nx_tot = nx + 2 * ng;
+    if ( nx <= 0 || ny <= 0 || ng < 0 ||
+         state.size() != static_cast<std::size_t>( nx_tot ) * static_cast<std::size_t>( ny + 2 * ng ) )
+        throw std::runtime_error( "Validated reconstruction: invalid grid or state size" );
+
+    if ( opt_.scheme != ReconstructionScheme::first_order )
+    {
+        checked_cells_.assign( state.size(), 0 );
+        for ( int j = ng; j < ng + ny; ++j )
+            std::fill_n( checked_cells_.begin() + ng + nx_tot * j, nx, 1 );
+    }
+
+    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x );
+    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y );
+}
+
+
+void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
+{
     if ( dir != x_direction && dir != y_direction )
     {
         throw std::runtime_error( "Quadrature reconstruction: invalid direction" );
@@ -855,11 +903,11 @@ void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_ve
 
     if ( dir == x_direction )
     {
-        reconstruct_faces_x( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
+        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
     }
     else
     {
-        reconstruct_faces_y( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
+        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
     }
 
     const int ni = dir == x_direction ? nx + 1 : nx;
