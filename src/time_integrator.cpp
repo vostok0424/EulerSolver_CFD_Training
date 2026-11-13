@@ -48,11 +48,6 @@ void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     TimeIntegrator::ensure_size( u1_, n );
     TimeIntegrator::ensure_size( r_, n );
 
-    for ( size_t i = 0; i < n; ++i )
-    {
-        u1_[i] = state[i];
-    }
-
     // Evaluate the residual at the current state before the explicit update.
     rhs( state, r_ );
 
@@ -90,12 +85,6 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
     TimeIntegrator::ensure_size( u1_, n );
     TimeIntegrator::ensure_size( u2_, n );
     TimeIntegrator::ensure_size( r_, n );
-
-    for ( size_t i = 0; i < n; ++i )
-    {
-        u1_[i] = state[i];
-        u2_[i] = state[i];
-    }
 
     // Evaluate the residual at the current state before the explicit update.
     rhs( state, r_ );
