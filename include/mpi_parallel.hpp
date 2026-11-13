@@ -2,6 +2,8 @@
 
 #include <mpi.h>
 
+#include "structures.hpp"
+
 #include <vector>
 #include <stdexcept>
 #include <cstddef>
@@ -178,16 +180,15 @@ class MpiParallel
     // local_val (in) - this rank's contribution to the collective reduction
     double allreduce_sum( double local_val ) const;
 
-    // Exchange packed cell components with Cartesian neighbors and fill ghost strips.
+    // Pack boundary state strips directly and exchange them with Cartesian neighbors.
     //
-    // data (in/out) - packed ghosted cell array; cell (i,j) begins at (i + (nx_local + 2*ng)*j)*ncomp
+    // state (in/out) - ghosted conservative field; only received ghost strips are modified
     // nx_local (in) - local number of interior cells along x
     // ny_local (in) - local number of interior cells along y
     // ng (in) - number of ghost-cell layers on each side
-    // ncomp (in) - number of packed components stored per cell
     //
     // Interior values are sent to neighbors; received values replace ghost strips.
-    void exchange_halos_2d( double *data, int nx_local, int ny_local, int ng, int ncomp ) const;
+    void exchange_halos_2d( std::vector<Conservative_vector> &state, int nx_local, int ny_local, int ng ) const;
 
   private:
     // Split a global axis into contiguous blocks; distribute remainder cells to the first blocks.

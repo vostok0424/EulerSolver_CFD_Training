@@ -74,9 +74,6 @@ class Solver
 
     std::vector<Conservative_vector> conservative_field_;
 
-    // Packed communication storage in rho, rho*u, rho*v, rho*E order.
-    mutable std::vector<double> halo_buffer_;
-
     FaceBuffers2D faces_{};
 
     BoundaryConditions2D bc_;
@@ -132,12 +129,13 @@ class Solver
     // Check interior states and throw with cell coordinates on failure.
     //
     // state (in) - conserved variables in the ghosted cell field
-    void validate_interior( const std::vector<Conservative_vector> &state ) const;
+    // max_s (out, optional) - local maximum spectral rate for the same state
+    void validate_interior( const std::vector<Conservative_vector> &state, double *max_s = nullptr ) const;
 
-    // Compute the CFL time step using the global maximum acoustic signal rate.
+    // Compute the CFL time step from the spectral rate collected during state validation.
     //
-    // state (in) - conserved variables in the ghosted cell field
-    double compute_dt( const std::vector<Conservative_vector> &state ) const;
+    // max_s (in) - local maximum spectral rate for the current state
+    double compute_dt( double max_s ) const;
 
     // Compute the flux divergence; the input ghost cells must already be valid.
     //

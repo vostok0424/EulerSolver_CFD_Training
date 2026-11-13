@@ -1,7 +1,6 @@
 #include "mpi_parallel.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <exception>
 #include <string>
 
@@ -258,23 +257,17 @@ double MpiParallel::allreduce_sum( double local_val ) const
 }
 
 
-// Exchange packed cell components with Cartesian neighbors and fill ghost strips.
+// Pack boundary state strips directly and exchange them with Cartesian neighbors.
 //
-// data (in/out) - packed ghosted cell array; cell (i,j) begins at (i + (nx_local + 2*ng)*j)*ncomp
+// state (in/out) - ghosted conservative field; only received ghost strips are modified
 // nx_local (in) - local number of interior cells along x
 // ny_local (in) - local number of interior cells along y
 // ng (in) - number of ghost-cell layers on each side
-// ncomp (in) - number of packed components stored per cell
 //
 // Exchange cell values with the four Cartesian neighbors and update ghost strips.
 // MPI_PROC_NULL sides are left for the physical boundary conditions.
-void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, int ng, int ncomp ) const
+void MpiParallel::exchange_halos_2d( std::vector<Conservative_vector> &state, int nx_local, int ny_local, int ng ) const
 {
-    if ( !data )
-    {
-        throw std::runtime_error( "exchangeHalos2D: data is null" );
-    }
-
     if ( nx_local <= 0 || ny_local <= 0 )
     {
         throw std::runtime_error( "exchangeHalos2D: nxLocal/nyLocal must be > 0" );
@@ -285,28 +278,19 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         throw std::runtime_error( "exchangeHalos2D: ng must be >= 0" );
     }
 
-    if ( ncomp <= 0 )
-    {
-        throw std::runtime_error( "exchangeHalos2D: ncomp must be > 0" );
-    }
-
-    if ( ng == 0 )
-        return;
+    if ( nx_local < ng || ny_local < ng )
+        throw std::runtime_error( "exchangeHalos2D: local dimensions must be >= ng" );
 
     const int nx_tot = nx_local + 2 * ng;
     const int ny_tot = ny_local + 2 * ng;
+    if ( state.size() != static_cast<std::size_t>( nx_tot ) * static_cast<std::size_t>( ny_tot ) )
+        throw std::runtime_error( "exchangeHalos2D: state size mismatch" );
 
-    auto cell_ptr = [&]( int i, int j ) -> double *
-    {
-        const int k = i + nx_tot * j;
-        return data + static_cast<std::size_t>( k ) * static_cast<std::size_t>( ncomp );
-    };
+    if ( ng == 0 || ( nbr_.west == MPI_PROC_NULL && nbr_.east == MPI_PROC_NULL &&
+                       nbr_.south == MPI_PROC_NULL && nbr_.north == MPI_PROC_NULL ) )
+        return;
 
-    auto cell_ptr_c = [&]( int i, int j ) -> const double *
-    {
-        const int k = i + nx_tot * j;
-        return data + static_cast<std::size_t>( k ) * static_cast<std::size_t>( ncomp );
-    };
+    const int ncomp = conservative_variable_count;
 
     // Include orthogonal ghost cells in each exchanged strip; counts below are in doubles.
     const int strip_x_cells = ng * ny_tot;
@@ -326,8 +310,7 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         {
             for ( int di = 0; di < ng; ++di )
             {
-                const double *src = cell_ptr_c( i0 + di, j );
-                std::memcpy( &buf[t], src, sizeof( double ) * ncomp );
+                pack_state( state[i0 + di + nx_tot * j], &buf[t] );
 
                 t += ncomp;
             }
@@ -342,8 +325,7 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         {
             for ( int di = 0; di < ng; ++di )
             {
-                double *dst = cell_ptr( i0 + di, j );
-                std::memcpy( dst, &buf[t], sizeof( double ) * ncomp );
+                state[i0 + di + nx_tot * j] = unpack_state( &buf[t] );
 
                 t += ncomp;
             }
@@ -361,8 +343,7 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         {
             for ( int i = 0; i < nx_tot; ++i )
             {
-                const double *src = cell_ptr_c( i, j0 + dj );
-                std::memcpy( &buf[t], src, sizeof( double ) * ncomp );
+                pack_state( state[i + nx_tot * ( j0 + dj )], &buf[t] );
 
                 t += ncomp;
             }
@@ -377,8 +358,7 @@ void MpiParallel::exchange_halos_2d( double *data, int nx_local, int ny_local, i
         {
             for ( int i = 0; i < nx_tot; ++i )
             {
-                double *dst = cell_ptr( i, j0 + dj );
-                std::memcpy( dst, &buf[t], sizeof( double ) * ncomp );
+                state[i + nx_tot * ( j0 + dj )] = unpack_state( &buf[t] );
 
                 t += ncomp;
             }

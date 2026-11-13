@@ -35,22 +35,29 @@ struct Eigen4
 // p0 (out) - pressure at the characteristic reference state
 // h0 (out) - specific total enthalpy at the characteristic reference state
 // c0 (out) - sound speed at the characteristic reference state
+// left_checked, right_checked (in/out) - successful adjacent-cell checks for this reconstruction call
 static void face_state_2d( const Conservative_vector &ulc, const Conservative_vector &urc, double gamma, double &rho0,
-    double &u0, double &v0, double &p0, double &h0, double &c0 )
+    double &u0, double &v0, double &p0, double &h0, double &c0,
+    unsigned char &left_checked, unsigned char &right_checked )
 {
+    if ( !left_checked )
     {
         EvaluatedState checked_state{};
 
         require_success( calc_flow_variables( ulc, gamma, checked_state ), "calc_flow_variables" );
+        left_checked = 1;
     }
 
+    if ( !right_checked )
     {
         EvaluatedState checked_state{};
 
         require_success( calc_flow_variables( urc, gamma, checked_state ), "calc_flow_variables" );
+        right_checked = 1;
     }
 
-    // Check both adjacent states before averaging; an average must not hide an invalid input.
+    // Both adjacent states must pass checks in this call before averaging.
+    // Shared cells reuse successful checks; each new face average is still evaluated independently.
     const Conservative_vector uavg = 0.5 * ulc + 0.5 * urc;
 
     EvaluatedState primitive{};
@@ -593,6 +600,8 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
         return;
     }
 
+    checked_cells_.assign( state.size(), 0 );
+
     // Build one eigensystem per face, then project the selected MUSCL or WENO stencil.
     auto reconstruct_face =
         [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
@@ -606,7 +615,8 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
 
         double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, h0 = 0.0, c0 = 0.0;
 
-        face_state_2d( state[k_l], state[k_r], gamma, rho0, u0, v0, p0, h0, c0 );
+        face_state_2d( state[k_l], state[k_r], gamma, rho0, u0, v0, p0, h0, c0,
+            checked_cells_[k_l], checked_cells_[k_r] );
 
         Eigen4 eig{};
 
@@ -704,6 +714,8 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
         return;
     }
 
+    checked_cells_.assign( state.size(), 0 );
+
     auto reconstruct_face =
         [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
     {
@@ -716,7 +728,8 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
 
         double rho0 = 0.0, u0 = 0.0, v0 = 0.0, p0 = 0.0, h0 = 0.0, c0 = 0.0;
 
-        face_state_2d( state[k_b], state[k_t], gamma, rho0, u0, v0, p0, h0, c0 );
+        face_state_2d( state[k_b], state[k_t], gamma, rho0, u0, v0, p0, h0, c0,
+            checked_cells_[k_b], checked_cells_[k_t] );
 
         Eigen4 eig{};
 

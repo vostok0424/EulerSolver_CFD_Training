@@ -218,20 +218,7 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
 // Exchange MPI halos, then fill physical-boundary ghost cells.
 void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
 {
-    // Pack named state members explicitly; MPI does not depend on the structure memory layout.
-    halo_buffer_.resize( state.size() * conservative_variable_count );
-
-    for ( std::size_t cell = 0; cell < state.size(); ++cell )
-    {
-        pack_state( state[cell], halo_buffer_.data() + cell * conservative_variable_count );
-    }
-
-    mp_.exchange_halos_2d( halo_buffer_.data(), grid_.nx, grid_.ny, grid_.ng, conservative_variable_count );
-
-    for ( std::size_t cell = 0; cell < state.size(); ++cell )
-    {
-        state[cell] = unpack_state( halo_buffer_.data() + cell * conservative_variable_count );
-    }
+    mp_.exchange_halos_2d( state, grid_.nx, grid_.ny, grid_.ng );
 
     // Keep exchanged ghost values at MPI interfaces; apply physical conditions only at global edges.
     const auto nbr = mp_.neighbors();
@@ -266,9 +253,16 @@ void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
 //
 // field (in) - ghosted conservative field; only interior cells contribute to this operation
 //
-// Check every interior state; report global cell indices and conserved values on failure.
-void Solver::validate_interior( const std::vector<Conservative_vector> &field ) const
+// Check every interior state; optionally collect the CFL rate using the same evaluated properties.
+// max_s (out, optional) - local maximum spectral rate; only requested when another step follows.
+void Solver::validate_interior( const std::vector<Conservative_vector> &field, double *max_s ) const
 {
+    const double dx = grid_.dx();
+    const double dy = grid_.dy();
+
+    if ( max_s != nullptr )
+        *max_s = 0.0;
+
     for ( int j = 0; j < grid_.ny; ++j )
     {
         for ( int i = 0; i < grid_.nx; ++i )
@@ -277,10 +271,17 @@ void Solver::validate_interior( const std::vector<Conservative_vector> &field ) 
 
             try
             {
-                {
-                    EvaluatedState checked_state{};
+                EvaluatedState checked_state{};
 
-                    require_success( calc_flow_variables( state, gamma_, checked_state ), "calc_flow_variables" );
+                require_success( calc_flow_variables( state, gamma_, checked_state ), "calc_flow_variables" );
+
+                if ( max_s != nullptr )
+                {
+                    const double spectral_rate = ( std::abs( checked_state.x_velocity ) + checked_state.sound_speed ) / dx +
+                                                 ( std::abs( checked_state.y_velocity ) + checked_state.sound_speed ) / dy;
+                    if ( !std::isfinite( spectral_rate ) || spectral_rate <= 0.0 )
+                        throw std::runtime_error( "CFL: invalid spectral radius" );
+                    *max_s = std::max( *max_s, spectral_rate );
                 }
             }
             catch ( const std::exception &e )
@@ -297,37 +298,13 @@ void Solver::validate_interior( const std::vector<Conservative_vector> &field ) 
 }
 
 
-// Compute the CFL time step using the global maximum acoustic signal rate.
+// Compute a common MPI time step from the spectral rate collected during state validation.
 //
-// field (in) - ghosted conservative field; only interior cells contribute to this operation
+// max_s (in) - local maximum for the current conservative field
 //
-// Compute a common MPI time step: dt = CFL / max((abs(u) + c)/dx + (abs(v) + c)/dy).
-double Solver::compute_dt( const std::vector<Conservative_vector> &field ) const
+// Compute dt = CFL / global max((abs(u) + c)/dx + (abs(v) + c)/dy).
+double Solver::compute_dt( double max_s ) const
 {
-    const double dx = grid_.dx();
-    const double dy = grid_.dy();
-    double max_s = 0.0;
-
-    for ( int j = 0; j < grid_.ny; ++j )
-    {
-        for ( int i = 0; i < grid_.nx; ++i )
-        {
-            EvaluatedState primitive{};
-
-            require_success( calc_flow_variables( field[idx( grid_.ng + i, grid_.ng + j )], gamma_, primitive ), "calc_flow_variables" );
-            const double s = ( std::abs( primitive.x_velocity ) + primitive.sound_speed ) / dx +
-                             ( std::abs( primitive.y_velocity ) + primitive.sound_speed ) / dy;
-
-            if ( !std::isfinite( s ) || s <= 0.0 )
-            {
-                throw std::runtime_error( "CFL: invalid spectral radius at cell (" + std::to_string( grid_.i_beg + i ) +
-                                          "," + std::to_string( grid_.j_beg + j ) + ")" );
-            }
-
-            max_s = std::max( max_s, s );
-        }
-    }
-
     // Use the global maximum so every rank advances with the same time step.
     const double max_sg = mp_.allreduce_max( max_s );
     const double dt = cfl_ / max_sg;
@@ -538,7 +515,8 @@ void Solver::run()
               << "x" << grid_.ny_global << ", local=" << grid_.nx << "x" << grid_.ny << ", begin=(" << grid_.i_beg
               << "," << grid_.j_beg << ")\n";
 
-    validate_interior( conservative_field_ );
+    double max_s = 0.0;
+    validate_interior( conservative_field_, final_time_ > 0.0 ? &max_s : nullptr );
 
     process_regular_output_phase( step, t, true );
 
@@ -554,7 +532,7 @@ void Solver::run()
 
     while ( t < final_time_ )
     {
-        double dt = compute_dt( conservative_field_ );
+        double dt = compute_dt( max_s );
 
         // Land on the next scheduled time or final time without exceeding the CFL step.
         const bool time_mode = output_time_interval_ > 0.0;
@@ -571,7 +549,10 @@ void Solver::run()
         try
         {
             ti_->step( conservative_field_, dt, rhs_fun );
-            validate_interior( conservative_field_ );
+
+            // Reuse this validation's flow properties for the next step's CFL calculation.
+            const double next_time = reaches_target ? target_time : t + dt;
+            validate_interior( conservative_field_, next_time < final_time_ ? &max_s : nullptr );
         }
         catch ( const std::exception &e )
         {

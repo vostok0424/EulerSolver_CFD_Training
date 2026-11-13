@@ -107,6 +107,9 @@ class Reconstruction2D
   private:
     ReconstructionOptions opt_;
 
+    // Reset per direction/call: only reuse checks while the input state and gamma are unchanged.
+    mutable std::vector<unsigned char> checked_cells_;
+
     // Reuse normal face averages across directions and time-integration stages.
     std::vector<Conservative_vector> averages_left_;
     std::vector<Conservative_vector> averages_right_;
