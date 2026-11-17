@@ -23,7 +23,8 @@
 //
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
-    double gamma, Flux_vector &output, const EvaluatedState *left_flow, const EvaluatedState *right_flow )
+    double gamma, Flux_vector &output, const EvaluatedState *left_flow, const EvaluatedState *right_flow,
+    const Flux_vector *left_physical, const Flux_vector *right_physical )
 {
     if ( dir != x_direction && dir != y_direction )
     {
@@ -59,7 +60,15 @@ ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Cons
 
     Flux_vector fl{};
 
-    code = calc_physical_flux( left_state, wl, dir, fl );
+    if ( left_physical == nullptr )
+    {
+        code = calc_physical_flux( left_state, wl, dir, fl );
+    }
+    else
+    {
+        fl = *left_physical;
+        code = is_finite_flux( fl ) ? SUCCESS : NON_FINITE_FLUX;
+    }
     if ( code != SUCCESS )
     {
         return code;
@@ -67,7 +76,15 @@ ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Cons
 
     Flux_vector fr{};
 
-    code = calc_physical_flux( right_state, wr, dir, fr );
+    if ( right_physical == nullptr )
+    {
+        code = calc_physical_flux( right_state, wr, dir, fr );
+    }
+    else
+    {
+        fr = *right_physical;
+        code = is_finite_flux( fr ) ? SUCCESS : NON_FINITE_FLUX;
+    }
     if ( code != SUCCESS )
     {
         return code;
@@ -143,14 +160,12 @@ static void calc_hllc_star_state( const Conservative_vector &state, const Evalua
         code = INVALID_STAR_STATE;
         return;
     }
+    // Validate the conservative star state without evaluating unused sound speed or enthalpy.
+    Primitive_vector checked_state{};
+    code = calc_primitive_variables( us, gamma, checked_state );
+    if ( code != SUCCESS )
     {
-        EvaluatedState checked_state{};
-
-        code = calc_flow_variables( us, gamma, checked_state );
-        if ( code != SUCCESS )
-        {
-            return;
-        }
+        return;
     }
 
     output = us;
@@ -175,7 +190,7 @@ static void calc_hllc_star_state( const Conservative_vector &state, const Evalua
 //
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
-    double gamma, Flux_vector &output )
+    double gamma, Flux_vector &output, const EvaluatedState *left_flow, const EvaluatedState *right_flow )
 {
     ReturnCodes code = SUCCESS;
 
@@ -183,21 +198,29 @@ ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conserv
     {
         return INVALID_DIRECTION;
     }
-    EvaluatedState wl{};
-
-    code = calc_flow_variables( left_state, gamma, wl );
-    if ( code != SUCCESS )
+    if ( !std::isfinite( gamma ) || gamma <= 1.0 )
     {
-        return code;
+        return INVALID_GAMMA;
     }
-
-    EvaluatedState wr{};
-
-    code = calc_flow_variables( right_state, gamma, wr );
-    if ( code != SUCCESS )
+    EvaluatedState evaluated_left{}, evaluated_right{};
+    if ( left_flow == nullptr )
     {
-        return code;
+        code = calc_flow_variables( left_state, gamma, evaluated_left );
+        if ( code != SUCCESS )
+        {
+            return code;
+        }
     }
+    if ( right_flow == nullptr )
+    {
+        code = calc_flow_variables( right_state, gamma, evaluated_right );
+        if ( code != SUCCESS )
+        {
+            return code;
+        }
+    }
+    const auto &wl = left_flow == nullptr ? evaluated_left : *left_flow;
+    const auto &wr = right_flow == nullptr ? evaluated_right : *right_flow;
 
     const double a_l = wl.sound_speed;
     const double a_r = wr.sound_speed;
@@ -339,14 +362,15 @@ FluxScheme read_flux_scheme( const std::string &name )
 // Dispatch the selected calculation; output is assigned only on SUCCESS.
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_numerical_flux( FluxScheme scheme, const Conservative_vector &left_state,
-    const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output )
+    const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output,
+    const EvaluatedState *left_flow, const EvaluatedState *right_flow )
 {
     switch ( scheme )
     {
     case FluxScheme::rusanov:
-        return calc_rusanov_flux( left_state, right_state, dir, gamma, output );
+        return calc_rusanov_flux( left_state, right_state, dir, gamma, output, left_flow, right_flow );
     case FluxScheme::hllc:
-        return calc_hllc_flux( left_state, right_state, dir, gamma, output );
+        return calc_hllc_flux( left_state, right_state, dir, gamma, output, left_flow, right_flow );
     }
     return INVALID_FLUX_SCHEME;
 }

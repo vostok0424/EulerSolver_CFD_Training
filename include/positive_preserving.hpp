@@ -43,5 +43,8 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left, const Conserva
     const EvaluatedState &left_flow, const EvaluatedState &right_flow, const Flux_vector &low,
     const Flux_vector &high, double factor, double gamma, double rho_floor, double p_floor,
     Flux_vector &output, double &theta );
+// point_flow (out, optional) - flow variables of the limited point, reusing its verified pressure;
+// both point and point_flow are committed only on success.
 ReturnCodes limit_positive_point( const Conservative_vector &average, const EvaluatedState &flow,
-    double gamma, double rho_floor, double p_floor, Conservative_vector &point );
+    double gamma, double rho_floor, double p_floor, Conservative_vector &point,
+    EvaluatedState *point_flow = nullptr );

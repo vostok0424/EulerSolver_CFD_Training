@@ -73,7 +73,9 @@ ReturnCodes calc_sound_velocity( const Primitive_vector &primitive, double gamma
 // output (out) - computed primitive variables, sound speed and specific total enthalpy
 //
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output );
+// known_pressure (in, optional) - verified pressure of this exact state and gamma; nullptr recovers it
+ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output,
+    const double *known_pressure = nullptr );
 
 // Compute the squared velocity magnitude from the conserved variables.
 //

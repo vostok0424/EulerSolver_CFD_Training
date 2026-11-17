@@ -100,22 +100,24 @@ class Reconstruction2D
     // Solver validates interior states before applying halos/physical ghost boundaries.
     // Keep this trusted entry point private so standalone public calls always validate their inputs.
     // all_cells_validated (in) - also reuse ghost validation performed for the same immutable stage.
+    // skip_west, skip_south (in) - omit non-owned faces, later populated by owner-flux exchange.
+    // Transverse halo rows/columns for all owned faces remain available.
     friend class Solver;
     void reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state, int nx, int ny,
         int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
         std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
-        std::vector<FaceQuadratureState> &right_y, bool all_cells_validated = false );
+        std::vector<FaceQuadratureState> &right_y, bool all_cells_validated = false, bool skip_west = false, bool skip_south = false );
 
     // Implementation helpers share checks only within one public call or one validated x/y pair.
     void reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0 ) const;
+        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0, int first_face = 0 ) const;
     void reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0 ) const;
+        double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0, int first_face = 0 ) const;
     void reconstruct_faces_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
         double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right );
 
     void reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-        double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right );
+        double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right, int first_face = 0 );
 
     // Reused normal face averages, including two transverse halo layers for WENO-Z5.
     std::vector<Conservative_vector> averages_left_;

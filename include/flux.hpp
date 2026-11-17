@@ -30,11 +30,14 @@ FluxScheme read_flux_scheme( const std::string &name );
 // output (out) - flux vector of conserved variables in the selected direction
 // left_flow, right_flow (in, optional) - evaluated states matching the exact supplied states and gamma;
 // nullptr evaluates that side internally. Supplied cache data must belong to the same immutable stage.
+// left_physical, right_physical (in, optional) - physical fluxes of the same states, direction and gamma;
+// nullptr computes that side's physical flux. Cached physical data requires matching valid flow data.
 //
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
     double gamma, Flux_vector &output, const EvaluatedState *left_flow = nullptr,
-    const EvaluatedState *right_flow = nullptr );
+    const EvaluatedState *right_flow = nullptr, const Flux_vector *left_physical = nullptr,
+    const Flux_vector *right_physical = nullptr );
 
 // Compute the HLLC flux vector at a discontinuity interface.
 //
@@ -50,9 +53,11 @@ ReturnCodes calc_rusanov_flux( const Conservative_vector &left_state, const Cons
 // gamma (in) - ideal-gas heat-capacity ratio
 // output (out) - flux vector of conserved variables in the selected direction
 //
+// left_flow, right_flow (in, optional) - verified flow states matching the exact inputs and gamma
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conservative_vector &right_state, int dir,
-    double gamma, Flux_vector &output );
+    double gamma, Flux_vector &output, const EvaluatedState *left_flow = nullptr,
+    const EvaluatedState *right_flow = nullptr );
 
 // Compute the flux vector at a discontinuity interface using the selected scheme.
 //
@@ -63,6 +68,8 @@ ReturnCodes calc_hllc_flux( const Conservative_vector &left_state, const Conserv
 // gamma (in) - ideal-gas heat-capacity ratio
 // output (out) - flux vector of conserved variables in the selected direction
 //
+// left_flow, right_flow (in, optional) - same-state flow cache forwarded to the selected solver
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_numerical_flux( FluxScheme scheme, const Conservative_vector &left_state,
-    const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output );
+    const Conservative_vector &right_state, int dir, double gamma, Flux_vector &output,
+    const EvaluatedState *left_flow = nullptr, const EvaluatedState *right_flow = nullptr );

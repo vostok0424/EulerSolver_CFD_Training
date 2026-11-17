@@ -156,7 +156,12 @@ analytic solution. The benchmark measures complete process wall time, including
 MPI startup; it does not provide module timings or peak memory usage.
 
 Current-stage evaluated cell states are reused by positivity wave-speed checks,
-Rusanov baselines and point protection. Cached inputs require data evaluated
+Rusanov baselines and point protection. Point protection also returns the evaluated
+limited state, reusing its verified pressure in the Riemann solver. Physical fluxes
+of cell averages are cached per stage for the owned faces; these two flux arrays
+trade additional memory for fewer physical-flux evaluations. Non-owned west/south
+faces skip both normal and transverse reconstruction and receive the owner's
+final limited flux. Cached inputs require data evaluated
 from the exact same state and gas model; standalone APIs retain their input
 checks. The solver refreshes ghost data before evaluating its ghost cache.
 HLLC constructs only the star region selected by the contact-wave sign; invalid

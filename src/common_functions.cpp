@@ -274,7 +274,8 @@ ReturnCodes calc_sound_velocity( const Primitive_vector &primitive, double gamma
 // output (out) - computed primitive variables, sound speed and specific total enthalpy
 //
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output )
+ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output,
+    const double *known_pressure )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
     {
@@ -282,7 +283,25 @@ ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma,
     }
 
     Primitive_vector primitive{};
-    ReturnCodes code = calc_primitive_variables( state, gamma, primitive );
+    ReturnCodes code = SUCCESS;
+    if ( known_pressure == nullptr )
+    {
+        code = calc_primitive_variables( state, gamma, primitive );
+    }
+    else
+    {
+        if ( !is_finite_state( state ) )
+        {
+            return NON_FINITE_STATE;
+        }
+        if ( state.specific_mass <= 0.0 )
+        {
+            return NEGATIVE_DENSITY;
+        }
+        primitive = { state.specific_mass, state.specific_x_momentum / state.specific_mass,
+            state.specific_y_momentum / state.specific_mass, *known_pressure };
+        code = check_primitive( primitive );
+    }
     if ( code != SUCCESS )
     {
         return code;

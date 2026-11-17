@@ -246,12 +246,13 @@ static int idx2( int i, int j, int nx_tot )
 // nx_tot (in) - number of cells along x including ghost cells
 // ulx (out) - left conservative states on x-normal faces
 // urx (out) - right conservative states on x-normal faces
+// first_face (in) - first owned normal face, zero for standalone calls
 static void reconstruct_first_order_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    int nx_tot, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx )
+    int nx_tot, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx, int first_face = 0 )
 {
     for ( int j = 0; j < ny; ++j )
     {
-        for ( int i = 0; i < nx + 1; ++i )
+        for ( int i = first_face; i < nx + 1; ++i )
         {
             const int face = i + ( nx + 1 ) * j;
 
@@ -271,10 +272,11 @@ static void reconstruct_first_order_x( const std::vector<Conservative_vector> &s
 // nx_tot (in) - number of cells along x including ghost cells
 // uly (out) - left conservative states on y-normal faces
 // ury (out) - right conservative states on y-normal faces
+// first_face (in) - first owned normal face, zero for standalone calls
 static void reconstruct_first_order_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    int nx_tot, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury )
+    int nx_tot, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury, int first_face = 0 )
 {
-    for ( int j = 0; j < ny + 1; ++j )
+    for ( int j = first_face; j < ny + 1; ++j )
     {
         for ( int i = 0; i < nx; ++i )
         {
@@ -485,7 +487,7 @@ void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vecto
 
 
 void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx, int extension ) const
+    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx, int extension, int first_face ) const
 {
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
@@ -500,7 +502,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
         throw std::runtime_error( "Reconstruction2D::reconstructFacesX: ng too small for selected reconstruction.scheme" );
     }
 
-    if ( extension < 0 || extension > ng ||
+    if ( first_face < 0 || first_face > 1 || extension < 0 || extension > ng ||
          ( extension != 0 && opt_.scheme != ReconstructionScheme::weno_z5 ) )
     {
         throw std::runtime_error( "Invalid transverse face extension" );
@@ -516,7 +518,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
     // First order uses adjacent cell averages without characteristic projection.
     if ( opt_.scheme == ReconstructionScheme::first_order )
     {
-        reconstruct_first_order_x( state, nx, ny, ng, nx_tot, ulx, urx );
+        reconstruct_first_order_x( state, nx, ny, ng, nx_tot, ulx, urx, first_face );
         return;
     }
 
@@ -568,7 +570,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
 
     for ( int j = -extension; j < ny + extension; ++j )
     {
-        for ( int i = 0; i < nx + 1; ++i )
+        for ( int i = first_face; i < nx + 1; ++i )
         {
             const int f = i + ( nx + 1 ) * ( j + extension );
 
@@ -603,7 +605,7 @@ void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vecto
 
 
 void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury, int extension ) const
+    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury, int extension, int first_face ) const
 {
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
@@ -619,7 +621,7 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
             "Reconstruction2D::reconstructFacesY: ng too small for selected reconstruction.scheme" );
     }
 
-    if ( extension < 0 || extension > ng ||
+    if ( first_face < 0 || first_face > 1 || extension < 0 || extension > ng ||
          ( extension != 0 && opt_.scheme != ReconstructionScheme::weno_z5 ) )
     {
         throw std::runtime_error( "Invalid transverse face extension" );
@@ -639,7 +641,7 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
 
     if ( opt_.scheme == ReconstructionScheme::first_order )
     {
-        reconstruct_first_order_y( state, nx, ny, ng, nx_tot, uly, ury );
+        reconstruct_first_order_y( state, nx, ny, ng, nx_tot, uly, ury, first_face );
         return;
     }
 
@@ -689,7 +691,7 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
         }
     };
 
-    for ( int j = 0; j < ny + 1; ++j )
+    for ( int j = first_face; j < ny + 1; ++j )
     {
         for ( int i = -extension; i < nx + extension; ++i )
         {
@@ -717,7 +719,7 @@ void Reconstruction2D::reconstruct_faces( const std::vector<Conservative_vector>
 void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state,
     int nx, int ny, int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
     std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
-    std::vector<FaceQuadratureState> &right_y, bool all_cells_validated )
+    std::vector<FaceQuadratureState> &right_y, bool all_cells_validated, bool skip_west, bool skip_south )
 {
     const int nx_tot = nx + 2 * ng;
 
@@ -731,14 +733,17 @@ void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Co
     {
         checked_cells_.assign( state.size(), all_cells_validated ? 1 : 0 );
 
-        for ( int j = ng; j < ng + ny; ++j )
+        if ( !all_cells_validated )
         {
-            std::fill_n( checked_cells_.begin() + ng + nx_tot * j, nx, 1 );
+            for ( int j = ng; j < ng + ny; ++j )
+            {
+                std::fill_n( checked_cells_.begin() + ng + nx_tot * j, nx, 1 );
+            }
         }
     }
 
-    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x );
-    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y );
+    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x, skip_west ? 1 : 0 );
+    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y, skip_south ? 1 : 0 );
 }
 
 
@@ -818,7 +823,7 @@ void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_ve
 
 void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state,
     int nx, int ny, int ng, double gamma, int dir,
-    std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
+    std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right, int first_face )
 {
     if ( nx <= 0 || ny <= 0 || ( dir != x_direction && dir != y_direction ) )
     {
@@ -830,11 +835,11 @@ void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservati
     
     if ( dir == x_direction )
     {
-        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
+        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension, first_face );
     }
     else
     {
-        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
+        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension, first_face );
     }
     
     const int ni = dir == x_direction ? nx + 1 : nx;
@@ -848,9 +853,9 @@ void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservati
         const auto &averages = side == 0 ? averages_left_ : averages_right_;
         auto &points = side == 0 ? left : right;
         
-        for ( int j = 0; j < nj; ++j )
+        for ( int j = dir == y_direction ? first_face : 0; j < nj; ++j )
         {
-            for ( int i = 0; i < ni; ++i )
+            for ( int i = dir == x_direction ? first_face : 0; i < ni; ++i )
             {
                 const int f = i + ni * j;
                

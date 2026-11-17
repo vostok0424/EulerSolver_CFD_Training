@@ -78,6 +78,8 @@ class Solver
 
     // Current immutable-stage cell data; interiors are filled by validation, ghosts after apply_bc.
     std::vector<EvaluatedState> stage_flow_;
+    // Physical fluxes of immutable cell averages; shared by the two neighboring faces.
+    std::vector<Flux_vector> stage_physical_x_, stage_physical_y_;
     std::vector<double> flux_send_, flux_receive_;
 
     BoundaryConditions2D bc_;
