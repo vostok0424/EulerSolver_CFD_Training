@@ -118,8 +118,6 @@ struct ReconstructionOptions
     // Slope limiter used only by MUSCL.
     SlopeLimiter limiter = SlopeLimiter::van_leer;
 
-    // Return the ghost width required by the configured scheme.
-    int required_ng() const;
 };
 
 
@@ -281,8 +279,3 @@ std::array<double, conservative_variable_count> flux_components( const Flux_vect
 //
 // s (in) - selected reconstruction scheme
 int required_ghost_cells( ReconstructionScheme s );
-
-// Check whether the selected scheme requires characteristic reconstruction.
-//
-// s (in) - selected reconstruction scheme
-bool is_high_order( ReconstructionScheme s );

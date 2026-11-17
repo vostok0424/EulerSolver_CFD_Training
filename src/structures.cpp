@@ -132,17 +132,6 @@ int required_ghost_cells( ReconstructionScheme s )
 }
 
 
-// Check whether the selected scheme requires characteristic reconstruction.
-//
-// s (in) - selected reconstruction scheme
-//
-// Identify the scheme that requires characteristic reconstruction.
-bool is_high_order( ReconstructionScheme s )
-{
-    return s == ReconstructionScheme::muscl || s == ReconstructionScheme::weno_z5;
-}
-
-
 // Access the velocity component selected by direction: 0 for x, 1 for y.
 //
 // direction (in) - coordinate direction: x_direction or y_direction
@@ -200,13 +189,4 @@ double GridBlock2DInfo::dx() const
 double GridBlock2DInfo::dy() const
 {
     return ( y1 - y0 ) / static_cast<double>( ny_global );
-}
-
-
-// Return the ghost width required by the configured scheme.
-//
-// Delegate stencil requirements to the common scheme query.
-int ReconstructionOptions::required_ng() const
-{
-    return required_ghost_cells( scheme );
 }

@@ -77,32 +77,6 @@ ReturnCodes calc_sound_velocity( const Primitive_vector &primitive, double gamma
 ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma, EvaluatedState &output,
     const double *known_pressure = nullptr );
 
-// Compute the squared velocity magnitude from the conserved variables.
-//
-// state (in) - conserved variables of the flow state
-// output (out) - computed squared velocity magnitude
-//
-// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes velocity_squared( const Conservative_vector &state, double &output );
-
-// Recover pressure from the conserved variables.
-//
-// state (in) - conserved variables of the flow state
-// gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - computed pressure
-//
-// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes pressure_from_conservative( const Conservative_vector &state, double gamma, double &output );
-
-// Compute internal energy per unit mass by subtracting kinetic energy.
-//
-// state (in) - conserved variables of the flow state
-// output (out) - computed internal energy per unit mass
-//
-// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes specific_internal_energy_from_conservative( const Conservative_vector &state, double &output );
-
-
 // Compute the Euler flux in the selected coordinate direction.
 //
 // state (in) - conserved variables of the flow state
@@ -113,23 +87,3 @@ ReturnCodes specific_internal_energy_from_conservative( const Conservative_vecto
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_physical_flux( const Conservative_vector &state, const EvaluatedState &evaluated, int direction,
     Flux_vector &output );
-
-// Compute the Euler flux in the selected coordinate direction.
-//
-// state (in) - conserved variables of the flow state
-// direction (in) - coordinate direction: x_direction or y_direction
-// gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - flux vector of conserved variables in the selected direction
-//
-// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes calc_physical_flux( const Conservative_vector &state, int direction, double gamma, Flux_vector &output );
-
-// Compute the Euler flux in the selected coordinate direction.
-//
-// primitive (in) - density, velocity and pressure of the flow state
-// direction (in) - coordinate direction: x_direction or y_direction
-// gamma (in) - ideal-gas heat-capacity ratio
-// output (out) - flux vector of conserved variables in the selected direction
-//
-// Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
-ReturnCodes calc_physical_flux( const Primitive_vector &primitive, int direction, double gamma, Flux_vector &output );

@@ -156,6 +156,13 @@ class Solver
     void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs,
         double dt, double ax, double ay );
 
+    // Compute the selected direction's face-average fluxes, including point protection and flux limiting.
+    // state (in) - refreshed cell averages, matching the current stage caches
+    // dir (in) - x_direction or y_direction
+    // update_factor (in) - positivity auxiliary factor; ignored when positivity is disabled
+    // Writes faces_.x or faces_.y; leaves non-owned interfaces for synchronize_face_fluxes().
+    void build_face_fluxes( const std::vector<Conservative_vector> &state, int dir, double update_factor );
+
     // Obtain global direction wave-speed bounds from the refreshed ghosted stage field.
     // state (in) - finite admissible cell averages including boundary ghosts
     // ax, ay (out) - global maximum |u|+c and |v|+c

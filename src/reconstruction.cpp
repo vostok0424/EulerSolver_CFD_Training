@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 
@@ -464,28 +465,6 @@ Reconstruction2D::Reconstruction2D( const ReconstructionOptions &options ) : opt
 }
 
 
-// Compute left/right face averages.
-// state (in) - conserved variables in the ghosted cell field
-// nx (in) - number of interior cells along x
-// ny (in) - number of interior cells along y
-// ng (in) - number of ghost-cell layers on each side
-// gamma (in) - ideal-gas heat-capacity ratio
-// ulx (out) - left conservative states on x-normal faces
-// urx (out) - right conservative states on x-normal faces
-// Face index: i + (nx + 1) * j.
-// Throws on invalid input; output buffers may be partially written on reconstruction failure.
-void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const
-{
-    if ( opt_.scheme != ReconstructionScheme::first_order )
-    {
-        checked_cells_.assign( state.size(), 0 );
-    }
-
-    reconstruct_faces_x_impl( state, nx, ny, ng, gamma, ulx, urx );
-}
-
-
 void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
     double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx, int extension, int first_face ) const
 {
@@ -577,30 +556,6 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
             reconstruct_face( i, j, opt_.scheme, ulx[f], urx[f] );
         }
     }
-}
-
-
-// Compute bottom/top face averages.
-//
-// state (in) - conserved variables in the ghosted cell field
-// nx (in) - number of interior cells along x
-// ny (in) - number of interior cells along y
-// ng (in) - number of ghost-cell layers on each side
-// gamma (in) - ideal-gas heat-capacity ratio
-// uly (out) - left conservative states on y-normal faces
-// ury (out) - right conservative states on y-normal faces
-//
-// Face index: i + nx * j.
-// Throws on invalid input; output buffers may be partially written on reconstruction failure.
-void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const
-{
-    if ( opt_.scheme != ReconstructionScheme::first_order )
-    {
-        checked_cells_.assign( state.size(), 0 );
-    }
-
-    reconstruct_faces_y_impl( state, nx, ny, ng, gamma, uly, ury );
 }
 
 
@@ -703,18 +658,6 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
 }
 
 
-void Reconstruction2D::reconstruct_faces( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right )
-{
-    if ( opt_.scheme != ReconstructionScheme::first_order )
-    {
-        checked_cells_.assign( state.size(), 0 );
-    }
-
-    reconstruct_faces_impl( state, nx, ny, ng, gamma, dir, left, right );
-}
-
-
 // Reuse interior validation and successful ghost checks for an immutable x/y reconstruction pair.
 void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state,
     int nx, int ny, int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
@@ -744,25 +687,6 @@ void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Co
 
     reconstruct_quadrature_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x, skip_west ? 1 : 0 );
     reconstruct_quadrature_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y, skip_south ? 1 : 0 );
-}
-
-
-void Reconstruction2D::reconstruct_faces_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right )
-{
-    if ( dir != x_direction && dir != y_direction )
-    {
-        throw std::runtime_error( "Face reconstruction: invalid direction" );
-    }
-
-    if ( dir == x_direction )
-    {
-        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, left, right );
-    }
-    else
-    {
-        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, left, right );
-    }
 }
 
 
@@ -808,14 +732,38 @@ static void transverse_weno_z5( const double ( &q )[5], double ( &output )[face_
 }
 
 
-// Public reconstruction validates all face reference states, including transverse ghost rows.
+// Public entry validates every supplied cell average; the private solver entry reuses stage validation.
 void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_vector> &state,
     int nx, int ny, int ng, double gamma, int dir,
     std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
 {
+    if ( nx <= 0 || ny <= 0 || ng < required_ghost_cells( opt_.scheme ) ||
+         ( dir != x_direction && dir != y_direction ) )
+    {
+        throw std::runtime_error( "Reconstruction2D: invalid grid, ghost width or direction" );
+    }
+    if ( !std::isfinite( gamma ) || gamma <= 1.0 )
+    {
+        throw std::runtime_error( "Reconstruction2D: gamma must be finite and greater than one" );
+    }
+    const std::size_t nx_tot = static_cast<std::size_t>( nx ) + 2 * static_cast<std::size_t>( ng );
+    const std::size_t ny_tot = static_cast<std::size_t>( ny ) + 2 * static_cast<std::size_t>( ng );
+    if ( nx_tot > static_cast<std::size_t>( std::numeric_limits<int>::max() ) / ny_tot )
+    {
+        throw std::runtime_error( "Reconstruction2D: grid exceeds integer indexing range" );
+    }
+    if ( state.size() != nx_tot * ny_tot )
+    {
+        throw std::runtime_error( "Reconstruction2D: state size mismatch" );
+    }
+    for ( const auto &cell : state )
+    {
+        EvaluatedState evaluated{};
+        require_success( calc_flow_variables( cell, gamma, evaluated ), "reconstruction input state" );
+    }
     if ( opt_.scheme != ReconstructionScheme::first_order )
     {
-        checked_cells_.assign( state.size(), 0 );
+        checked_cells_.assign( state.size(), 1 );
     }
     reconstruct_quadrature_impl( state, nx, ny, ng, gamma, dir, left, right );
 }

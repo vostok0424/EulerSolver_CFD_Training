@@ -44,47 +44,6 @@ class Reconstruction2D
         return opt_;
     }
 
-    // Compute left/right face averages.
-    //
-    // state (in) - conserved variables in the ghosted cell field
-    // nx (in) - number of interior cells along x
-    // ny (in) - number of interior cells along y
-    // ng (in) - number of ghost-cell layers on each side
-    // gamma (in) - ideal-gas heat-capacity ratio
-    // ulx (out) - left conservative states on x-normal faces
-    // urx (out) - right conservative states on x-normal faces
-    //
-    // Face index: i + (nx + 1) * j.
-    // Throws on invalid input; output buffers may be partially written on reconstruction failure.
-    void reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
-        std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const;
-
-    // Compute bottom/top face averages.
-    //
-    // state (in) - conserved variables in the ghosted cell field
-    // nx (in) - number of interior cells along x
-    // ny (in) - number of interior cells along y
-    // ng (in) - number of ghost-cell layers on each side
-    // gamma (in) - ideal-gas heat-capacity ratio
-    // uly (out) - left conservative states on y-normal faces
-    // ury (out) - right conservative states on y-normal faces
-    //
-    // Face index: i + nx * j.
-    // Throws on invalid input; output buffers may be partially written on reconstruction failure.
-    void reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
-        std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const;
-
-    // Reconstruct left/right face states for the selected normal direction.
-    // state (in) - ghosted conservative field
-    // nx, ny (in) - interior cell counts
-    // ng (in) - ghost width required by the selected scheme
-    // gamma (in) - ideal-gas heat-capacity ratio
-    // dir (in) - x_direction or y_direction
-    // left, right (out) - face states, indexed by i + (nx + 1) * j for x, i + nx * j for y
-    // Throws on invalid input or reconstruction failure.
-    void reconstruct_faces( const std::vector<Conservative_vector> &state, int nx, int ny, int ng, double gamma,
-        int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right );
-
     // Reconstruct face point states, including transverse WENO-Z for wenoZ5.
     // state (in) - ghosted cell averages, including valid corner ghosts
     // nx, ny (in) - interior cell counts
@@ -92,7 +51,9 @@ class Reconstruction2D
     // gamma (in) - ideal-gas heat-capacity ratio
     // dir (in) - x_direction or y_direction
     // left, right (out) - face-major point states; x face index i+(nx+1)*j, y index i+nx*j
-    // WENO-Z5 fills four nodes; firstOrder and MUSCL fill slot zero. Throws on invalid input.
+    // WENO-Z5 fills four nodes; firstOrder and MUSCL fill slot zero.
+    // Validates grid, gas model and all supplied ghosted cell averages before reconstruction.
+    // Throws on invalid input; output buffers may be partially written on reconstruction failure.
     void reconstruct_quadrature( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
         double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right );
 
@@ -113,8 +74,7 @@ class Reconstruction2D
         double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0, int first_face = 0 ) const;
     void reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
         double gamma, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right, int extension = 0, int first_face = 0 ) const;
-    void reconstruct_faces_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-        double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right );
+
 
     void reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
         double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right, int first_face = 0 );
