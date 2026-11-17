@@ -30,13 +30,26 @@ Each rank's local dimensions must be at least the ghost width `ng`.
 |---|---|
 | `flux` | `rusanov`, `hllc`, `ausm`, `godunov` |
 | `timeIntegrator` | `euler`, `rk2`, `ssprk3`, `rk4` |
-| `reconstruction.scheme` | `firstOrder`, `muscl` |
+| `reconstruction.scheme` | `firstOrder`, `muscl`, `wenoZ5` |
 | `reconstruction.limiter` | `none`, `minmod`, `vanLeer` |
 | Boundary type | `zeroGradient`, `slipWall`, `symmetry`, `inlet`, `outlet` |
 
 MUSCL reconstruction uses characteristic projection at the arithmetic mean of
 adjacent conservative states. `firstOrder` and MUSCL need one and two ghost
-layers respectively.
+layers respectively. WENO-Z5 (`wenoZ5`) requires three ghost layers
+and performs characteristic normal reconstruction with weights
+`alpha_k = d_k * (1 + (tau5 / (beta_k + eps))^2)`, `tau5 = abs(beta0 - beta2)`.
+`eps` is defined as `WENO_Z_EPS` (`1e-12`) in `include/constants.hpp`;
+changing it requires recompilation.
+The MUSCL limiter does not affect WENO-Z5. Characteristic normal reconstruction
+is followed by componentwise conservative transverse WENO-Z reconstruction and
+four-point Gauss-Legendre face integration. The transverse candidate coefficients
+and positive optimal weights depend on the Gauss node. Normal face averages
+include two transverse halo layers; valid diagonal ghost data is required.
+The smooth interior spatial discretization targets fifth order. Full-solution
+accuracy also depends on initialization, boundary closure and time integration;
+SSPRK3 with a fixed CFL generally limits temporal convergence to third order.
+See [Borges et al. (2008)](https://doi.org/10.1016/j.jcp.2007.11.038).
 
 Time accuracy depends on the chosen integrator. `symmetry` uses slip-wall
 reflection; `internal` is reserved for MPI interfaces. Legacy flux names such as

@@ -17,6 +17,10 @@ struct Conservative_vector
 };
 
 
+// Point states in increasing transverse coordinate; low-order schemes use slot zero.
+using FaceQuadratureState = std::array<Conservative_vector, face_quadrature_count>;
+
+
 // Store density, x/y velocity and pressure.
 struct Primitive_vector
 {
@@ -88,11 +92,12 @@ struct GridBlock2DInfo
 };
 
 
-// Select first-order constant or second-order MUSCL reconstruction.
+// Select first-order constant, second-order MUSCL or fifth-order normal WENO-Z reconstruction.
 enum class ReconstructionScheme
 {
     first_order,
-    muscl
+    muscl,
+    weno_z5
 };
 
 
@@ -105,7 +110,7 @@ enum class SlopeLimiter
 };
 
 
-// Store the scheme, MUSCL limiter.
+// Store the reconstruction scheme and its numerical parameters.
 struct ReconstructionOptions
 {
     ReconstructionScheme scheme = ReconstructionScheme::first_order;
@@ -271,12 +276,12 @@ std::array<double, conservative_variable_count> state_components( const Conserva
 // flux (in) - flux vector of conserved variables
 std::array<double, conservative_variable_count> flux_components( const Flux_vector &flux );
 
-// Return the required ghost width: one for first order and two for MUSCL.
+// Return the required ghost width: one for first order, two for MUSCL and three for WENO-Z5.
 //
 // s (in) - selected reconstruction scheme
 int required_ghost_cells( ReconstructionScheme s );
 
-// Check whether the selected scheme is MUSCL.
+// Check whether the selected scheme requires characteristic reconstruction.
 //
 // s (in) - selected reconstruction scheme
 bool is_high_order( ReconstructionScheme s );

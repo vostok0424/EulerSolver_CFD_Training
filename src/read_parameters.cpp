@@ -526,6 +526,8 @@ static void read_scheme( ParameterInput &input, const std::string &key, const st
         value = ReconstructionScheme::first_order;
     else if ( text == "muscl" )
         value = ReconstructionScheme::muscl;
+    else if ( text == "wenoZ5" )
+        value = ReconstructionScheme::weno_z5;
     else
         fail( input, INVALID_PARAMETER_VALUE, key, "unsupported value: " + text );
 }

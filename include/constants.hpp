@@ -3,6 +3,18 @@
 #include <cstddef>
 
 
+// Positive regularization used by the WENO-Z nonlinear weights.
+#define WENO_Z_EPS 1e-12
+
+static_assert( WENO_Z_EPS > 0.0, "WENO_Z_EPS must be positive" );
+
+
+// Four-point Gauss-Legendre rule for a face average on [-1/2, 1/2].
+constexpr int face_quadrature_count = 4;
+constexpr double face_quadrature_nodes[4] = { -0.43056815579702629, -0.16999052179242813, 0.16999052179242813, 0.43056815579702629 };
+constexpr double face_quadrature_weights[4] = { 0.17392742256872673, 0.32607257743127327, 0.32607257743127327, 0.17392742256872673 };
+
+
 constexpr std::size_t conservative_variable_count = 4;
 
 // Select the coordinate axis; integer-valued interfaces also reject invalid direction values.
