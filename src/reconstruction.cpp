@@ -6,12 +6,6 @@
 #include <cctype>
 #include <cmath>
 #include <stdexcept>
-#include <array>
-
-
-// Four-point Gauss nodes in the normalized transverse coordinate [-1/2, 1/2].
-const int face_quadrature_point_count = 4;
-const double face_quadrature_nodes[4] = { -0.43056815579702628761, -0.16999052179242813240, 0.16999052179242813240, 0.43056815579702628761 };
 
 
 // Shared characteristic projection.
@@ -397,152 +391,6 @@ static void reconstruct_face_muscl_from_char_cache( const Eigen4 &eig, SlopeLimi
 }
 
 
-// 3. Fifth-order WENO reconstruction.
-//
-// Implementation: fifth-order JS weights with exponent two; normal reconstruction is characteristic.
-// The transverse finite-volume extension evaluates quadratic candidates at four Gauss nodes with
-// node-dependent positive optimal weights and the same JS smoothness indicators.
-//
-// References: G.-S. Jiang and C.-W. Shu (1996), "Efficient Implementation of Weighted ENO Schemes",
-// J. Comput. Phys. 126(1), 202-228. https://doi.org/10.1006/jcph.1996.0130
-// C.-W. Shu (1997), "Essentially Non-Oscillatory and Weighted Essentially Non-Oscillatory Schemes
-// for Hyperbolic Conservation Laws", NASA/CR-97-206253, ICASE Report 97-65 (finite-volume reconstruction).
-// https://ntrs.nasa.gov/citations/19980007543
-
-// Compute the inverse-square factor used in Jiang-Shu WENO weights.
-//
-// x (in) - scalar argument of the reconstruction helper
-static double inv_pow_weno( double x )
-{
-    return 1.0 / ( x * x );
-}
-
-
-// Compute the Jiang-Shu smoothness indicators for three quadratic substencils.
-//
-// qim2 (in) - scalar cell average two cells to the left
-// qim1 (in) - scalar cell average one cell to the left
-// qi (in) - central scalar cell average
-// qip1 (in) - scalar cell average one cell to the right
-// qip2 (in) - scalar cell average two cells to the right
-// b0 (out) - smoothness indicator on cells [-2, -1, 0]
-// b1 (out) - smoothness indicator on cells [-1, 0, 1]
-// b2 (out) - smoothness indicator on cells [0, 1, 2]
-static void weno5_indicators( double qim2, double qim1, double qi, double qip1, double qip2, double &b0, double &b1,
-    double &b2 )
-{
-    // Compute the Jiang-Shu smoothness indicators for the three substencils.
-    const double d0 = qim2 - 2.0 * qim1 + qi;
-    const double d1 = qim1 - 2.0 * qi + qip1;
-    const double d2 = qi - 2.0 * qip1 + qip2;
-
-    b0 = ( 13.0 / 12.0 ) * d0 * d0 + 0.25 * ( qim2 - 4.0 * qim1 + 3.0 * qi ) * ( qim2 - 4.0 * qim1 + 3.0 * qi );
-    b1 = ( 13.0 / 12.0 ) * d1 * d1 + 0.25 * ( qim1 - qip1 ) * ( qim1 - qip1 );
-    b2 = ( 13.0 / 12.0 ) * d2 * d2 + 0.25 * ( 3.0 * qi - 4.0 * qip1 + qip2 ) * ( 3.0 * qi - 4.0 * qip1 + qip2 );
-}
-
-
-// Compute and normalize the three Jiang-Shu nonlinear weights using cached factors.
-//
-// factor0 (in) - 1 / (eps + b0)^2 for the first substencil
-// factor1 (in) - 1 / (eps + b1)^2 for the second substencil
-// factor2 (in) - 1 / (eps + b2)^2 for the third substencil
-// g0 (in) - first optimal linear weight
-// g1 (in) - second optimal linear weight
-// g2 (in) - third optimal linear weight
-// w0 (out) - first normalized nonlinear weight
-// w1 (out) - second normalized nonlinear weight
-// w2 (out) - third normalized nonlinear weight
-static void weno5_weights( double factor0, double factor1, double factor2, double g0, double g1, double g2,
-    double &w0, double &w1, double &w2 )
-{
-    // Each unnormalized weight is its linear weight divided by (epsilon + beta) squared.
-    const double a0 = g0 * factor0;
-    const double a1 = g1 * factor1;
-    const double a2 = g2 * factor2;
-    // Normalize the weights so their sum is one.
-    const double asum = a0 + a1 + a2;
-
-    w0 = a0 / asum;
-    w1 = a1 / asum;
-    w2 = a2 / asum;
-}
-
-
-// Compute the left face value from the five-cell stencil centered on the left cell.
-//
-// qim2 (in) - scalar stencil value two cells to the left
-// qim1 (in) - scalar stencil value one cell to the left
-// qi (in) - scalar stencil value at the center
-// qip1 (in) - scalar stencil value one cell to the right
-// qip2 (in) - scalar stencil value two cells to the right
-// eps (in) - positive Jiang-Shu weight regularization parameter
-static double weno5_left( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
-{
-    // Evaluate the three third-order candidate polynomials at the face.
-    const double p0 = ( 1.0 / 3.0 ) * qim2 - ( 7.0 / 6.0 ) * qim1 + ( 11.0 / 6.0 ) * qi;
-    const double p1 = ( -1.0 / 6.0 ) * qim1 + ( 5.0 / 6.0 ) * qi + ( 1.0 / 3.0 ) * qip1;
-    const double p2 = ( 1.0 / 3.0 ) * qi + ( 5.0 / 6.0 ) * qip1 - ( 1.0 / 6.0 ) * qip2;
-
-    double b0 = 0.0, b1 = 0.0, b2 = 0.0;
-
-    weno5_indicators( qim2, qim1, qi, qip1, qip2, b0, b1, b2 );
-
-    // Use the fifth-order linear weights before applying smoothness-dependent weighting.
-    const double g0 = 0.1;
-    const double g1 = 0.6;
-    const double g2 = 0.3;
-
-    double w0 = 0.0, w1 = 0.0, w2 = 0.0;
-
-    const double factor0 = inv_pow_weno( eps + b0 );
-    const double factor1 = inv_pow_weno( eps + b1 );
-    const double factor2 = inv_pow_weno( eps + b2 );
-
-    weno5_weights( factor0, factor1, factor2, g0, g1, g2, w0, w1, w2 );
-
-    return w0 * p0 + w1 * p1 + w2 * p2;
-}
-
-
-// Compute the right face value by reversing the five-cell stencil.
-//
-// qim2 (in) - scalar stencil value two cells to the left
-// qim1 (in) - scalar stencil value one cell to the left
-// qi (in) - scalar stencil value at the center
-// qip1 (in) - scalar stencil value one cell to the right
-// qip2 (in) - scalar stencil value two cells to the right
-// eps (in) - positive Jiang-Shu weight regularization parameter
-static double weno5_right( double qim2, double qim1, double qi, double qip1, double qip2, double eps )
-{
-    return weno5_left( qip2, qip1, qi, qim1, qim2, eps );
-}
-
-
-// Reconstruct both face states from a six-cell characteristic stencil using WENO5.
-//
-// eig (in) - characteristic eigenvectors at the face reference state
-// eps (in) - positive Jiang-Shu weight regularization parameter
-// wc (in) - cell stencil of characteristic components ordered along the face normal
-// ulf (out) - left conservative state reconstructed at the interface
-// urf (out) - right conservative state reconstructed at the interface
-static void reconstruct_face_weno5_from_char_cache( const Eigen4 &eig, double eps,
-    const double ( &wc )[6][conservative_variable_count], Conservative_vector &ulf, Conservative_vector &urf )
-{
-    double w_lf[conservative_variable_count]{};
-    double w_rf[conservative_variable_count]{};
-
-    for ( std::size_t s = 0; s < conservative_variable_count; ++s )
-    {
-        w_lf[s] = weno5_left( wc[0][s], wc[1][s], wc[2][s], wc[3][s], wc[4][s], eps );
-        w_rf[s] = weno5_right( wc[1][s], wc[2][s], wc[3][s], wc[4][s], wc[5][s], eps );
-    }
-
-    reconstruct_conservative_from_char_2d( eig, w_lf, ulf );
-    reconstruct_conservative_from_char_2d( eig, w_rf, urf );
-}
-
-
 // Store the supplied reconstruction options.
 //
 // options (in) - parsed options consumed by this module
@@ -551,7 +399,7 @@ Reconstruction2D::Reconstruction2D( const ReconstructionOptions &options ) : opt
 }
 
 
-// Compute left/right face averages; optional transverse extension adds halo rows.
+// Compute left/right face averages.
 // state (in) - conserved variables in the ghosted cell field
 // nx (in) - number of interior cells along x
 // ny (in) - number of interior cells along y
@@ -559,22 +407,19 @@ Reconstruction2D::Reconstruction2D( const ReconstructionOptions &options ) : opt
 // gamma (in) - ideal-gas heat-capacity ratio
 // ulx (out) - left conservative states on x-normal faces
 // urx (out) - right conservative states on x-normal faces
-// transverse_extension (in) - extra transverse layers, from zero to ng; nonzero requires WENO5
-// Face index: i + (nx + 1) * (j + transverse_extension).
+// Face index: i + (nx + 1) * j.
 // Throws on invalid input; output buffers may be partially written on reconstruction failure.
 void Reconstruction2D::reconstruct_faces_x( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx,
-    int transverse_extension ) const
+    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const
 {
     if ( opt_.scheme != ReconstructionScheme::first_order )
         checked_cells_.assign( state.size(), 0 );
-    reconstruct_faces_x_impl( state, nx, ny, ng, gamma, ulx, urx, transverse_extension );
+    reconstruct_faces_x_impl( state, nx, ny, ng, gamma, ulx, urx );
 }
 
 
 void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx,
-    int transverse_extension ) const
+    double gamma, std::vector<Conservative_vector> &ulx, std::vector<Conservative_vector> &urx ) const
 {
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
@@ -590,13 +435,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
             "Reconstruction2D::reconstructFacesX: ng too small for selected reconstruction.scheme" );
     }
 
-    if ( transverse_extension < 0 || transverse_extension > ng ||
-         ( transverse_extension != 0 && opt_.scheme != ReconstructionScheme::weno5 ) )
-    {
-        throw std::runtime_error( "Invalid transverse reconstruction extension" );
-    }
-
-    const size_t n_face_x = static_cast<size_t>( nx + 1 ) * static_cast<size_t>( ny + 2 * transverse_extension );
+    const size_t n_face_x = static_cast<size_t>( nx + 1 ) * static_cast<size_t>( ny );
 
     if ( ulx.size() != n_face_x )
         ulx.resize( n_face_x );
@@ -610,7 +449,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
         return;
     }
 
-    // Build one eigensystem per face, then project the selected MUSCL or WENO stencil.
+    // Build one eigensystem per face, then project the selected MUSCL stencil.
     auto reconstruct_face =
         [&]( int i_face, int j_face, ReconstructionScheme scheme, Conservative_vector &ulf, Conservative_vector &urf )
     {
@@ -641,30 +480,17 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
             project_char4( eig, q_base[3], wc[3] );
             reconstruct_face_muscl_from_char_cache( eig, opt_.limiter, wc, ulf, urf );
         }
-        else if ( scheme == ReconstructionScheme::weno5 )
-        {
-            double wc[6][conservative_variable_count];
-            const Conservative_vector *q_base = &state[idx2( i_l - 2, j, nx_tot )];
-
-            project_char4( eig, q_base[0], wc[0] );
-            project_char4( eig, q_base[1], wc[1] );
-            project_char4( eig, q_base[2], wc[2] );
-            project_char4( eig, q_base[3], wc[3] );
-            project_char4( eig, q_base[4], wc[4] );
-            project_char4( eig, q_base[5], wc[5] );
-            reconstruct_face_weno5_from_char_cache( eig, opt_.eps, wc, ulf, urf );
-        }
         else
         {
             throw std::runtime_error( "Characteristic reconstruction: unsupported scheme" );
         }
     };
 
-    for ( int j = -transverse_extension; j < ny + transverse_extension; ++j )
+    for ( int j = 0; j < ny; ++j )
     {
         for ( int i = 0; i < nx + 1; ++i )
         {
-            const int f = i + ( nx + 1 ) * ( j + transverse_extension );
+            const int f = i + ( nx + 1 ) * ( j );
 
             reconstruct_face( i, j, opt_.scheme, ulx[f], urx[f] );
         }
@@ -672,7 +498,7 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
 }
 
 
-// Compute bottom/top face averages; optional transverse extension adds halo columns.
+// Compute bottom/top face averages.
 //
 // state (in) - conserved variables in the ghosted cell field
 // nx (in) - number of interior cells along x
@@ -681,23 +507,20 @@ void Reconstruction2D::reconstruct_faces_x_impl( const std::vector<Conservative_
 // gamma (in) - ideal-gas heat-capacity ratio
 // uly (out) - left conservative states on y-normal faces
 // ury (out) - right conservative states on y-normal faces
-// transverse_extension (in) - extra transverse layers, from zero to ng; nonzero requires WENO5
 //
-// Face index: i + transverse_extension + (nx + 2 * transverse_extension) * j.
+// Face index: i + nx * j.
 // Throws on invalid input; output buffers may be partially written on reconstruction failure.
 void Reconstruction2D::reconstruct_faces_y( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury,
-    int transverse_extension ) const
+    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const
 {
     if ( opt_.scheme != ReconstructionScheme::first_order )
         checked_cells_.assign( state.size(), 0 );
-    reconstruct_faces_y_impl( state, nx, ny, ng, gamma, uly, ury, transverse_extension );
+    reconstruct_faces_y_impl( state, nx, ny, ng, gamma, uly, ury );
 }
 
 
 void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury,
-    int transverse_extension ) const
+    double gamma, std::vector<Conservative_vector> &uly, std::vector<Conservative_vector> &ury ) const
 {
     const int nx_tot = nx + 2 * ng;
     const int ny_tot = ny + 2 * ng;
@@ -713,13 +536,7 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
             "Reconstruction2D::reconstructFacesY: ng too small for selected reconstruction.scheme" );
     }
 
-    if ( transverse_extension < 0 || transverse_extension > ng ||
-         ( transverse_extension != 0 && opt_.scheme != ReconstructionScheme::weno5 ) )
-    {
-        throw std::runtime_error( "Invalid transverse reconstruction extension" );
-    }
-
-    const size_t n_face_y = static_cast<size_t>( nx + 2 * transverse_extension ) * static_cast<size_t>( ny + 1 );
+    const size_t n_face_y = static_cast<size_t>( nx ) * static_cast<size_t>( ny + 1 );
 
     if ( uly.size() != n_face_y )
         uly.resize( n_face_y );
@@ -763,21 +580,6 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
             project_char4( eig, *q_cache[3], wc[3] );
             reconstruct_face_muscl_from_char_cache( eig, opt_.limiter, wc, ulf, urf );
         }
-        else if ( scheme == ReconstructionScheme::weno5 )
-        {
-            double wc[6][conservative_variable_count];
-            const Conservative_vector *q_cache[6] = { &state[idx2( i, j_b - 2, nx_tot )],
-                &state[idx2( i, j_b - 1, nx_tot )], &state[idx2( i, j_b, nx_tot )], &state[idx2( i, j_t, nx_tot )],
-                &state[idx2( i, j_t + 1, nx_tot )], &state[idx2( i, j_t + 2, nx_tot )] };
-
-            project_char4( eig, *q_cache[0], wc[0] );
-            project_char4( eig, *q_cache[1], wc[1] );
-            project_char4( eig, *q_cache[2], wc[2] );
-            project_char4( eig, *q_cache[3], wc[3] );
-            project_char4( eig, *q_cache[4], wc[4] );
-            project_char4( eig, *q_cache[5], wc[5] );
-            reconstruct_face_weno5_from_char_cache( eig, opt_.eps, wc, ulf, urf );
-        }
         else
         {
             throw std::runtime_error( "Characteristic reconstruction: unsupported scheme" );
@@ -786,9 +588,9 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
 
     for ( int j = 0; j < ny + 1; ++j )
     {
-        for ( int i = -transverse_extension; i < nx + transverse_extension; ++i )
+        for ( int i = 0; i < nx; ++i )
         {
-            const int f = i + transverse_extension + ( nx + 2 * transverse_extension ) * j;
+            const int f = i + ( nx ) * j;
 
             reconstruct_face( i, j, opt_.scheme, uly[f], ury[f] );
         }
@@ -796,82 +598,20 @@ void Reconstruction2D::reconstruct_faces_y_impl( const std::vector<Conservative_
 }
 
 
-// Reconstruct five transverse face averages to four Gauss points using WENO-JS.
-// Uses the JS weighting and finite-volume reconstruction references listed in Section 3 above.
-//
-// q (in) - five face averages, with the target face at index two
-// eps (in) - positive regularization for the Jiang-Shu nonlinear weights
-// output (out) - point values in increasing transverse Gauss-node order
-static void transverse_weno5( const std::array<double, 5> &q, double eps, std::array<double, face_quadrature_point_count> &output )
-{
-    // Optimal weights match the five-cell quartic at each Gauss point.
-    // All are positive; negative nodes use the reflected weights of positive nodes.
-    const double linear_weights[4][3] =
-    {
-        { 0.26584209747783194, 0.61125049003224860, 0.12290741248991946 },
-        { 0.12816415843550585, 0.52196914985035634, 0.34986669171413781 },
-        { 0.34986669171413781, 0.52196914985035634, 0.12816415843550585 },
-        { 0.12290741248991946, 0.61125049003224860, 0.26584209747783194 }
-    };
-    
-    const double a = q[0] - q[2];
-    const double b = q[1] - q[2];
-    const double c = q[3] - q[2];
-    const double d = q[4] - q[2];
-    double b0 = 0.0, b1 = 0.0, b2 = 0.0;
-
-    weno5_indicators( q[0], q[1], q[2], q[3], q[4], b0, b1, b2 );
-
-    // These factors depend on the stencil, so compute them once for all Gauss nodes.
-    const double factor0 = inv_pow_weno( eps + b0 );
-    const double factor1 = inv_pow_weno( eps + b1 );
-    const double factor2 = inv_pow_weno( eps + b2 );
-
-    for ( int n = 0; n < face_quadrature_point_count; ++n )
-    {
-        const double x = face_quadrature_nodes[n];
-        // Quadratic candidates preserve the central average; subtract it before evaluation.
-        const double p0 = -a / 24.0 + b / 12.0 + x * ( a / 2.0 - 2.0 * b + x * ( a / 2.0 - b ) );
-        const double p1 = -( b + c ) / 24.0 + x * ( ( c - b ) / 2.0 + x * ( b + c ) / 2.0 );
-        const double p2 = c / 12.0 - d / 24.0 + x * ( 2.0 * c - d / 2.0 + x * ( -c + d / 2.0 ) );
-        double w0 = 0.0, w1 = 0.0, w2 = 0.0;
-
-        weno5_weights( factor0, factor1, factor2, linear_weights[n][0], linear_weights[n][1], linear_weights[n][2],
-            w0, w1, w2 );
-        output[n] = q[2] + w0 * p0 + w1 * p1 + w2 * p2;
-    }
-}
-
-
-// Reconstruct WENO5 face averages to transverse Gauss points with componentwise WENO-JS.
-//
-// state (in) - conserved cell averages, including valid diagonal ghost cells
-// nx (in) - number of interior cells along x
-// ny (in) - number of interior cells along y
-// ng (in) - number of ghost layers; WENO5 requires at least three
-// gamma (in) - ideal-gas heat-capacity ratio
-// dir (in) - face-normal direction: x_direction or y_direction
-// left (out) - left/bottom point states, indexed by face then transverse Gauss node
-// right (out) - right/top point states, indexed by face then transverse Gauss node
-//
-// Face index is i + (nx + 1) * j for x and i + nx * j for y.
-// WENO5 fills all four slots in increasing transverse coordinate; other schemes fill slot zero.
-// Reuses internal face-average buffers between calls.
-// Throws on invalid input; output buffers may be partially written on reconstruction failure.
-void Reconstruction2D::reconstruct_quadrature( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
+void Reconstruction2D::reconstruct_faces( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right )
 {
     if ( opt_.scheme != ReconstructionScheme::first_order )
         checked_cells_.assign( state.size(), 0 );
-    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, dir, left, right );
+    reconstruct_faces_impl( state, nx, ny, ng, gamma, dir, left, right );
 }
 
 
 // Reuse interior validation and successful ghost checks for an immutable x/y reconstruction pair.
-void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state,
-    int nx, int ny, int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
-    std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
-    std::vector<FaceQuadratureState> &right_y )
+void Reconstruction2D::reconstruct_validated_faces_xy( const std::vector<Conservative_vector> &state,
+    int nx, int ny, int ng, double gamma, std::vector<Conservative_vector> &left_x,
+    std::vector<Conservative_vector> &right_x, std::vector<Conservative_vector> &left_y,
+    std::vector<Conservative_vector> &right_y )
 {
     const int nx_tot = nx + 2 * ng;
     if ( nx <= 0 || ny <= 0 || ng < 0 ||
@@ -885,87 +625,25 @@ void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Co
             std::fill_n( checked_cells_.begin() + ng + nx_tot * j, nx, 1 );
     }
 
-    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x );
-    reconstruct_quadrature_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y );
+    reconstruct_faces_impl( state, nx, ny, ng, gamma, x_direction, left_x, right_x );
+    reconstruct_faces_impl( state, nx, ny, ng, gamma, y_direction, left_y, right_y );
 }
 
 
-void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
-    double gamma, int dir, std::vector<FaceQuadratureState> &left, std::vector<FaceQuadratureState> &right )
+void Reconstruction2D::reconstruct_faces_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,
+    double gamma, int dir, std::vector<Conservative_vector> &left, std::vector<Conservative_vector> &right )
 {
     if ( dir != x_direction && dir != y_direction )
     {
-        throw std::runtime_error( "Quadrature reconstruction: invalid direction" );
+        throw std::runtime_error( "Face reconstruction: invalid direction" );
     }
-
-    const bool high_order = opt_.scheme == ReconstructionScheme::weno5;
-    const int extension = high_order ? 2 : 0;
 
     if ( dir == x_direction )
     {
-        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
+        reconstruct_faces_x_impl( state, nx, ny, ng, gamma, left, right );
     }
     else
     {
-        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, averages_left_, averages_right_, extension );
-    }
-
-    const int ni = dir == x_direction ? nx + 1 : nx;
-    const int nj = dir == x_direction ? ny : ny + 1;
-
-    left.resize( static_cast<std::size_t>( ni ) * nj );
-    right.resize( left.size() );
-
-    for ( int side = 0; side < 2; ++side )
-    {
-        const auto &averages = side == 0 ? averages_left_ : averages_right_;
-        auto &points = side == 0 ? left : right;
-        
-        for ( int j = 0; j < nj; ++j )
-        {
-            for ( int i = 0; i < ni; ++i )
-            {
-                const int f = i + ni * j;
-                if ( !high_order )
-                {
-                    points[f][0] = averages[f];
-                    continue;
-                }
-                
-                double components[5][conservative_variable_count];
-
-                for ( int k = 0; k < 5; ++k )
-                {
-                    const int index = dir == x_direction ? i + ni * ( j + k ) : i + k + ( nx + 4 ) * j;
-                    pack_state( averages[index], components[k] );
-                }
-
-                std::array<std::array<double, conservative_variable_count>, face_quadrature_point_count> values{};
-
-                for ( std::size_t m = 0; m < conservative_variable_count; ++m )
-                {
-                    std::array<double, 5> stencil{};
-                    
-                    for ( int k = 0; k < 5; ++k )
-                    {
-                        stencil[k] = components[k][m];
-                    }
-                    
-                    std::array<double, face_quadrature_point_count> reconstructed{};
-
-                    transverse_weno5( stencil, opt_.eps, reconstructed );
-                    
-                    for ( int q = 0; q < face_quadrature_point_count; ++q )
-                    {
-                        values[q][m] = reconstructed[q];
-                    }
-                }
-                
-                for ( int q = 0; q < face_quadrature_point_count; ++q )
-                {
-                    points[f][q] = unpack_state( values[q].data() );
-                }
-            }
-        }
+        reconstruct_faces_y_impl( state, nx, ny, ng, gamma, left, right );
     }
 }

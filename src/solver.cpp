@@ -337,7 +337,7 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
     }
 
     // 1. Reconstruct face states from the field with valid ghost cells.
-    recon_.reconstruct_validated_quadrature_xy( state, grid_.nx, grid_.ny, grid_.ng, gamma_,
+    recon_.reconstruct_validated_faces_xy( state, grid_.nx, grid_.ny, grid_.ng, gamma_,
         faces_.x.left_state, faces_.x.right_state, faces_.y.left_state, faces_.y.right_state );
 
     const double dx = grid_.dx();
@@ -345,7 +345,7 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
 
     // 2. Let the numerical flux validate face states; attach global face coordinates to failures.
     auto face_flux =
-        [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j, int q )
+        [&]( const Conservative_vector &left, const Conservative_vector &right, int dir, int i, int j )
     {
         try
         {
@@ -368,14 +368,9 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             throw std::runtime_error( flux_name_ + " " + std::string( dir == x_direction ? "x" : "y" ) + "-face (" +
                                       std::to_string( grid_.i_beg + i ) + "," + std::to_string( grid_.j_beg + j ) +
-                                      ") quadrature=" + std::to_string( q ) + ": " + e.what() );
+                                      "): " + e.what() );
         }
     };
-
-    // Four-point Gauss weights for a face average.
-    const double quadrature_weights[4] = {
-        0.17392742256872692869, 0.32607257743127307131, 0.32607257743127307131, 0.17392742256872692869 };
-    const int count = recon_.options().scheme == ReconstructionScheme::weno5 ? 4 : 1;
 
     for ( int j = 0; j < grid_.ny; ++j )
     {
@@ -383,18 +378,8 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_x( i, j );
 
-            Flux_vector average{};
-            for ( int q = 0; q < count; ++q )
-            {
-                const auto flux = face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q], x_direction, i, j, q );
-                const double weight = count == 1 ? 1.0 : quadrature_weights[q];
-                
-                average.mass_flux += weight * flux.mass_flux;
-                average.x_momentum_flux += weight * flux.x_momentum_flux;
-                average.y_momentum_flux += weight * flux.y_momentum_flux;
-                average.energy_flux += weight * flux.energy_flux;
-            }
-            faces_.x.flux[f] = average;
+            faces_.x.flux[f] = face_flux( faces_.x.left_state[f], faces_.x.right_state[f],
+                x_direction, i, j );
         }
     }
 
@@ -404,18 +389,8 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_y( i, j );
 
-            Flux_vector average{};
-            for ( int q = 0; q < count; ++q )
-            {
-                const auto flux = face_flux( faces_.y.left_state[f][q], faces_.y.right_state[f][q], y_direction, i, j, q );
-                const double weight = count == 1 ? 1.0 : quadrature_weights[q];
-                
-                average.mass_flux += weight * flux.mass_flux;
-                average.x_momentum_flux += weight * flux.x_momentum_flux;
-                average.y_momentum_flux += weight * flux.y_momentum_flux;
-                average.energy_flux += weight * flux.energy_flux;
-            }
-            faces_.y.flux[f] = average;
+            faces_.y.flux[f] = face_flux( faces_.y.left_state[f], faces_.y.right_state[f],
+                y_direction, i, j );
         }
     }
 

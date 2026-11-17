@@ -193,7 +193,6 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
     read_vtk( input, "output.vtkDataOutputType", "point", p.solver.vtk_data_output_type );
     read_scheme( input, "reconstruction.scheme", "firstOrder", p.reconstruction.scheme );
     read_limiter( input, "reconstruction.limiter", "vanLeer", p.reconstruction.limiter );
-    read_double( input, "reconstruction.eps", default_weno_epsilon, p.reconstruction.eps );
     
     if ( input.code != SUCCESS )
     {
@@ -201,10 +200,6 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
         return input.code;
     }
     
-    if ( p.reconstruction.eps <= 0.0 )
-    {
-        fail( input, INVALID_PARAMETER_VALUE, "reconstruction.eps", "must be > 0" );
-    }
     
     std::string legacy;
     read_string( input, "reconstruction.variables", "", legacy );
@@ -531,8 +526,6 @@ static void read_scheme( ParameterInput &input, const std::string &key, const st
         value = ReconstructionScheme::first_order;
     else if ( text == "muscl" )
         value = ReconstructionScheme::muscl;
-    else if ( text == "weno5" )
-        value = ReconstructionScheme::weno5;
     else
         fail( input, INVALID_PARAMETER_VALUE, key, "unsupported value: " + text );
 }

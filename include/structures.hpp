@@ -17,10 +17,6 @@ struct Conservative_vector
 };
 
 
-// Four Gauss points in increasing transverse coordinate; weights integrate a face average.
-using FaceQuadratureState = std::array<Conservative_vector, 4>;
-
-
 // Store density, x/y velocity and pressure.
 struct Primitive_vector
 {
@@ -92,16 +88,11 @@ struct GridBlock2DInfo
 };
 
 
-// Default regularization in the Jiang-Shu weights; this is not a physical-state lower bound.
-constexpr double default_weno_epsilon = 1e-12;
-
-
-// Select first-order constant, second-order MUSCL or fifth-order Jiang-Shu WENO reconstruction.
+// Select first-order constant or second-order MUSCL reconstruction.
 enum class ReconstructionScheme
 {
     first_order,
-    muscl,
-    weno5
+    muscl
 };
 
 
@@ -114,16 +105,13 @@ enum class SlopeLimiter
 };
 
 
-// Store the scheme, MUSCL limiter and positive WENO weight epsilon.
+// Store the scheme, MUSCL limiter.
 struct ReconstructionOptions
 {
     ReconstructionScheme scheme = ReconstructionScheme::first_order;
 
     // Slope limiter used only by MUSCL.
     SlopeLimiter limiter = SlopeLimiter::van_leer;
-
-    // Positive epsilon in the Jiang-Shu inverse-square weights; used only by WENO5.
-    double eps = default_weno_epsilon;
 
     // Return the ghost width required by the configured scheme.
     int required_ng() const;
@@ -283,12 +271,12 @@ std::array<double, conservative_variable_count> state_components( const Conserva
 // flux (in) - flux vector of conserved variables
 std::array<double, conservative_variable_count> flux_components( const Flux_vector &flux );
 
-// Return the required ghost width: one for first order, two for MUSCL and three for WENO5.
+// Return the required ghost width: one for first order and two for MUSCL.
 //
 // s (in) - selected reconstruction scheme
 int required_ghost_cells( ReconstructionScheme s );
 
-// Check whether the selected scheme is MUSCL or WENO5.
+// Check whether the selected scheme is MUSCL.
 //
 // s (in) - selected reconstruction scheme
 bool is_high_order( ReconstructionScheme s );

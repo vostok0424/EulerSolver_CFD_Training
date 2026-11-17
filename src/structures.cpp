@@ -111,7 +111,7 @@ std::array<double, conservative_variable_count> flux_components( const Flux_vect
 }
 
 
-// Return the required ghost width: one for first order, two for MUSCL and three for WENO5.
+// Return the required ghost width: one for first order and two for MUSCL.
 //
 // s (in) - selected reconstruction scheme
 //
@@ -124,22 +124,20 @@ int required_ghost_cells( ReconstructionScheme s )
         return 1;
     case ReconstructionScheme::muscl:
         return 2;
-    case ReconstructionScheme::weno5:
-        return 3;
     }
 
     throw std::runtime_error( "Invalid reconstruction scheme enum" );
 }
 
 
-// Check whether the selected scheme is MUSCL or WENO5.
+// Check whether the selected scheme is MUSCL.
 //
 // s (in) - selected reconstruction scheme
 //
-// Identify the two schemes that require characteristic high-order reconstruction.
+// Identify the scheme that requires characteristic reconstruction.
 bool is_high_order( ReconstructionScheme s )
 {
-    return s == ReconstructionScheme::muscl || s == ReconstructionScheme::weno5;
+    return s == ReconstructionScheme::muscl;
 }
 
 

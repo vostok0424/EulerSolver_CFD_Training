@@ -30,19 +30,14 @@ Each rank's local dimensions must be at least the ghost width `ng`.
 |---|---|
 | `flux` | `rusanov`, `hllc`, `ausm`, `godunov` |
 | `timeIntegrator` | `euler`, `rk2`, `ssprk3`, `rk4` |
-| `reconstruction.scheme` | `firstOrder`, `muscl`, `weno5` |
+| `reconstruction.scheme` | `firstOrder`, `muscl` |
 | `reconstruction.limiter` | `none`, `minmod`, `vanLeer` |
 | Boundary type | `zeroGradient`, `slipWall`, `symmetry`, `inlet`, `outlet` |
 
-MUSCL and normal WENO reconstruction use characteristic projection at the
-arithmetic mean of adjacent conservative states. WENO5 uses a transverse
-componentwise WENO-JS reconstruction and four-point Gauss face quadrature;
-`reconstruction.eps` regularizes its weights. WENO5 requires at least three
-ghost layers and valid diagonal halos. MPI exchanges x before y to propagate
-corner data. `firstOrder` and MUSCL need one and two ghost layers respectively.
+MUSCL reconstruction uses characteristic projection at the arithmetic mean of
+adjacent conservative states. `firstOrder` and MUSCL need one and two ghost
+layers respectively.
 
-WENO5 targets fifth-order spatial accuracy for smooth solutions; critical
-points, discontinuities and physical boundary closures can reduce the order.
 Time accuracy depends on the chosen integrator. `symmetry` uses slip-wall
 reflection; `internal` is reserved for MPI interfaces. Legacy flux names such as
 `godunovExact` and limiters `mc`/`superbee` are unsupported.
@@ -65,9 +60,8 @@ cfl = 0.05
 finalTime = 0.2
 flux = hllc
 timeIntegrator = ssprk3
-reconstruction.scheme = weno5
+reconstruction.scheme = muscl
 reconstruction.limiter = vanLeer
-reconstruction.eps = 1e-12
 bc = zeroGradient
 mpi.px = 1
 mpi.py = 1
