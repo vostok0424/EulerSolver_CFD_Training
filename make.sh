@@ -124,7 +124,6 @@ fi
 shopt -s nullglob
 SRC=(
   src/main.cpp
-  src/structures.cpp
   src/read_parameters.cpp
   src/common_functions.cpp
   src/thermodynamics.cpp

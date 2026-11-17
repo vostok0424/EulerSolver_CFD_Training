@@ -89,3 +89,9 @@ class Reconstruction2D
     mutable std::vector<unsigned char> checked_cells_;
 
 };
+
+
+// Return the required ghost width: one for first order, two for MUSCL and three for WENO-Z5.
+//
+// s (in) - selected reconstruction scheme
+int required_ghost_cells( ReconstructionScheme s );

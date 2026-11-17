@@ -848,3 +848,24 @@ void Reconstruction2D::reconstruct_quadrature_impl( const std::vector<Conservati
         }
     }
 }
+
+
+// Return the required ghost width: one for first order, two for MUSCL and three for WENO-Z5.
+//
+// s (in) - selected reconstruction scheme
+//
+// Return stencil half-width requirements; reject an invalid scheme instead of selecting a fallback.
+int required_ghost_cells( ReconstructionScheme s )
+{
+    switch ( s )
+    {
+    case ReconstructionScheme::first_order:
+        return 1;
+    case ReconstructionScheme::muscl:
+        return 2;
+    case ReconstructionScheme::weno_z5:
+        return 3;
+    }
+
+    throw std::runtime_error( "Invalid reconstruction scheme enum" );
+}

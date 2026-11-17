@@ -1,3 +1,4 @@
+#include "common_functions.hpp"
 #include "time_integrator.hpp"
 #include "structures.hpp"
 #include <stdexcept>

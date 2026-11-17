@@ -28,16 +28,6 @@ struct Primitive_vector
     double x_velocity{};
     double y_velocity{};
     double pressure{};
-
-    // Access the velocity component selected by direction: 0 for x, 1 for y.
-    //
-    // direction (in) - coordinate direction: x_direction or y_direction
-    double &velocity( int direction );
-
-    // Access the velocity component selected by direction: 0 for x, 1 for y.
-    //
-    // direction (in) - coordinate direction: x_direction or y_direction
-    double velocity( int direction ) const;
 };
 
 
@@ -83,12 +73,6 @@ struct GridBlock2DInfo
     double x1{};
     double y0{};
     double y1{};
-
-    // Uniform global spacing; the solver validates positive global counts and ordered bounds.
-    double dx() const;
-
-    // Same global spacing convention as dx(), independent of MPI decomposition.
-    double dy() const;
 };
 
 
@@ -117,7 +101,6 @@ struct ReconstructionOptions
 
     // Slope limiter used only by MUSCL.
     SlopeLimiter limiter = SlopeLimiter::van_leer;
-
 };
 
 
@@ -219,63 +202,3 @@ struct CaseParameters
     BoundaryConditions2D boundary;
     SetFieldsOptions set_fields;
 };
-
-
-// Add conservative states componentwise.
-//
-// left (in) - left operand of the conservative-state operation
-// right (in) - right operand of the conservative-state operation
-//
-// State algebra is componentwise and performs no physical-state validation or repair.
-Conservative_vector operator+( const Conservative_vector &left, const Conservative_vector &right );
-
-// Subtract conservative states componentwise.
-//
-// left (in) - left operand of the conservative-state operation
-// right (in) - right operand of the conservative-state operation
-Conservative_vector operator-( const Conservative_vector &left, const Conservative_vector &right );
-
-// Scale all conservative components by a scalar.
-//
-// factor (in) - scalar multiplier of all conservative components
-// state (in) - conserved variables of the flow state
-Conservative_vector operator*( double factor, const Conservative_vector &state );
-
-// Divide all conservative components by a scalar.
-//
-// state (in) - conserved variables of the flow state
-// divisor (in) - scalar divisor of all conservative components
-Conservative_vector operator/( const Conservative_vector &state, double divisor );
-
-// Accumulate a conservative increment into the supplied state.
-//
-// state (in/out) - conserved variables of the flow state
-// increment (in) - componentwise conservative increment
-Conservative_vector &operator+=( Conservative_vector &state, const Conservative_vector &increment );
-
-
-// Store rho, rho*u, rho*v and rho*E in four consecutive doubles.
-//
-// state (in) - conserved variables of the flow state
-// output (out) - buffer for four doubles ordered as density, x/y momentum and total energy
-void pack_state( const Conservative_vector &state, double *output );
-
-// Recover a conservative state from four doubles in rho, rho*u, rho*v, rho*E order.
-//
-// input (in) - four packed conservative components in density, x/y momentum, energy order
-Conservative_vector unpack_state( const double *input );
-
-// Return the four conserved components in serialization order.
-//
-// state (in) - conserved variables of the flow state
-std::array<double, conservative_variable_count> state_components( const Conservative_vector &state );
-
-// Return flux components in mass, x-momentum, y-momentum and energy order.
-//
-// flux (in) - flux vector of conserved variables
-std::array<double, conservative_variable_count> flux_components( const Flux_vector &flux );
-
-// Return the required ghost width: one for first order, two for MUSCL and three for WENO-Z5.
-//
-// s (in) - selected reconstruction scheme
-int required_ghost_cells( ReconstructionScheme s );

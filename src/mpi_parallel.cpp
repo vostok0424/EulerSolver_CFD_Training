@@ -1,3 +1,4 @@
+#include "common_functions.hpp"
 #include "mpi_parallel.hpp"
 
 #include <algorithm>

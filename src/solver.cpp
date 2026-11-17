@@ -18,6 +18,25 @@
 
 constexpr const char *k_output_dir_2d = "solution";
 
+// Allocate reconstructed states and fluxes for both face-normal directions.
+//
+// faces (out) - solver face workspace
+// nx, ny (in) - interior cell counts
+static void resize_face_buffers( FaceBuffers2D &faces, int nx, int ny )
+{
+    const std::size_t x_faces = static_cast<std::size_t>( nx + 1 ) * static_cast<std::size_t>( ny );
+    const std::size_t y_faces = static_cast<std::size_t>( nx ) * static_cast<std::size_t>( ny + 1 );
+
+    faces.x.left_state.resize( x_faces );
+    faces.x.right_state.resize( x_faces );
+    faces.x.flux.resize( x_faces );
+    
+    faces.y.left_state.resize( y_faces );
+    faces.y.right_state.resize( y_faces );
+    faces.y.flux.resize( y_faces );
+}
+
+
 // Return the VTK label for the selected data location.
 //
 // output_type (in) - selected VTK point or cell data location
@@ -156,7 +175,8 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     grid_.y1 = parameters.grid.y1;
 
     if ( grid_.nx_global <= 0 || grid_.ny_global <= 0 || grid_.x1 <= grid_.x0 || grid_.y1 <= grid_.y0 ||
-         !std::isfinite( grid_.dx() ) || !std::isfinite( grid_.dy() ) || grid_.dx() <= 0.0 || grid_.dy() <= 0.0 )
+         !std::isfinite( grid_spacing_x( grid_ ) ) || !std::isfinite( grid_spacing_y( grid_ ) ) ||
+         grid_spacing_x( grid_ ) <= 0.0 || grid_spacing_y( grid_ ) <= 0.0 )
         throw std::runtime_error( "Invalid grid dimensions or physical extents" );
 
     // 2. Find this rank's global cell range and local physical bounds.
@@ -166,8 +186,8 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     grid_.nx = sub_.nx();
     grid_.ny = sub_.ny();
 
-    const double dx_g = grid_.dx();
-    const double dy_g = grid_.dy();
+    const double dx_g = grid_spacing_x( grid_ );
+    const double dy_g = grid_spacing_y( grid_ );
 
     const double x0_loc = grid_.x0 + static_cast<double>( grid_.i_beg ) * dx_g;
     const double x1_loc = grid_.x0 + static_cast<double>( grid_.i_beg + grid_.nx ) * dx_g;
@@ -201,7 +221,7 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     grid_.ny_tot = grid_.ny + 2 * grid_.ng;
     conservative_field_.assign( static_cast<size_t>( grid_.nx_tot ) * static_cast<size_t>( grid_.ny_tot ),
         Conservative_vector{} );
-    faces_.resize( grid_.nx, grid_.ny );
+    resize_face_buffers( faces_, grid_.nx, grid_.ny );
     stage_flow_.resize( conservative_field_.size() );
     stage_physical_x_.resize( conservative_field_.size() );
     stage_physical_y_.resize( conservative_field_.size() );
@@ -273,8 +293,8 @@ void Solver::apply_bc( std::vector<Conservative_vector> &state ) const
 // max_s (out, optional) - local maximum spectral rate; only requested when another step follows.
 void Solver::validate_interior( const std::vector<Conservative_vector> &field, double *max_s )
 {
-    const double dx = grid_.dx();
-    const double dy = grid_.dy();
+    const double dx = grid_spacing_x( grid_ );
+    const double dy = grid_spacing_y( grid_ );
 
     if ( max_s != nullptr )
         *max_s = 0.0;
@@ -469,7 +489,7 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
 
     if ( positivity_preserving_ )
     {
-        const double rate = ax / grid_.dx() + ay / grid_.dy();
+        const double rate = ax / grid_spacing_x( grid_ ) + ay / grid_spacing_y( grid_ );
 
         if ( dt * rate > POSITIVITY_MAX_CFL * ( 1.0 + 64.0 * std::numeric_limits<double>::epsilon() ) )
         {
@@ -487,8 +507,8 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         positivity_preserving_ && neighbors.west != MPI_PROC_NULL,
         positivity_preserving_ && neighbors.south != MPI_PROC_NULL );
 
-    const double dx = grid_.dx();
-    const double dy = grid_.dy();
+    const double dx = grid_spacing_x( grid_ );
+    const double dy = grid_spacing_y( grid_ );
 
     // 2. Integrate numerical fluxes with the same workflow in both directions.
     build_face_fluxes( state, x_direction, factor_x );
@@ -658,7 +678,7 @@ void Solver::run()
         {
             apply_bc( conservative_field_ );
             positivity_wave_speeds( conservative_field_, stage_ax, stage_ay );
-            dt = cfl_ / ( stage_ax / grid_.dx() + stage_ay / grid_.dy() );
+            dt = cfl_ / ( stage_ax / grid_spacing_x( grid_ ) + stage_ay / grid_spacing_y( grid_ ) );
         }
         else
         {

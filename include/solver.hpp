@@ -22,16 +22,6 @@ struct DirectionalFaceBuffers2D
     std::vector<FaceQuadratureState> left_state;
     std::vector<FaceQuadratureState> right_state;
     std::vector<Flux_vector> flux;
-
-    // Resize the face workspace for the supplied face count or interior mesh dimensions.
-    //
-    // n_faces (in) - number of faces to allocate
-    void resize( std::size_t n_faces )
-    {
-        left_state.resize( n_faces );
-        right_state.resize( n_faces );
-        flux.resize( n_faces );
-    }
 };
 
 
@@ -40,16 +30,6 @@ struct FaceBuffers2D
 {
     DirectionalFaceBuffers2D x;
     DirectionalFaceBuffers2D y;
-
-    // Resize the face workspace for the supplied face count or interior mesh dimensions.
-    //
-    // nx (in) - number of interior cells along x
-    // ny (in) - number of interior cells along y
-    void resize( int nx, int ny )
-    {
-        x.resize( static_cast<std::size_t>( nx + 1 ) * static_cast<std::size_t>( ny ) );
-        y.resize( static_cast<std::size_t>( nx ) * static_cast<std::size_t>( ny + 1 ) );
-    }
 };
 
 

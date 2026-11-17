@@ -33,7 +33,7 @@ static Conservative_vector outlet_state_2d( const Conservative_vector &uin, doub
 
     require_success( calc_sound_velocity( primitive, gamma, a ), "calc_sound_velocity" );
 
-    const double un = primitive.velocity( normal_dir );
+    const double un = velocity_component( primitive, normal_dir );
     const double m = std::abs( un ) / a;
 
     if ( m >= 1.0 )

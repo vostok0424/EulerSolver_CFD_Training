@@ -87,3 +87,75 @@ ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma,
 // Returns SUCCESS on completion or the numerical failure code; output values are unchanged on failure.
 ReturnCodes calc_physical_flux( const Conservative_vector &state, const EvaluatedState &evaluated, int direction,
     Flux_vector &output );
+
+
+// Add conservative states componentwise.
+//
+// left (in) - left operand of the conservative-state operation
+// right (in) - right operand of the conservative-state operation
+//
+// State algebra is componentwise and performs no physical-state validation or repair.
+Conservative_vector operator+( const Conservative_vector &left, const Conservative_vector &right );
+
+// Subtract conservative states componentwise.
+//
+// left (in) - left operand of the conservative-state operation
+// right (in) - right operand of the conservative-state operation
+Conservative_vector operator-( const Conservative_vector &left, const Conservative_vector &right );
+
+// Scale all conservative components by a scalar.
+//
+// factor (in) - scalar multiplier of all conservative components
+// state (in) - conserved variables of the flow state
+Conservative_vector operator*( double factor, const Conservative_vector &state );
+
+// Divide all conservative components by a scalar.
+//
+// state (in) - conserved variables of the flow state
+// divisor (in) - scalar divisor of all conservative components
+Conservative_vector operator/( const Conservative_vector &state, double divisor );
+
+// Accumulate a conservative increment into the supplied state.
+//
+// state (in/out) - conserved variables of the flow state
+// increment (in) - componentwise conservative increment
+Conservative_vector &operator+=( Conservative_vector &state, const Conservative_vector &increment );
+
+
+// Store rho, rho*u, rho*v and rho*E in four consecutive doubles.
+//
+// state (in) - conserved variables of the flow state
+// output (out) - buffer for four doubles ordered as density, x/y momentum and total energy
+void pack_state( const Conservative_vector &state, double *output );
+
+// Recover a conservative state from four doubles in rho, rho*u, rho*v, rho*E order.
+//
+// input (in) - four packed conservative components in density, x/y momentum, energy order
+Conservative_vector unpack_state( const double *input );
+
+// Return the four conserved components in serialization order.
+//
+// state (in) - conserved variables of the flow state
+std::array<double, conservative_variable_count> state_components( const Conservative_vector &state );
+
+// Return flux components in mass, x-momentum, y-momentum and energy order.
+//
+// flux (in) - flux vector of conserved variables
+std::array<double, conservative_variable_count> flux_components( const Flux_vector &flux );
+
+
+// Read a velocity component; throw on an invalid coordinate direction.
+//
+// primitive (in) - primitive flow state
+// direction (in) - x_direction or y_direction
+double velocity_component( const Primitive_vector &primitive, int direction );
+
+// Return uniform global x spacing; the solver validates the mesh.
+//
+// grid (in) - global mesh bounds and cell counts
+double grid_spacing_x( const GridBlock2DInfo &grid );
+
+// Return uniform global y spacing; the solver validates the mesh.
+//
+// grid (in) - global mesh bounds and cell counts
+double grid_spacing_y( const GridBlock2DInfo &grid );

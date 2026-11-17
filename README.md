@@ -177,8 +177,8 @@ continue to update the full state vector. See [optimization regressions](tests/R
 | `main.cpp`, `solver.cpp`, `time_integrator.cpp` | MPI startup, solver workflow and time advancement |
 | `flux.cpp`, `reconstruction.cpp`, `boundary.cpp` | Numerical fluxes, face states and ghost boundaries |
 | `mpi_parallel.cpp`, `io.cpp`, `setFields.cpp` | Halo exchange, VTK output and initialization |
-| `thermodynamics.cpp`, `common_functions.cpp` | Ideal-gas EOS, flow operations and common utilities |
-| `structures.hpp/.cpp`, `constants.hpp` | Shared types, state algebra, serialization and fixed conventions |
+| `thermodynamics.cpp`, `common_functions.cpp` | Ideal-gas EOS, flow operations, state algebra, serialization and common utilities |
+| `structures.hpp`, `constants.hpp` | Shared data types and fixed conventions |
 | `read_parameters.cpp` | Centralized configuration keys/defaults and typed parameter loading |
 
 The contiguous `Conservative_vector` array stores rho, rho*u, rho*v and total
@@ -196,10 +196,11 @@ gas_thermodynamics module:
   keys and VTK field names. Qualify standard names with `std::`; add no project
   namespaces, namespace aliases or global using-directives. File-local helpers
   use `static` linkage.
-- Keep shared types and typed parameters in `structures.hpp`, their member and
-  utility implementations in `structures.cpp`, and module interfaces/algorithms
-  in matching headers/sources. Avoid inline definitions in the shared structures
-  header. Read keys/defaults only in `read_parameters.cpp`; pass typed settings
+- Keep shared types and typed parameters in `structures.hpp`, and their
+  operations in their owning module headers/sources. Keep state algebra, packing
+  and basic access functions in `common_functions`; keep stencil requirements in
+  `reconstruction`. Shared data structs have no member functions or operation
+  declarations. Read keys/defaults only in `read_parameters.cpp`; pass typed settings
   to modules and keep local-grid checks with `Solver`. Place the reading entry
   point before helpers, grouped by parsing, basic values and module options.
 - Prefer direct formulas, ordinary structs and explicit control flow, with
