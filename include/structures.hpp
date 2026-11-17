@@ -205,6 +205,7 @@ struct SolverParameters
     int output_every;
     double output_time_interval;
     bool write_final;
+    bool positivity_preserving = true;
     std::string out_prefix, flux, time_integrator;
     VTKDataOutputType vtk_data_output_type;
 };

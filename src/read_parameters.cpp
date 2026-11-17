@@ -180,6 +180,7 @@ ReturnCodes read_parameters( const std::string &filename, CaseParameters &p, std
     read_int( input, "outputEvery", 50, p.solver.output_every );
     read_double( input, "outputTimeInterval", 0.0, p.solver.output_time_interval );
     read_bool( input, "writeFinal", true, p.solver.write_final );
+    read_bool( input, "positivity.use", true, p.solver.positivity_preserving );
     read_string( input, "outPrefix", "run2d", p.solver.out_prefix );
     read_string( input, "flux", "hllc", p.solver.flux );
     read_string( input, "timeIntegrator", "ssprk3", p.solver.time_integrator );

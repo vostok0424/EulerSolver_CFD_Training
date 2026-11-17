@@ -129,6 +129,7 @@ SRC=(
   src/common_functions.cpp
   src/thermodynamics.cpp
   src/flux.cpp
+  src/positive_preserving.cpp
   src/reconstruction.cpp
   src/boundary.cpp
   src/setFields.cpp

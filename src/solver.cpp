@@ -2,6 +2,7 @@
 
 
 #include "solver.hpp"
+#include "positive_preserving.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -176,6 +177,7 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     // 3. Set the gas model, time controls and output settings.
     gamma_ = parameters.solver.gamma;
     cfl_ = parameters.solver.cfl;
+    positivity_preserving_ = parameters.solver.positivity_preserving;
     final_time_ = parameters.solver.final_time;
     output_every_ = parameters.solver.output_every;
     output_time_interval_ = parameters.solver.output_time_interval;
@@ -205,6 +207,16 @@ Solver::Solver( const CaseParameters &parameters, const MpiParallel &mp )
     flux_name_ = parameters.solver.flux;
     flux_scheme_ = read_flux_scheme( flux_name_ );
     ti_ = make_time_integrator( parameters.solver.time_integrator );
+    
+    if ( positivity_preserving_ && ti_->name() == "rk4" )
+    {
+        throw std::runtime_error( "positivity.use requires euler, rk2 or ssprk3; rk4 is not SSP" );
+    }
+    if ( positivity_preserving_ && cfl_ > POSITIVITY_MAX_CFL )
+    {
+        throw std::runtime_error( "positivity.use requires cfl <= POSITIVITY_MAX_CFL" );
+    }
+
 
     // 7. Initialize this rank's interior cells; ghost cells are filled before the first residual.
     set_fields_2d( conservative_field_, grid_.nx, grid_.ny, grid_.ng, x0_loc, x1_loc, y0_loc, y1_loc, gamma_, parameters.set_fields );
@@ -324,7 +336,7 @@ double Solver::compute_dt( double max_s ) const
 // output_rhs (out) - conservative residual on the ghosted cell layout
 //
 // Compute the finite-volume residual: RHS = -(F_right - F_left)/dx - (G_top - G_bottom)/dy.
-void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &output_rhs )
+void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &output_rhs, double dt )
 {
     // Interior residuals are overwritten below; integrators still need zero residuals in ghost cells.
     std::fill_n( output_rhs.begin(), grid_.ng * grid_.nx_tot, Conservative_vector{} );
@@ -334,6 +346,23 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
     {
         std::fill_n( output_rhs.begin() + idx( 0, j ), grid_.ng, Conservative_vector{} );
         std::fill_n( output_rhs.begin() + idx( grid_.ng + grid_.nx, j ), grid_.ng, Conservative_vector{} );
+    }
+
+    double ax = 0.0, ay = 0.0;
+    double factor_x = 0.0, factor_y = 0.0;
+    
+    if ( positivity_preserving_ )
+    {
+        positivity_wave_speeds( state, ax, ay );
+        const double rate = ax / grid_.dx() + ay / grid_.dy();
+        
+        if ( dt * rate > POSITIVITY_MAX_CFL * ( 1.0 + 64.0 * std::numeric_limits<double>::epsilon() ) )
+        {
+            throw std::runtime_error( "Positivity stage CFL exceeded; reduce cfl" );
+        }
+        
+        factor_x = 2.0 * dt * rate / ax;
+        factor_y = 2.0 * dt * rate / ay;
     }
 
     // 1. Reconstruct face states from the field with valid ghost cells.
@@ -380,16 +409,34 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_x( i, j );
 
+            const auto &left_mean = state[idx( grid_.ng + i - 1, grid_.ng + j )];
+            const auto &right_mean = state[idx( grid_.ng + i, grid_.ng + j )];
+            
             Flux_vector average{};
+            
             for ( int q = 0; q < count; ++q )
             {
-                const auto flux = face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q],
-                    x_direction, i, j, q );
+                if ( positivity_preserving_ )
+                {
+                    require_success( limit_positive_point( left_mean, gamma_, density_floor_, pressure_floor_, faces_.x.left_state[f][q] ), "left face positivity" );
+                    require_success( limit_positive_point( right_mean, gamma_, density_floor_, pressure_floor_, faces_.x.right_state[f][q] ), "right face positivity" );
+                }
+                
+                const auto flux = face_flux( faces_.x.left_state[f][q], faces_.x.right_state[f][q], x_direction, i, j, q );
                 const double weight = count == 1 ? 1.0 : face_quadrature_weights[q];
+                
                 average.mass_flux += weight * flux.mass_flux;
                 average.x_momentum_flux += weight * flux.x_momentum_flux;
                 average.y_momentum_flux += weight * flux.y_momentum_flux;
                 average.energy_flux += weight * flux.energy_flux;
+            }
+            if ( positivity_preserving_ )
+            {
+                Flux_vector low{};
+                require_success( calc_rusanov_flux( left_mean, right_mean, x_direction, gamma_, low ), "positivity Rusanov baseline" );
+                
+                double theta = 1.0;
+                require_success( limit_positive_flux( left_mean, right_mean, low, average, factor_x, gamma_, density_floor_, pressure_floor_, average, theta ), "face flux positivity" );
             }
             faces_.x.flux[f] = average;
         }
@@ -401,9 +448,18 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
         {
             const int f = idx_face_y( i, j );
 
+            const auto &left_mean = state[idx( grid_.ng + i, grid_.ng + j - 1 )];
+            const auto &right_mean = state[idx( grid_.ng + i, grid_.ng + j )];
+            
             Flux_vector average{};
+            
             for ( int q = 0; q < count; ++q )
             {
+                if ( positivity_preserving_ )
+                {
+                    require_success( limit_positive_point( left_mean, gamma_, density_floor_, pressure_floor_, faces_.y.left_state[f][q] ), "left face positivity" );
+                    require_success( limit_positive_point( right_mean, gamma_, density_floor_, pressure_floor_, faces_.y.right_state[f][q] ), "right face positivity" );
+                }
                 const auto flux = face_flux( faces_.y.left_state[f][q], faces_.y.right_state[f][q],
                     y_direction, i, j, q );
                 const double weight = count == 1 ? 1.0 : face_quadrature_weights[q];
@@ -412,8 +468,20 @@ void Solver::build_rhs( const std::vector<Conservative_vector> &state, std::vect
                 average.y_momentum_flux += weight * flux.y_momentum_flux;
                 average.energy_flux += weight * flux.energy_flux;
             }
+            if ( positivity_preserving_ )
+            {
+                Flux_vector low{};
+                require_success( calc_rusanov_flux( left_mean, right_mean, y_direction, gamma_, low ), "positivity Rusanov baseline" );
+                double theta = 1.0;
+                require_success( limit_positive_flux( left_mean, right_mean, low, average, factor_y, gamma_, density_floor_, pressure_floor_, average, theta ), "face flux positivity" );
+            }
             faces_.y.flux[f] = average;
         }
+    }
+
+    if ( positivity_preserving_ )
+    {
+        synchronize_face_fluxes();
     }
 
     for ( int j = 0; j < grid_.ny; ++j )
@@ -523,23 +591,52 @@ void Solver::run()
     double max_s = 0.0;
     validate_interior( conservative_field_, final_time_ > 0.0 ? &max_s : nullptr );
 
+    if ( positivity_preserving_ )
+    {
+        double rho_min = std::numeric_limits<double>::max();
+        double p_min = std::numeric_limits<double>::max();
+        
+        for ( int j = grid_.ng; j < grid_.ng + grid_.ny; ++j )
+        {
+            for ( int i = grid_.ng; i < grid_.ng + grid_.nx; ++i )
+            {
+                const auto &u = conservative_field_[idx( i, j )];
+                double p = 0.0;
+                
+                require_success( pressure_from_conservative( u, gamma_, p ), "initial positivity pressure" );
+                
+                rho_min = std::min( rho_min, u.specific_mass );
+                p_min = std::min( p_min, p );
+            }
+        }
+        density_floor_ = std::min( density_floor_, mp_.allreduce_min( rho_min ) );
+        pressure_floor_ = std::min( pressure_floor_, mp_.allreduce_min( p_min ) );
+    }
+
     process_regular_output_phase( step, t, true );
 
     int stage = 0;
     // The first stage uses the unchanged state checked at initialization or the previous step end.
     // Later stages validate their newly constructed interiors; every stage refreshes ghost cells.
-    auto rhs_fun = [this, &stage]( std::vector<Conservative_vector> &uin, std::vector<Conservative_vector> &rout )
+    auto rhs_fun = [this, &stage]( std::vector<Conservative_vector> &uin, double stage_dt, std::vector<Conservative_vector> &rout )
     {
         ++stage;
         if ( stage > 1 )
             validate_interior( uin );
         apply_bc( uin );
-        build_rhs( uin, rout );
+        build_rhs( uin, rout, stage_dt );
     };
 
     while ( t < final_time_ )
     {
         double dt = compute_dt( max_s );
+        if ( positivity_preserving_ )
+        {
+            apply_bc( conservative_field_ );
+            double ax = 0.0, ay = 0.0;
+            positivity_wave_speeds( conservative_field_, ax, ay );
+            dt = cfl_ / ( ax / grid_.dx() + ay / grid_.dy() );
+        }
 
         // Land on the next scheduled time or final time without exceeding the CFL step.
         const bool time_mode = output_time_interval_ > 0.0;
@@ -600,5 +697,66 @@ void Solver::run()
     if ( write_final_ )
     {
         write_final_output( t );
+    }
+}
+
+
+// Include physical and MPI ghost states because they enter low-order interface fluxes.
+void Solver::positivity_wave_speeds( const std::vector<Conservative_vector> &state, double &ax, double &ay ) const
+{
+    ax = 0.0;
+    ay = 0.0;
+    for ( const auto &u : state )
+    {
+        EvaluatedState flow{};
+        require_success( calc_flow_variables( u, gamma_, flow ), "positivity wave speed" );
+        ax = std::max( ax, std::abs( flow.x_velocity ) + flow.sound_speed );
+        ay = std::max( ay, std::abs( flow.y_velocity ) + flow.sound_speed );
+    }
+    ax = mp_.allreduce_max( ax );
+    ay = mp_.allreduce_max( ay );
+}
+
+
+// Send owned east/north fluxes and receive the west/south owner values.
+void Solver::synchronize_face_fluxes()
+{
+    const auto neighbors = mp_.neighbors();
+    for ( int dir : { x_direction, y_direction } )
+    {
+        const int count = dir == x_direction ? grid_.ny : grid_.nx;
+        std::vector<double> send( 4 * count ), receive( 4 * count );
+        
+        for ( int k = 0; k < count; ++k )
+        {
+            const auto &flux = dir == x_direction ? faces_.x.flux[idx_face_x( grid_.nx, k )] : faces_.y.flux[idx_face_y( k, grid_.ny )];
+            const auto values = flux_components( flux );
+            
+            std::copy( values.begin(), values.end(), send.begin() + 4 * k );
+        }
+        
+        const int destination = dir == x_direction ? neighbors.east : neighbors.north;
+        const int source = dir == x_direction ? neighbors.west : neighbors.south;
+        
+        if ( MPI_Sendrecv( send.data(), 4 * count, MPI_DOUBLE, destination, 730 + dir, receive.data(), 4 * count, MPI_DOUBLE, source, 730 + dir,
+                 mp_.cart_comm(), MPI_STATUS_IGNORE ) != MPI_SUCCESS )
+        {
+            throw std::runtime_error( "Positivity interface flux exchange failed" );
+        }
+        if ( source != MPI_PROC_NULL )
+        {
+            for ( int k = 0; k < count; ++k )
+            {
+                Flux_vector flux{ receive[4 * k], receive[4 * k + 1], receive[4 * k + 2], receive[4 * k + 3] };
+                if ( dir == x_direction )
+                {
+                    faces_.x.flux[idx_face_x( 0, k )] = flux;
+                }
+                else
+                {
+                    faces_.y.flux[idx_face_y( k, 0 )] = flux;
+                }
+            }
+        }
     }
 }

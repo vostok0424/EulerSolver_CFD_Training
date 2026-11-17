@@ -9,6 +9,12 @@
 static_assert( WENO_Z_EPS > 0.0, "WENO_Z_EPS must be positive" );
 
 
+// Base admissibility thresholds and strict Rusanov auxiliary-state CFL margin.
+#define POSITIVITY_DENSITY_FLOOR 1e-13
+#define POSITIVITY_PRESSURE_FLOOR 1e-13
+#define POSITIVITY_MAX_CFL 0.45
+
+
 // Four-point Gauss-Legendre rule for a face average on [-1/2, 1/2].
 constexpr int face_quadrature_count = 4;
 constexpr double face_quadrature_nodes[4] = { -0.43056815579702629, -0.16999052179242813, 0.16999052179242813, 0.43056815579702629 };

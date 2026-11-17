@@ -124,8 +124,19 @@ controls the final snapshot. Filenames are `<prefix>_t=0.010000.vtk` and
 
 Invalid configurations, non-finite values, non-positive density/pressure and
 numerical failures abort the MPI job with operation/location diagnostics. The
-solver does not clip states, retry steps, apply a positivity limiter or fall
-back to another scheme. The Godunov pressure iteration can reject otherwise
+solver does not clip updated cell averages, retry steps or switch numerical flux schemes.
+`positivity.use = true` (default) enables point-state contraction and the
+Hu-Adams-Shu face-flux limiter at every Euler/RK2/SSPRK3 stage. Its first-order baseline uses Rusanov fluxes from adjacent cell averages with
+local face wave speeds. Direction-wide bounds still determine the multidimensional
+partition and time step, with `cfl <= 0.45`.
+Threshold bases are defined in `constants.hpp` and bounded by initial global
+minimum density/pressure. Final MPI interface fluxes are shared between ranks.
+RK4 requires `positivity.use = false`; the SSP positivity guarantee does not
+apply to classical RK4. Each stage checks its CFL and Rusanov auxiliary states;
+violations abort with diagnostics and require a smaller user-supplied CFL.
+Finite positive point states do not guarantee that every Riemann solver can
+solve every problem: HLLC can reject near-vacuum star states. Rusanov is useful
+for the double-rarefaction regression. The Godunov pressure iteration can reject otherwise
 admissible Riemann problems; failures are reported rather than repaired.
 
 ## Tests and performance

@@ -20,7 +20,7 @@ void EulerIntegrator::step( std::vector<Conservative_vector> &state, double dt, 
     TimeIntegrator::ensure_size( r_, state.size() );
 
     // Evaluate the residual at the current state before the explicit update.
-    rhs( state, r_ );
+    rhs( state, dt, r_ );
 
     for ( size_t i = 0; i < state.size(); ++i )
     {
@@ -49,7 +49,7 @@ void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     TimeIntegrator::ensure_size( r_, n );
 
     // Evaluate the residual at the current state before the explicit update.
-    rhs( state, r_ );
+    rhs( state, dt, r_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
@@ -57,7 +57,7 @@ void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     }
 
     // Evaluate the next stage after its conservative state has been constructed.
-    rhs( u1_, r_ );
+    rhs( u1_, dt, r_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
@@ -87,7 +87,7 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
     TimeIntegrator::ensure_size( r_, n );
 
     // Evaluate the residual at the current state before the explicit update.
-    rhs( state, r_ );
+    rhs( state, dt, r_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
@@ -95,7 +95,7 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
     }
 
     // Evaluate the next stage after its conservative state has been constructed.
-    rhs( u1_, r_ );
+    rhs( u1_, dt, r_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
@@ -103,7 +103,7 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
     }
 
     // Evaluate the final SSPRK3 stage before combining it with the original state.
-    rhs( u2_, r_ );
+    rhs( u2_, dt, r_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
@@ -141,28 +141,28 @@ void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     }
 
     // Evaluate k1 at the initial state; k2 and k3 use half steps, and k4 uses a full step.
-    rhs( state, k1_ );
+    rhs( state, dt, k1_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
         stage_state_[i] = u0_[i] + 0.5 * dt * k1_[i];
     }
 
-    rhs( stage_state_, k2_ );
+    rhs( stage_state_, dt, k2_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
         stage_state_[i] = u0_[i] + 0.5 * dt * k2_[i];
     }
 
-    rhs( stage_state_, k3_ );
+    rhs( stage_state_, dt, k3_ );
 
     for ( size_t i = 0; i < n; ++i )
     {
         stage_state_[i] = u0_[i] + dt * k3_[i];
     }
 
-    rhs( stage_state_, k4_ );
+    rhs( stage_state_, dt, k4_ );
 
     for ( size_t i = 0; i < n; ++i )
     {

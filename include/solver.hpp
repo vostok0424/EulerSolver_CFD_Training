@@ -84,6 +84,10 @@ class Solver
     std::string flux_name_;
     std::unique_ptr<TimeIntegrator> ti_;
 
+    bool positivity_preserving_ = true;
+    double density_floor_ = POSITIVITY_DENSITY_FLOOR;
+    double pressure_floor_ = POSITIVITY_PRESSURE_FLOOR;
+
     double gamma_{};
     double cfl_{};
     double final_time_{};
@@ -140,8 +144,17 @@ class Solver
     // Compute the flux divergence; the interior must be validated and ghost cells refreshed.
     //
     // state (in) - conserved variables in the ghosted cell field
+    // dt (in) - actual forward-Euler substep used by the positivity limiter
     // rhs (out) - conservative residual on the ghosted cell layout
-    void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs );
+    void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs, double dt );
+
+    // Obtain global direction wave-speed bounds from the refreshed ghosted stage field.
+    // state (in) - finite admissible cell averages including boundary ghosts
+    // ax, ay (out) - global maximum |u|+c and |v|+c
+    void positivity_wave_speeds( const std::vector<Conservative_vector> &state, double &ax, double &ay ) const;
+
+    // Exchange final interface fluxes: west/south cells own east/north faces.
+    void synchronize_face_fluxes();
 
     // Check whether the step meets the configured output interval.
     //

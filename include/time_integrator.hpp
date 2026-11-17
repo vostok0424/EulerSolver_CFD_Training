@@ -12,10 +12,10 @@
 class TimeIntegrator
 {
   public:
-    // RHS callback: first argument (in/out) is the stage state, second argument (out) is its residual.
+    // RHS callback: stage state (in/out), forward-Euler step size (in), residual (out).
     // Both arrays have the same ghosted layout; the callback may update stage ghost cells.
     // The first callback receives the unchanged input state; later callbacks receive newly formed stages.
-    using RHSFunc = std::function<void( std::vector<Conservative_vector> &, std::vector<Conservative_vector> & )>;
+    using RHSFunc = std::function<void( std::vector<Conservative_vector> &, double, std::vector<Conservative_vector> & )>;
 
     // Release owned resources during object destruction.
     virtual ~TimeIntegrator() = default;
