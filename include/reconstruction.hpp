@@ -99,11 +99,12 @@ class Reconstruction2D
   private:
     // Solver validates interior states before applying halos/physical ghost boundaries.
     // Keep this trusted entry point private so standalone public calls always validate their inputs.
+    // all_cells_validated (in) - also reuse ghost validation performed for the same immutable stage.
     friend class Solver;
     void reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state, int nx, int ny,
         int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
         std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
-        std::vector<FaceQuadratureState> &right_y );
+        std::vector<FaceQuadratureState> &right_y, bool all_cells_validated = false );
 
     // Implementation helpers share checks only within one public call or one validated x/y pair.
     void reconstruct_faces_x_impl( const std::vector<Conservative_vector> &state, int nx, int ny, int ng,

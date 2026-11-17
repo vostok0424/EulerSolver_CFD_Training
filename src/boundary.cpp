@@ -70,6 +70,18 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         return i + nx_tot * j;
     };
 
+    // Inlet data is constant along each boundary during this call.
+    Conservative_vector inlet_states[4];
+    const BoundarySide2D *sides[4] = { &bc.left, &bc.right, &bc.bottom, &bc.top };
+    for ( int side = 0; side < 4; ++side )
+    {
+        if ( sides[side]->type == BoundaryType::inlet )
+        {
+            require_success( calc_conservative_variables( sides[side]->inlet, gamma, inlet_states[side] ),
+                "inlet conservative state" );
+        }
+    }
+
     // Fill left/right ghosts also in exchanged y halos. Physical y corners are filled below.
     for ( int j = 0; j < ny_tot; ++j )
     {
@@ -91,9 +103,7 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         }
         else if ( bc.left.type == BoundaryType::inlet )
         {
-            Conservative_vector uin{};
-
-            require_success( calc_conservative_variables( bc.left.inlet, gamma, uin ), "calc_conservative_variables" );
+            const auto &uin = inlet_states[0];
 
             for ( int g = 0; g < ng; ++g )
             {
@@ -137,9 +147,7 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         }
         else if ( bc.right.type == BoundaryType::inlet )
         {
-            Conservative_vector uin{};
-
-            require_success( calc_conservative_variables( bc.right.inlet, gamma, uin ), "calc_conservative_variables" );
+            const auto &uin = inlet_states[1];
 
             for ( int g = 0; g < ng; ++g )
             {
@@ -183,10 +191,7 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         }
         else if ( bc.bottom.type == BoundaryType::inlet )
         {
-            Conservative_vector uin{};
-
-            require_success( calc_conservative_variables( bc.bottom.inlet, gamma, uin ),
-                "calc_conservative_variables" );
+            const auto &uin = inlet_states[2];
 
             for ( int g = 0; g < ng; ++g )
             {
@@ -230,9 +235,7 @@ void apply_boundary_conditions( std::vector<Conservative_vector> &state, int nx,
         }
         else if ( bc.top.type == BoundaryType::inlet )
         {
-            Conservative_vector uin{};
-
-            require_success( calc_conservative_variables( bc.top.inlet, gamma, uin ), "calc_conservative_variables" );
+            const auto &uin = inlet_states[3];
 
             for ( int g = 0; g < ng; ++g )
             {

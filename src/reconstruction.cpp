@@ -392,25 +392,16 @@ static void reconstruct_face_muscl_from_char_cache( const Eigen4 &eig, SlopeLimi
 
 
 // Compute the WENO-Z nonlinear factors shared by normal and transverse reconstruction.
-// q0..q4 (in) - five consecutive cell or face averages, centered on q2
-// factors (out) - 1 + (tau5/(beta_k + epsilon))^2 for the three candidate stencils
-static void weno_z5_factors( double q0, double q1, double q2, double q3, double q4, double ( &factors )[3] )
+// curvature, slope (in) - second differences and linear coefficients of the three candidates
+// factors (out) - WENO-Z nonlinear factors, shared by normal and transverse evaluations
+static void weno_z5_factors( const double ( &curvature )[3], const double ( &slope )[3], double ( &factors )[3] )
 {
-    const double a0 = q0 - 2.0 * q1 + q2;
-    const double a1 = q1 - 2.0 * q2 + q3;
-    const double a2 = q2 - 2.0 * q3 + q4;
-
-    const double b0 = q0 - 4.0 * q1 + 3.0 * q2;
-    const double b1 = q1 - q3;
-    const double b2 = 3.0 * q2 - 4.0 * q3 + q4;
-
-    const double beta0 = ( 13.0 / 12.0 ) * a0 * a0 + 0.25 * b0 * b0;
-    const double beta1 = ( 13.0 / 12.0 ) * a1 * a1 + 0.25 * b1 * b1;
-    const double beta2 = ( 13.0 / 12.0 ) * a2 * a2 + 0.25 * b2 * b2;
-
-    const double tau = std::abs( beta0 - beta2 );
-
-    const double beta[3] = { beta0, beta1, beta2 };
+    double beta[3];
+    for ( int k = 0; k < 3; ++k )
+    {
+        beta[k] = ( 13.0 / 12.0 ) * curvature[k] * curvature[k] + slope[k] * slope[k];
+    }
+    const double tau = std::abs( beta[0] - beta[2] );
     for ( int k = 0; k < 3; ++k )
     {
         const double r = tau / ( beta[k] + WENO_Z_EPS );
@@ -426,7 +417,10 @@ static void weno_z5_factors( double q0, double q1, double q2, double q3, double 
 static double weno_z5_left( double q0, double q1, double q2, double q3, double q4 )
 {
     double factors[3];
-    weno_z5_factors( q0, q1, q2, q3, q4, factors );
+    const double curvature[3] = { q0 - 2.0 * q1 + q2, q1 - 2.0 * q2 + q3, q2 - 2.0 * q3 + q4 };
+    const double slope[3] = { 0.5 * ( q0 - 4.0 * q1 + 3.0 * q2 ), 0.5 * ( q3 - q1 ),
+        0.5 * ( -3.0 * q2 + 4.0 * q3 - q4 ) };
+    weno_z5_factors( curvature, slope, factors );
     const double alpha0 = 0.1 * factors[0];
     const double alpha1 = 0.6 * factors[1];
     const double alpha2 = 0.3 * factors[2];
@@ -723,7 +717,7 @@ void Reconstruction2D::reconstruct_faces( const std::vector<Conservative_vector>
 void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Conservative_vector> &state,
     int nx, int ny, int ng, double gamma, std::vector<FaceQuadratureState> &left_x,
     std::vector<FaceQuadratureState> &right_x, std::vector<FaceQuadratureState> &left_y,
-    std::vector<FaceQuadratureState> &right_y )
+    std::vector<FaceQuadratureState> &right_y, bool all_cells_validated )
 {
     const int nx_tot = nx + 2 * ng;
 
@@ -735,7 +729,7 @@ void Reconstruction2D::reconstruct_validated_quadrature_xy( const std::vector<Co
 
     if ( opt_.scheme != ReconstructionScheme::first_order )
     {
-        checked_cells_.assign( state.size(), 0 );
+        checked_cells_.assign( state.size(), all_cells_validated ? 1 : 0 );
 
         for ( int j = ng; j < ng + ny; ++j )
         {
@@ -788,7 +782,7 @@ static void transverse_weno_z5( const double ( &q )[5], double ( &output )[face_
     
     double factors[3];
     
-    weno_z5_factors( q[0], q[1], q[2], q[3], q[4], factors );
+    weno_z5_factors( curvature, slope, factors );
 
     for ( int n = 0; n < face_quadrature_count; ++n )
     {

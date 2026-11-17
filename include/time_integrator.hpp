@@ -3,6 +3,7 @@
 
 #include "structures.hpp"
 #include <functional>
+#include <stdexcept>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,42 @@ class TimeIntegrator
     // rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
     virtual void step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs ) = 0;
 
+    // Restrict stage updates to interior cells; RHS must overwrite all physical/MPI ghosts.
+    // nx, ny (in) - positive interior dimensions; ng (in) - nonnegative ghost width
+    // Standalone integrators default to updating the complete vector until configured.
+    void set_interior_layout( int nx, int ny, int ng )
+    {
+        if ( nx <= 0 || ny <= 0 || ng < 0 )
+        {
+            throw std::runtime_error( "Invalid time-integrator interior layout" );
+        }
+        update_nx_ = nx;
+        update_ny_ = ny;
+        update_ng_ = ng;
+    }
+
   protected:
+    int update_nx_ = 0;
+    int update_ny_ = 1;
+    int update_ng_ = 0;
+
+    // state_size (in) - full vector length; reject an incompatible configured layout.
+    void check_update_layout( std::size_t state_size ) const
+    {
+        if ( update_nx_ != 0 && state_size != static_cast<std::size_t>( update_nx_ + 2 * update_ng_ ) *
+                static_cast<std::size_t>( update_ny_ + 2 * update_ng_ ) )
+        {
+            throw std::runtime_error( "Time-integrator state size differs from interior layout" );
+        }
+    }
+
+    // row (in) - interior row number; return its first full-field vector index.
+    std::size_t update_row_begin( int row ) const
+    {
+        return update_nx_ == 0 ? 0 : static_cast<std::size_t>( row + update_ng_ ) *
+            ( update_nx_ + 2 * update_ng_ ) + update_ng_;
+    }
+
     // Resize a reusable stage buffer when its current size differs from the requested size.
     //
     // buf (in/out) - reusable integration buffer whose size is adjusted

@@ -76,6 +76,10 @@ class Solver
 
     FaceBuffers2D faces_{};
 
+    // Current immutable-stage cell data; interiors are filled by validation, ghosts after apply_bc.
+    std::vector<EvaluatedState> stage_flow_;
+    std::vector<double> flux_send_, flux_receive_;
+
     BoundaryConditions2D bc_;
 
     Reconstruction2D recon_;
@@ -134,7 +138,7 @@ class Solver
     //
     // state (in) - conserved variables in the ghosted cell field
     // max_s (out, optional) - local maximum spectral rate for the same state
-    void validate_interior( const std::vector<Conservative_vector> &state, double *max_s = nullptr ) const;
+    void validate_interior( const std::vector<Conservative_vector> &state, double *max_s = nullptr );
 
     // Compute the CFL time step from the spectral rate collected during state validation.
     //
@@ -145,13 +149,15 @@ class Solver
     //
     // state (in) - conserved variables in the ghosted cell field
     // dt (in) - actual forward-Euler substep used by the positivity limiter
+    // ax, ay (in) - global wave-speed bounds for this same refreshed stage, ignored when positivity is off
     // rhs (out) - conservative residual on the ghosted cell layout
-    void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs, double dt );
+    void build_rhs( const std::vector<Conservative_vector> &state, std::vector<Conservative_vector> &rhs,
+        double dt, double ax, double ay );
 
     // Obtain global direction wave-speed bounds from the refreshed ghosted stage field.
     // state (in) - finite admissible cell averages including boundary ghosts
     // ax, ay (out) - global maximum |u|+c and |v|+c
-    void positivity_wave_speeds( const std::vector<Conservative_vector> &state, double &ax, double &ay ) const;
+    void positivity_wave_speeds( const std::vector<Conservative_vector> &state, double &ax, double &ay );
 
     // Exchange final interface fluxes: west/south cells own east/north faces.
     void synchronize_face_fluxes();

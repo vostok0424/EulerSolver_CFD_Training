@@ -290,10 +290,15 @@ ReturnCodes calc_flow_variables( const Conservative_vector &state, double gamma,
 
     double sound_speed = 0.0;
 
-    code = calc_sound_velocity( primitive, gamma, sound_speed );
-    if ( code != SUCCESS )
+    // Primitive recovery above already validated the gas and all primitive components.
+    try
     {
-        return code;
+        sound_speed = IdealGas::sound_speed( primitive.density, primitive.pressure, gamma );
+    }
+    
+    catch ( const std::runtime_error & )
+    {
+        return INVALID_SOUND_VELOCITY;
     }
 
     EvaluatedState evaluated{};

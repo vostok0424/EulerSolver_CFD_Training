@@ -57,10 +57,6 @@ enum ReturnCodes
     INVALID_THERMODYNAMIC_STATE,
     INVALID_WAVE_SPEED,
     INVALID_STAR_STATE,
-    VACUUM_STATE,
-    INVALID_PRESSURE_ESTIMATE,
-    INVALID_NEWTON_ITERATION,
-    PRESSURE_ITERATION_NOT_CONVERGED,
     INVALID_FLUX_SCHEME,
     // Configuration-reading failures; callers must not use partially filled parameters.
     PARAMETER_FILE_ERROR,

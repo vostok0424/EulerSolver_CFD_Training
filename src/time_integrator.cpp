@@ -17,14 +17,21 @@ std::string EulerIntegrator::name() const
 // rhs (in) - stage residual callback; may refresh stage ghost cells before writing the residual
 void EulerIntegrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
+    check_update_layout( state.size() );
     TimeIntegrator::ensure_size( r_, state.size() );
 
     // Evaluate the residual at the current state before the explicit update.
     rhs( state, dt, r_ );
 
-    for ( size_t i = 0; i < state.size(); ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        state[i] += dt * r_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            state[i] += dt * r_[i];
+        }
     }
 }
 
@@ -44,6 +51,7 @@ std::string RK2Integrator::name() const
 //
 void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
+    check_update_layout( state.size() );
     const size_t n = state.size();
     TimeIntegrator::ensure_size( u1_, n );
     TimeIntegrator::ensure_size( r_, n );
@@ -51,17 +59,29 @@ void RK2Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     // Evaluate the residual at the current state before the explicit update.
     rhs( state, dt, r_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        u1_[i] = state[i] + dt * r_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            u1_[i] = state[i] + dt * r_[i];
+        }
     }
 
     // Evaluate the next stage after its conservative state has been constructed.
     rhs( u1_, dt, r_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        state[i] = 0.5 * state[i] + 0.5 * ( u1_[i] + dt * r_[i] );
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            state[i] = 0.5 * state[i] + 0.5 * ( u1_[i] + dt * r_[i] );
+        }
     }
 }
 
@@ -81,6 +101,7 @@ std::string SSPRK3Integrator::name() const
 //
 void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
+    check_update_layout( state.size() );
     const size_t n = state.size();
     TimeIntegrator::ensure_size( u1_, n );
     TimeIntegrator::ensure_size( u2_, n );
@@ -89,25 +110,43 @@ void SSPRK3Integrator::step( std::vector<Conservative_vector> &state, double dt,
     // Evaluate the residual at the current state before the explicit update.
     rhs( state, dt, r_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        u1_[i] = state[i] + dt * r_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            u1_[i] = state[i] + dt * r_[i];
+        }
     }
 
     // Evaluate the next stage after its conservative state has been constructed.
     rhs( u1_, dt, r_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        u2_[i] = 0.75 * state[i] + 0.25 * ( u1_[i] + dt * r_[i] );
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            u2_[i] = 0.75 * state[i] + 0.25 * ( u1_[i] + dt * r_[i] );
+        }
     }
 
     // Evaluate the final SSPRK3 stage before combining it with the original state.
     rhs( u2_, dt, r_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        state[i] = ( 1.0 / 3.0 ) * state[i] + ( 2.0 / 3.0 ) * ( u2_[i] + dt * r_[i] );
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            state[i] = ( 1.0 / 3.0 ) * state[i] + ( 2.0 / 3.0 ) * ( u2_[i] + dt * r_[i] );
+        }
     }
 }
 
@@ -127,6 +166,7 @@ std::string RK4Integrator::name() const
 //
 void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, const RHSFunc &rhs )
 {
+    check_update_layout( state.size() );
     const size_t n = state.size();
     TimeIntegrator::ensure_size( u0_, n );
     TimeIntegrator::ensure_size( stage_state_, n );
@@ -135,39 +175,69 @@ void RK4Integrator::step( std::vector<Conservative_vector> &state, double dt, co
     TimeIntegrator::ensure_size( k3_, n );
     TimeIntegrator::ensure_size( k4_, n );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        u0_[i] = state[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            u0_[i] = state[i];
+        }
     }
 
     // Evaluate k1 at the initial state; k2 and k3 use half steps, and k4 uses a full step.
     rhs( state, dt, k1_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        stage_state_[i] = u0_[i] + 0.5 * dt * k1_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            stage_state_[i] = u0_[i] + 0.5 * dt * k1_[i];
+        }
     }
 
     rhs( stage_state_, dt, k2_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        stage_state_[i] = u0_[i] + 0.5 * dt * k2_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            stage_state_[i] = u0_[i] + 0.5 * dt * k2_[i];
+        }
     }
 
     rhs( stage_state_, dt, k3_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        stage_state_[i] = u0_[i] + dt * k3_[i];
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            stage_state_[i] = u0_[i] + dt * k3_[i];
+        }
     }
 
     rhs( stage_state_, dt, k4_ );
 
-    for ( size_t i = 0; i < n; ++i )
+    for ( int row = 0; row < update_ny_; ++row )
     {
-        // Combine the four stage derivatives with weights 1/6, 1/3, 1/3 and 1/6.
-        state[i] = u0_[i] + dt * ( k1_[i] + 2.0 * k2_[i] + 2.0 * k3_[i] + k4_[i] ) / 6.0;
+        const std::size_t begin = update_row_begin( row );
+        const std::size_t end = begin + ( update_nx_ == 0 ? state.size() : update_nx_ );
+        
+        for ( std::size_t i = begin; i < end; ++i )
+        {
+            // Combine the four stage derivatives with weights 1/6, 1/3, 1/3 and 1/6.
+            state[i] = u0_[i] + dt * ( k1_[i] + 2.0 * k2_[i] + 2.0 * k3_[i] + k4_[i] ) / 6.0;
+        }
     }
 }
 

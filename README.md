@@ -28,7 +28,7 @@ Each rank's local dimensions must be at least the ghost width `ng`.
 
 | Setting | Supported values |
 |---|---|
-| `flux` | `rusanov`, `hllc`, `ausm`, `godunov` |
+| `flux` | `rusanov`, `hllc` |
 | `timeIntegrator` | `euler`, `rk2`, `ssprk3`, `rk4` |
 | `reconstruction.scheme` | `firstOrder`, `muscl`, `wenoZ5` |
 | `reconstruction.limiter` | `none`, `minmod`, `vanLeer` |
@@ -52,8 +52,8 @@ SSPRK3 with a fixed CFL generally limits temporal convergence to third order.
 See [Borges et al. (2008)](https://doi.org/10.1016/j.jcp.2007.11.038).
 
 Time accuracy depends on the chosen integrator. `symmetry` uses slip-wall
-reflection; `internal` is reserved for MPI interfaces. Legacy flux names such as
-`godunovExact` and limiters `mc`/`superbee` are unsupported.
+reflection; `internal` is reserved for MPI interfaces. Limiters `mc`/`superbee`
+are unsupported.
 
 ## Case configuration
 
@@ -136,8 +136,8 @@ apply to classical RK4. Each stage checks its CFL and Rusanov auxiliary states;
 violations abort with diagnostics and require a smaller user-supplied CFL.
 Finite positive point states do not guarantee that every Riemann solver can
 solve every problem: HLLC can reject near-vacuum star states. Rusanov is useful
-for the double-rarefaction regression. The Godunov pressure iteration can reject otherwise
-admissible Riemann problems; failures are reported rather than repaired.
+for the double-rarefaction regression. Numerical flux failures are reported
+rather than repaired.
 
 ## Tests and performance
 
@@ -154,6 +154,16 @@ python3 test/compare_results.py --case '*/*/*/1_sod/*'
 Symmetry comparisons check directional consistency, not accuracy against an
 analytic solution. The benchmark measures complete process wall time, including
 MPI startup; it does not provide module timings or peak memory usage.
+
+Current-stage evaluated cell states are reused by positivity wave-speed checks,
+Rusanov baselines and point protection. Cached inputs require data evaluated
+from the exact same state and gas model; standalone APIs retain their input
+checks. The solver refreshes ghost data before evaluating its ghost cache.
+HLLC constructs only the star region selected by the contact-wave sign; invalid
+unused star regions no longer reject an otherwise usable selected flux.
+Configured time integrators update interior cells only; RHS callbacks must refresh
+all ghost cells before evaluating a stage. Unconfigured standalone integrators
+continue to update the full state vector. See [optimization regressions](tests/README.md).
 
 ## Architecture and coding conventions
 

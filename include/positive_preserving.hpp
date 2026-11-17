@@ -34,3 +34,14 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
 // Returns SUCCESS when the point is admissible. Does not modify cell averages.
 ReturnCodes limit_positive_point( const Conservative_vector &average, double gamma,
     double density_floor, double pressure_floor, Conservative_vector &point );
+
+
+// Cached overloads: left_flow/right_flow/flow (in) must describe the exact supplied source
+// averages with the same gamma, evaluated in the current immutable stage. Other parameters,
+// outputs and failure semantics are as above; auxiliary and reconstructed states remain checked.
+ReturnCodes limit_positive_flux( const Conservative_vector &left, const Conservative_vector &right,
+    const EvaluatedState &left_flow, const EvaluatedState &right_flow, const Flux_vector &low,
+    const Flux_vector &high, double factor, double gamma, double rho_floor, double p_floor,
+    Flux_vector &output, double &theta );
+ReturnCodes limit_positive_point( const Conservative_vector &average, const EvaluatedState &flow,
+    double gamma, double rho_floor, double p_floor, Conservative_vector &point );

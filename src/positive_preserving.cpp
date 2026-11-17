@@ -105,10 +105,10 @@ static double cutoff_factor( double baseline, double candidate, double floor )
 
 
 // Interface and admissibility contract are documented in positive_preserving.hpp.
-ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
+static ReturnCodes limit_positive_flux_impl( const Conservative_vector &left_average,
     const Conservative_vector &right_average, const Flux_vector &low_order_flux,
     const Flux_vector &high_order_flux, double update_factor, double gamma,
-    double density_floor, double pressure_floor, Flux_vector &limited_flux, double &theta )
+    double density_floor, double pressure_floor, Flux_vector &limited_flux, double &theta, const double *average_pressure )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
     {
@@ -124,10 +124,23 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
     {
         return NON_FINITE_FLUX;
     }
+    int average_side = 0;
     for ( const auto *state : { &left_average, &right_average } )
     {
         double pressure = 0.0;
-        const ReturnCodes code = detection_pressure( *state, gamma, pressure );
+        ReturnCodes code = SUCCESS;
+        if ( average_pressure == nullptr )
+        {
+            code = detection_pressure( *state, gamma, pressure );
+        }
+        else
+        {
+            pressure = average_pressure[average_side++];
+            if ( !is_finite_state( *state ) || !std::isfinite( pressure ) )
+            {
+                code = NON_FINITE_STATE;
+            }
+        }
         if ( code != SUCCESS )
         {
             return code;
@@ -176,7 +189,10 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
 
     const Flux_vector density_flux = blend_flux( low_order_flux, high_order_flux, density_theta );
     
-    auxiliary_states( left_average, right_average, density_flux, update_factor, candidate );
+    if ( density_theta != 1.0 )
+    {
+        auxiliary_states( left_average, right_average, density_flux, update_factor, candidate );
+    }
     
     double pressure_theta = 1.0;
     
@@ -191,6 +207,21 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
         }
         
         pressure_theta = std::min( pressure_theta, cutoff_factor( baseline_pressure[side], pressure, pressure_floor ) );
+    }
+
+    if ( pressure_theta == 1.0 )
+    {
+        // Candidate is the actual density-limited result, already pressure-checked above.
+        for ( const auto &state : candidate )
+        {
+            if ( state.specific_mass < density_floor )
+            {
+                return NEGATIVE_DENSITY;
+            }
+        }
+        limited_flux = density_flux;
+        theta = density_theta;
+        return SUCCESS;
     }
 
     const double final_theta = density_theta * pressure_theta;
@@ -225,8 +256,8 @@ ReturnCodes limit_positive_flux( const Conservative_vector &left_average,
 
 
 // Protect Riemann inputs before the flux limiter can be applied.
-ReturnCodes limit_positive_point( const Conservative_vector &average, double gamma,
-    double density_floor, double pressure_floor, Conservative_vector &point )
+static ReturnCodes limit_positive_point_impl( const Conservative_vector &average, double gamma,
+    double density_floor, double pressure_floor, Conservative_vector &point, const double *average_pressure )
 {
     if ( !std::isfinite( gamma ) || gamma <= 1.0 )
     {
@@ -238,7 +269,19 @@ ReturnCodes limit_positive_point( const Conservative_vector &average, double gam
         return INVALID_PARAMETER_VALUE;
     }
     double pressure = 0.0;
-    ReturnCodes code = detection_pressure( average, gamma, pressure );
+    ReturnCodes code = SUCCESS;
+    if ( average_pressure == nullptr )
+    {
+        code = detection_pressure( average, gamma, pressure );
+    }
+    else
+    {
+        pressure = *average_pressure;
+        if ( !is_finite_state( average ) || !std::isfinite( pressure ) )
+        {
+            code = NON_FINITE_STATE;
+        }
+    }
     if ( code != SUCCESS )
     {
         return code;
@@ -285,4 +328,39 @@ ReturnCodes limit_positive_point( const Conservative_vector &average, double gam
     }
     point = safe;
     return SUCCESS;
+}
+
+
+// Standalone calls validate the source averages independently.
+ReturnCodes limit_positive_flux( const Conservative_vector &left, const Conservative_vector &right,
+    const Flux_vector &low, const Flux_vector &high, double factor, double gamma,
+    double rho_floor, double p_floor, Flux_vector &output, double &theta )
+{
+    return limit_positive_flux_impl( left, right, low, high, factor, gamma, rho_floor, p_floor,
+        output, theta, nullptr );
+}
+
+
+ReturnCodes limit_positive_point( const Conservative_vector &average, double gamma,
+    double rho_floor, double p_floor, Conservative_vector &point )
+{
+    return limit_positive_point_impl( average, gamma, rho_floor, p_floor, point, nullptr );
+}
+
+
+ReturnCodes limit_positive_flux( const Conservative_vector &left, const Conservative_vector &right,
+    const EvaluatedState &left_flow, const EvaluatedState &right_flow, const Flux_vector &low,
+    const Flux_vector &high, double factor, double gamma, double rho_floor, double p_floor,
+    Flux_vector &output, double &theta )
+{
+    const double pressures[2] = { left_flow.pressure, right_flow.pressure };
+    return limit_positive_flux_impl( left, right, low, high, factor, gamma, rho_floor, p_floor,
+        output, theta, pressures );
+}
+
+
+ReturnCodes limit_positive_point( const Conservative_vector &average, const EvaluatedState &flow,
+    double gamma, double rho_floor, double p_floor, Conservative_vector &point )
+{
+    return limit_positive_point_impl( average, gamma, rho_floor, p_floor, point, &flow.pressure );
 }

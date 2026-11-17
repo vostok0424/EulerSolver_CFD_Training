@@ -358,6 +358,16 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
 
     const int n_cells = nx * ny;
 
+    std::vector<Primitive_vector> primitive_cells( static_cast<std::size_t>( n_cells ) );
+    for ( int j = 0; j < ny; ++j )
+    {
+        for ( int i = 0; i < nx; ++i )
+        {
+            require_success( calc_primitive_variables( field[idx( ng + i, ng + j )], gamma,
+                primitive_cells[i + nx * j] ), "cell output primitive state" );
+        }
+    }
+
     out << "CELL_DATA " << n_cells << "\n";
 
     out << "SCALARS rho double 1\n";
@@ -367,10 +377,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
     {
         for ( int i = 0; i < nx; ++i )
         {
-            const Conservative_vector &state = field[idx( ng + i, ng + j )];
-            Primitive_vector primitive{};
-
-            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            const auto &primitive = primitive_cells[i + nx * j];
             out << vtk_output_value( primitive.density ) << "\n";
         }
     }
@@ -381,10 +388,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
     {
         for ( int i = 0; i < nx; ++i )
         {
-            const Conservative_vector &state = field[idx( ng + i, ng + j )];
-            Primitive_vector primitive{};
-
-            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            const auto &primitive = primitive_cells[i + nx * j];
             out << vtk_output_value( primitive.x_velocity ) << ' ' << vtk_output_value( primitive.y_velocity )
                 << ' ' << 0.0 << "\n";
         }
@@ -397,10 +401,7 @@ void write_vtk_2d_cell_data( const std::string &filename, const std::vector<Cons
     {
         for ( int i = 0; i < nx; ++i )
         {
-            const Conservative_vector &state = field[idx( ng + i, ng + j )];
-            Primitive_vector primitive{};
-
-            require_success( calc_primitive_variables( state, gamma, primitive ), "calc_primitive_variables" );
+            const auto &primitive = primitive_cells[i + nx * j];
             out << vtk_output_value( primitive.pressure ) << "\n";
         }
     }
