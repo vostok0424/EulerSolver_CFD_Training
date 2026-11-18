@@ -12,3 +12,5 @@ solutions/
 *.zip
 solver
 /test/
+# VScode workspace
+*.code-workspace
